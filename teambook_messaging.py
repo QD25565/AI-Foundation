@@ -22,8 +22,9 @@ from collections import defaultdict
 import logging
 
 from teambook_shared import (
-    CURRENT_AI_ID, OUTPUT_FORMAT,
-    pipe_escape, format_time_compact, clean_text
+    CURRENT_AI_ID, CURRENT_TEAMBOOK, OUTPUT_FORMAT,
+    pipe_escape, format_time_compact, clean_text,
+    build_security_envelope, get_registered_human_identity
 )
 
 from teambook_storage import get_db_conn, log_operation_to_db
@@ -155,7 +156,12 @@ def init_messaging_tables(conn):
             created TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
             read BOOLEAN DEFAULT FALSE,
             expires_at TIMESTAMPTZ NOT NULL,
-            teambook_name VARCHAR(50)
+            summary TEXT,
+            reply_to INTEGER,
+            teambook_name VARCHAR(50),
+            signature VARCHAR(128),
+            security_envelope TEXT,
+            identity_hint TEXT
         )
     ''')
 
@@ -164,6 +170,20 @@ def init_messaging_tables(conn):
     conn.execute('CREATE INDEX IF NOT EXISTS idx_msg_to_ai ON messages(to_ai, read, created DESC)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_msg_expires ON messages(expires_at)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_msg_from_ai ON messages(from_ai, created DESC)')
+
+    columns = {col[1] for col in conn.execute("PRAGMA table_info(messages)").fetchall()}
+    if 'summary' not in columns:
+        conn.execute("ALTER TABLE messages ADD COLUMN summary TEXT")
+    if 'reply_to' not in columns:
+        conn.execute("ALTER TABLE messages ADD COLUMN reply_to INTEGER")
+    if 'teambook_name' not in columns:
+        conn.execute("ALTER TABLE messages ADD COLUMN teambook_name VARCHAR(50)")
+    if 'signature' not in columns:
+        conn.execute("ALTER TABLE messages ADD COLUMN signature VARCHAR(128)")
+    if 'security_envelope' not in columns:
+        conn.execute("ALTER TABLE messages ADD COLUMN security_envelope TEXT")
+    if 'identity_hint' not in columns:
+        conn.execute("ALTER TABLE messages ADD COLUMN identity_hint TEXT")
 
     conn.commit()
 
@@ -180,6 +200,25 @@ def cleanup_expired_messages(conn):
             logging.info(f"Cleaned up {deleted} expired messages")
     except Exception as e:
         logging.error(f"Message cleanup error: {e}")
+
+
+def _prepare_message_security(channel: str, content: str, to_ai: Optional[str], expires_at: datetime) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Generate signature, envelope, and identity hint for a message payload."""
+
+    payload = {
+        'ai_id': CURRENT_AI_ID,
+        'channel': channel,
+        'recipient': to_ai,
+        'content_hash': hashlib.sha3_256((content or '').encode('utf-8')).hexdigest(),
+        'expires_at': expires_at.isoformat(),
+        'teambook': CURRENT_TEAMBOOK,
+    }
+    envelope = build_security_envelope(payload, 'teambook.messaging.dispatch')
+    signature = envelope.get('signature') if envelope else None
+    envelope_json = json.dumps(envelope, sort_keys=True) if envelope else None
+    identity_hint = get_registered_human_identity(CURRENT_AI_ID)
+    identity_json = json.dumps(identity_hint, sort_keys=True) if identity_hint else None
+    return signature, envelope_json, identity_json
 
 # ============= CORE MESSAGING FUNCTIONS =============
 
@@ -211,15 +250,29 @@ def broadcast(content: str = None, channel: str = "general", ttl_hours: int = 24
             ttl_hours = 24
 
         expires_at = datetime.now(timezone.utc) + timedelta(hours=ttl_hours)
+        signature_value, envelope_json, identity_json = _prepare_message_security(channel, content, None, expires_at)
 
         with get_db_conn() as conn:
             init_messaging_tables(conn)
 
             cursor = conn.execute('''
-                INSERT INTO messages (channel, from_ai, content, created, expires_at)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO messages (
+                    channel, from_ai, content, created, expires_at,
+                    teambook_name, signature, security_envelope, identity_hint
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 RETURNING id
-            ''', [channel, CURRENT_AI_ID, content, datetime.now(timezone.utc), expires_at])
+            ''', [
+                channel,
+                CURRENT_AI_ID,
+                content,
+                datetime.now(timezone.utc),
+                expires_at,
+                CURRENT_TEAMBOOK,
+                signature_value,
+                envelope_json,
+                identity_json,
+            ])
 
             msg_id = cursor.fetchone()[0]
 
@@ -301,15 +354,30 @@ def direct_message(to_ai: str = None, content: str = None, ttl_hours: int = 24, 
             ttl_hours = 24
 
         expires_at = datetime.now(timezone.utc) + timedelta(hours=ttl_hours)
+        signature_value, envelope_json, identity_json = _prepare_message_security('_dm', content, to_ai, expires_at)
 
         with get_db_conn() as conn:
             init_messaging_tables(conn)
 
             cursor = conn.execute('''
-                INSERT INTO messages (channel, from_ai, to_ai, content, created, expires_at)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO messages (
+                    channel, from_ai, to_ai, content, created, expires_at,
+                    teambook_name, signature, security_envelope, identity_hint
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 RETURNING id
-            ''', ['_dm', CURRENT_AI_ID, to_ai, content, datetime.now(timezone.utc), expires_at])
+            ''', [
+                '_dm',
+                CURRENT_AI_ID,
+                to_ai,
+                content,
+                datetime.now(timezone.utc),
+                expires_at,
+                CURRENT_TEAMBOOK,
+                signature_value,
+                envelope_json,
+                identity_json,
+            ])
 
             msg_id = cursor.fetchone()[0]
 
@@ -739,9 +807,19 @@ def send_message(
         with get_db_conn() as conn:
             init_messaging_tables(conn)
 
+            signature_value, envelope_json, identity_json = _prepare_message_security(
+                '_dm' if is_dm else channel,
+                content,
+                to if is_dm else None,
+                expires_at,
+            )
+
             cursor = conn.execute('''
-                INSERT INTO messages (channel, from_ai, to_ai, content, summary, reply_to, created, expires_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO messages (
+                    channel, from_ai, to_ai, content, summary, reply_to, created, expires_at,
+                    teambook_name, signature, security_envelope, identity_hint
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 RETURNING id
             ''', [
                 '_dm' if is_dm else channel,
@@ -751,7 +829,11 @@ def send_message(
                 summary,
                 reply_to,
                 datetime.now(timezone.utc),
-                expires_at
+                expires_at,
+                CURRENT_TEAMBOOK,
+                signature_value,
+                envelope_json,
+                identity_json,
             ])
 
             msg_id = cursor.fetchone()[0]

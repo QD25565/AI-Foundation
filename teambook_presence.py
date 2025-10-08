@@ -40,6 +40,9 @@ class AIPresence:
     last_seen: datetime
     status_message: Optional[str] = None
     teambook_name: Optional[str] = None
+    signature: Optional[str] = None
+    security_envelope: Optional[Dict[str, Any]] = None
+    identity_hint: Optional[Dict[str, Any]] = None
 
     def minutes_ago(self) -> int:
         """Calculate minutes since last seen"""
@@ -68,7 +71,10 @@ def init_presence_tables(conn):
             last_operation VARCHAR(50),
             last_operation_category VARCHAR(30) DEFAULT 'general',
             status_message VARCHAR(200),
-            updated TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            updated TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            signature VARCHAR(128),
+            security_envelope TEXT,
+            identity_hint TEXT
         )
     ''')
 
@@ -206,6 +212,63 @@ def _derive_operation_category(operation: Optional[str], override: Optional[str]
 
 
 # ============= PRESENCE QUERIES =============
+
+def _normalize_last_seen_value(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        return datetime.fromisoformat(value)
+    raise TypeError(f"Unsupported last_seen value: {value!r}")
+
+
+def _determine_status_from_last_seen(last_seen: datetime) -> PresenceStatus:
+    minutes_ago = (datetime.now(timezone.utc) - last_seen).total_seconds() / 60
+    if minutes_ago < 2:
+        return PresenceStatus.ONLINE
+    if minutes_ago < 15:
+        return PresenceStatus.AWAY
+    return PresenceStatus.OFFLINE
+
+
+def _presence_from_row(row: Tuple) -> AIPresence:
+    ai_id = row[0]
+    last_seen = _normalize_last_seen_value(row[1])
+    status_message = row[2]
+    teambook_name = row[3]
+    last_operation = row[4]
+    last_operation_category = row[5] or DEFAULT_OPERATION_CATEGORY
+    signature = row[6]
+    security_json = row[7]
+    identity_json = row[8]
+
+    security_envelope = None
+    if security_json:
+        try:
+            security_envelope = json.loads(security_json)
+        except json.JSONDecodeError:
+            security_envelope = None
+
+    identity_hint = None
+    if identity_json:
+        try:
+            identity_hint = json.loads(identity_json)
+        except json.JSONDecodeError:
+            identity_hint = None
+
+    presence = AIPresence(
+        ai_id=ai_id,
+        status=_determine_status_from_last_seen(last_seen),
+        last_seen=last_seen,
+        status_message=status_message,
+        teambook_name=teambook_name,
+        signature=signature,
+        security_envelope=security_envelope,
+        identity_hint=identity_hint,
+    )
+    setattr(presence, 'last_operation', last_operation)
+    setattr(presence, 'last_operation_category', last_operation_category)
+    return presence
+
 
 def get_presence(ai_id: str, teambook_name: str = None) -> Optional[AIPresence]:
     """
@@ -364,21 +427,29 @@ def get_all_presence(
 
             presences = []
             for row in results:
-                last_seen = row[1]
-                if isinstance(last_seen, str):
-                    last_seen = datetime.fromisoformat(last_seen)
-
-                minutes_ago = (datetime.now(timezone.utc) - last_seen).total_seconds() / 60
-
-                if minutes_ago < 2:
-                    status = PresenceStatus.ONLINE
-                elif minutes_ago < 15:
-                    status = PresenceStatus.AWAY
-                else:
-                    status = PresenceStatus.OFFLINE
-
-                if not include_offline and status == PresenceStatus.OFFLINE:
+                presence = _presence_from_row(row)
+                if not include_offline and presence.status == PresenceStatus.OFFLINE:
                     continue
+                presences.append(presence)
+
+            return presences
+
+    except Exception as e:
+        import logging
+        logging.debug(f"Get all presence failed: {e}")
+        return []
+
+
+def get_presence_overview(
+    teambook_name: str = None,
+    limit: int = 50
+) -> List[Dict[str, Any]]:
+    """Return structured presence records for observability snapshots."""
+    teambook_name = teambook_name or CURRENT_TEAMBOOK
+
+    try:
+        with get_db_conn() as conn:
+            init_presence_tables(conn)
 
                 presence = AIPresence(
                     ai_id=row[0],
@@ -391,11 +462,61 @@ def get_all_presence(
                 setattr(presence, 'last_operation_category', row[5] or DEFAULT_OPERATION_CATEGORY)
                 presences.append(presence)
 
-            return presences
+            rows = conn.execute(query, [teambook_name, teambook_name, limit]).fetchall()
+
+        overview = []
+        now = datetime.now(timezone.utc)
+        for row in rows:
+            last_seen = row[1]
+            if isinstance(last_seen, str):
+                last_seen = datetime.fromisoformat(last_seen)
+
+            minutes_ago = int((now - last_seen).total_seconds() // 60)
+            if minutes_ago < 2:
+                status = PresenceStatus.ONLINE.value
+            elif minutes_ago < 15:
+                status = PresenceStatus.AWAY.value
+            else:
+                status = PresenceStatus.OFFLINE.value
+
+            security_payload = None
+            if row[7]:
+                try:
+                    security_payload = json.loads(row[7])
+                except json.JSONDecodeError:
+                    security_payload = None
+
+            identity_hint = None
+            if row[8]:
+                try:
+                    identity_hint = json.loads(row[8])
+                except json.JSONDecodeError:
+                    identity_hint = None
+
+            overview.append({
+                'ai_id': row[0],
+                'status': status,
+                'last_seen': last_seen.isoformat(),
+                'minutes_since_active': minutes_ago,
+                'status_message': row[2],
+                'teambook': row[3],
+                'last_operation': row[4],
+                'operation_category': row[5] or DEFAULT_OPERATION_CATEGORY,
+                'presence_signature': row[6] or build_presence_signature({
+                    'ai_id': row[0],
+                    'last_seen': last_seen,
+                    'teambook': row[3],
+                    'category': row[5] or DEFAULT_OPERATION_CATEGORY
+                }),
+                'security_envelope': security_payload,
+                'identity_hint': identity_hint,
+            })
+
+        return overview
 
     except Exception as e:
         import logging
-        logging.debug(f"Get all presence failed: {e}")
+        logging.debug(f"Presence overview failed: {e}")
         return []
 
 

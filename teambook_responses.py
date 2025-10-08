@@ -185,15 +185,20 @@ def read_notes_response(
 
 def format_presence_response(presence: AIPresence) -> Dict[str, Any]:
     """Format AIPresence object as structured data"""
-    return {
+    response = {
         "ai_id": presence.ai_id,
         "status": presence.status.value,
         "status_indicator": presence.status_indicator(),
         "last_seen": presence.last_seen.isoformat() if isinstance(presence.last_seen, datetime) else presence.last_seen,
         "minutes_ago": presence.minutes_ago(),
         "status_message": presence.status_message,
-        "teambook": presence.teambook_name
+        "teambook": presence.teambook_name,
+        "signature": presence.signature,
+        "security": presence.security_envelope,
+        "identity_hint": presence.identity_hint,
     }
+
+    return response
 
 
 def who_is_here_response(

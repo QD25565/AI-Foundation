@@ -24,10 +24,11 @@ sys.path.insert(0, str(Path(__file__).parent))
 from teambook_shared import (
     CURRENT_TEAMBOOK, CURRENT_AI_ID, OUTPUT_FORMAT,
     MAX_CONTENT_LENGTH, MAX_SUMMARY_LENGTH, DEFAULT_RECENT,
-    TEAMBOOK_ROOT, TEAMBOOK_PRIVATE_ROOT,
+    TEAMBOOK_ROOT, TEAMBOOK_PRIVATE_ROOT, get_default_teambook_name,
     pipe_escape, clean_text, simple_summary, format_time_compact,
     parse_time_query, save_last_operation, get_last_operation,
     get_note_id, get_outputs_dir, logging, IS_CLI,
+    attach_security_envelope, ensure_directory,
     # Linear Memory Bridge
     CACHE_AVAILABLE, _save_note_to_cache, load_my_notes_cache
 )
@@ -332,38 +333,10 @@ def list_teambooks(**kwargs) -> Dict:
         logging.error(f"Error listing teambooks: {e}")
         return f"!list_failed:{str(e)[:50]}"
 
-def _get_computer_id() -> str:
-    """Get a stable computer identifier for Town Hall teambook name"""
-    import socket
-    import platform
-    import os
-
-    # Use hostname as primary identifier
-    hostname = socket.gethostname().lower()
-    # Sanitize for teambook name
-    hostname = re.sub(r'[^a-z0-9_-]', '-', hostname)
-
-    # If hostname is generic, add platform info
-    if hostname in ['localhost', 'desktop', 'laptop', 'pc']:
-        system = platform.system().lower()
-        hostname = f"{hostname}-{system}"
-
-    return hostname
-
-def _get_town_hall_name() -> str:
+def _get_town_hall_name(scope: Optional[str] = None) -> str:
     """Get the appropriate Town Hall teambook name based on configuration"""
-    import os
 
-    # Check for scope override in environment
-    scope = os.environ.get('TOWN_HALL_SCOPE', 'computer').lower()
-
-    if scope == 'universal':
-        # Universal town-hall for cross-computer collaboration
-        return "town-hall"
-    else:
-        # Computer-specific town-hall (default)
-        computer_id = _get_computer_id()
-        return f"town-hall-{computer_id}"
+    return get_default_teambook_name(scope)
 
 def _ensure_town_hall() -> str:
     """
@@ -379,35 +352,39 @@ def _ensure_town_hall() -> str:
     try:
         town_hall_name = _get_town_hall_name()
         team_dir = TEAMBOOK_ROOT / town_hall_name
+        is_new_space = not team_dir.exists()
+        ensure_directory(team_dir, fallback=TEAMBOOK_PRIVATE_ROOT / town_hall_name, label=f'teambook:{town_hall_name}')
 
-        # Check if town-hall exists
-        if not team_dir.exists():
-            # Create it
+        if is_new_space:
             result = create_teambook(name=town_hall_name)
             if result.startswith("!"):
                 logging.warning(f"Failed to create {town_hall_name}: {result}")
                 return None
             logging.info(f"✨ Created {town_hall_name} teambook for autonomous discovery")
 
-            # Add welcome message
             import teambook_shared
             old_teambook = teambook_shared.CURRENT_TEAMBOOK
             teambook_shared.CURRENT_TEAMBOOK = town_hall_name
 
             try:
-                with _get_db_conn() as conn:
-                    now = datetime.now(timezone.utc)
-                    scope = "this computer" if "-" in town_hall_name else "all computers"
-                    conn.execute('''
-                        INSERT INTO notes (id, content, summary, tags, author, created, pinned)
-                        VALUES (1, ?, ?, ?, ?, ?, TRUE)
-                    ''', [
-                        f"# Welcome to Town Hall!\n\nThis is the default collaboration space for AI instances on {scope}.\n\nAll AI instances automatically connect here on first run for seamless collaboration.\n\nYou can create and switch to other teambooks as needed using:\n- `teambook create_teambook --name \"project-name\"`\n- `teambook use_teambook --name \"project-name\"`",
-                        f"Town Hall welcome message",
-                        ['welcome', 'town-hall'],
-                        'system',
-                        now
-                    ])
+                scope_label = "this device" if "-" in town_hall_name else "all connected nodes"
+                welcome_content = (
+                    "# Welcome to Town Hall!\n\n"
+                    "This is the default collaboration space for AI instances on "
+                    f"{scope_label}.\n\n"
+                    "All AIs automatically connect here on first run for seamless "
+                    "coordination.\n\nYou can create and switch to other teambooks as "
+                    "needed using:\n- `teambook create_teambook --name \"project-name\"`\n"
+                    "- `teambook use_teambook --name \"project-name\"`"
+                )
+                metadata_seed = {'bootstrap': True, 'scope': scope_label}
+                write(
+                    content=welcome_content,
+                    summary="Town Hall welcome message",
+                    tags=['welcome', 'town-hall'],
+                    metadata=metadata_seed,
+                    owner='system'
+                )
             finally:
                 teambook_shared.CURRENT_TEAMBOOK = old_teambook
 
@@ -1112,6 +1089,32 @@ def write(content: str = None, summary: str = None, tags: List[str] = None,
         MAX_TAGS = 20
         if len(tags) > MAX_TAGS:
             tags = tags[:MAX_TAGS]
+
+        # Normalize linked items to a list for consistent metadata hashing
+        if isinstance(linked_items, list):
+            linked_items_list = linked_items
+        elif linked_items:
+            linked_items_list = [linked_items]
+        else:
+            linked_items_list = []
+        linked_items = linked_items_list
+
+        owner_hint = CURRENT_AI_ID if owner_override == 'default' else owner_override
+        metadata_payload = attach_security_envelope(
+            metadata_payload,
+            {
+                'ai_id': CURRENT_AI_ID,
+                'teambook': CURRENT_TEAMBOOK,
+                'content': content,
+                'summary': summary,
+                'tags': tags,
+                'linked_items': linked_items,
+                'note_type': note_type,
+                'owner': owner_hint,
+                'representation_policy': representation_policy,
+            },
+            purpose='teambook.note.write'
+        )
 
         # Use storage adapter if available, otherwise fall back to DuckDB
         adapter = _get_storage_adapter(CURRENT_TEAMBOOK)

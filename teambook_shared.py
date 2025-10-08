@@ -18,19 +18,204 @@ import logging
 import hashlib
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Dict, Any, Tuple, List
+from typing import Optional, Dict, Any, Tuple, List, Mapping, Callable
 
 # Import from shared MCP utilities
-import sys
-from pathlib import Path
-# Add parent directory to path to find mcp_shared in src/
-sys.path.insert(0, str(Path(__file__).parent.parent))
+PARENT_DIR = Path(__file__).parent.parent
+if str(PARENT_DIR) not in sys.path:
+    sys.path.insert(0, str(PARENT_DIR))
 
 from mcp_shared import (
     BASE_DATA_DIR, CURRENT_AI_ID as MCP_AI_ID,
     pipe_escape, format_time_compact, get_tool_data_dir,
     normalize_param
 )
+
+# ============= ENTERPRISE CONFIGURATION =============
+_ENTERPRISE_CONFIG_PATH: Optional[Path] = None
+_ENTERPRISE_CONFIG: Dict[str, Any] = {}
+_AI_SIGNATURE_SECRET: Optional[bytes] = None
+
+
+def attempt_with_grace(feature_name: str, action: Callable[[], Any], fallback: Any = None) -> Any:
+    """Execute an action and fall back gracefully on failure."""
+
+    try:
+        return action()
+    except Exception as exc:
+        logging.warning(f"{feature_name} unavailable: {exc}. Falling back to safe defaults.")
+        return fallback
+
+
+@contextmanager
+def graceful_degradation(feature_name: str):
+    """Context manager for optional features that should never crash callers."""
+
+    try:
+        yield
+    except Exception as exc:
+        logging.warning(f"{feature_name} degraded: {exc}")
+
+
+def _discover_config_path() -> Optional[Path]:
+    """Locate the enterprise configuration file if present."""
+
+    env_path = os.environ.get('TEAMBOOK_CONFIG_PATH')
+    candidates: List[Path] = []
+
+    if env_path:
+        candidates.append(Path(env_path).expanduser())
+
+    repo_candidate = PARENT_DIR / "teambook.enterprise.json"
+    candidates.append(repo_candidate)
+    candidates.append(Path.cwd() / "teambook.enterprise.json")
+    candidates.append(BASE_DATA_DIR / "teambook.enterprise.json")
+    candidates.append(Path.home() / ".config" / "teambook" / "teambook.enterprise.json")
+
+    for candidate in candidates:
+        if candidate and candidate.is_file():
+            return candidate
+
+    return None
+
+
+def _load_config_file(path: Path) -> Dict[str, Any]:
+    """Load enterprise configuration data from disk."""
+
+    if path.suffix.lower() != '.json':
+        raise ValueError(f"Unsupported config format: {path.suffix}. Expected JSON.")
+
+    with path.open('r', encoding='utf-8') as handle:
+        return json.load(handle)
+
+
+def load_enterprise_config(refresh: bool = False) -> Dict[str, Any]:
+    """Load and cache enterprise configuration with graceful fallback."""
+
+    global _ENTERPRISE_CONFIG, _ENTERPRISE_CONFIG_PATH
+
+    if not refresh and _ENTERPRISE_CONFIG:
+        return _ENTERPRISE_CONFIG
+
+    _ENTERPRISE_CONFIG_PATH = attempt_with_grace(
+        "config_discovery",
+        _discover_config_path
+    )
+
+    if not _ENTERPRISE_CONFIG_PATH:
+        _ENTERPRISE_CONFIG = {}
+        return _ENTERPRISE_CONFIG
+
+    _ENTERPRISE_CONFIG = attempt_with_grace(
+        f"config_load:{_ENTERPRISE_CONFIG_PATH}",
+        lambda: _load_config_file(_ENTERPRISE_CONFIG_PATH),
+        {}
+    ) or {}
+
+    return _ENTERPRISE_CONFIG
+
+
+def get_enterprise_setting(path: str, default: Any = None) -> Any:
+    """Retrieve nested configuration values using dot-separated paths."""
+
+    config = load_enterprise_config()
+    current: Any = config
+
+    for part in path.split('.'):
+        if not isinstance(current, dict) or part not in current:
+            return default
+        current = current[part]
+
+    return current
+
+
+def ensure_directory(path: Path, fallback: Optional[Path] = None, label: str = "data") -> Path:
+    """Create a directory with graceful fallback to temp storage."""
+
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+    except Exception as exc:
+        logging.warning(f"Unable to prepare {label} directory at {path}: {exc}")
+        if fallback:
+            try:
+                fallback.mkdir(parents=True, exist_ok=True)
+                return fallback
+            except Exception as fallback_exc:
+                logging.warning(f"Fallback {label} directory failed at {fallback}: {fallback_exc}")
+
+        temp_dir = Path(tempfile.gettempdir()) / "teambook"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        return temp_dir
+
+
+def safe_write_text(path: Path, data: str) -> None:
+    """Write text to disk without raising fatal errors."""
+
+    def _write() -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(data, encoding='utf-8')
+
+    attempt_with_grace(f"write:{path}", _write, None)
+
+
+def safe_read_text(path: Path) -> Optional[str]:
+    """Read text from disk with graceful fallback."""
+
+    if not path.exists():
+        return None
+
+    return attempt_with_grace(
+        f"read:{path}",
+        lambda: path.read_text(encoding='utf-8'),
+        None
+    )
+
+
+def _slugify_token(token: str) -> str:
+    """Normalize tokens for use in teambook identifiers."""
+
+    cleaned = re.sub(r'[^a-zA-Z0-9_-]', '-', token.strip())
+    cleaned = re.sub(r'-{2,}', '-', cleaned)
+    return cleaned.lower().strip('-') or 'node'
+
+
+def get_hostname_token() -> str:
+    """Derive a deterministic hostname token."""
+
+    import socket
+    import platform
+
+    hostname = _slugify_token(socket.gethostname())
+
+    if hostname in {'localhost', 'desktop', 'laptop', 'pc'}:
+        system = _slugify_token(platform.system())
+        hostname = f"{hostname}-{system}" if system else f"{hostname}-sys"
+
+    return hostname or 'node'
+
+
+def get_default_teambook_name(scope: Optional[str] = None) -> str:
+    """Compute the default teambook name honoring enterprise configuration."""
+
+    configured = get_enterprise_setting('defaults.teambook')
+    if configured:
+        return str(configured)
+
+    scope_override = scope or os.environ.get('TOWN_HALL_SCOPE') or get_enterprise_setting('defaults.town_hall.scope', 'computer')
+    scope_normalized = str(scope_override or 'computer').lower()
+
+    if scope_normalized == 'universal':
+        return get_enterprise_setting('defaults.town_hall.name', 'town-hall')
+
+    if scope_normalized == 'ai':
+        return f"town-hall-{_slugify_token(CURRENT_AI_ID or 'ai')}"
+
+    base_name = get_enterprise_setting('defaults.town_hall.name')
+    if base_name:
+        return str(base_name)
+
+    return f"town-hall-{get_hostname_token()}"
 
 # ============= VERSION AND CONFIGURATION =============
 VERSION = "1.0.0"
@@ -114,25 +299,33 @@ PAGERANK_CACHE_TIME = 0
 # ============= CROSS-PLATFORM DIRECTORY STRUCTURE =============
 # CENTRAL SHARED TEAMBOOK LOCATION
 # All instances connect to the SAME network location
-TEAMBOOK_ROOT_ENV = os.environ.get('TEAMBOOK_ROOT', None)
-if TEAMBOOK_ROOT_ENV:
-    TEAMBOOK_ROOT = Path(TEAMBOOK_ROOT_ENV)
-else:
-    # DEFAULT: Local user directory
-    # For multi-instance coordination, set TEAMBOOK_ROOT environment variable to a shared location
-    TEAMBOOK_ROOT = Path.home() / ".teambook"
-TEAMBOOK_PRIVATE_ROOT = TEAMBOOK_ROOT / "_private"
+_TEAMBOOK_ROOT_SETTING = os.environ.get(
+    'TEAMBOOK_ROOT',
+    get_enterprise_setting('paths.root', str(Path.home() / '.teambook'))
+)
+TEAMBOOK_ROOT = ensure_directory(Path(str(_TEAMBOOK_ROOT_SETTING)).expanduser(), label='teambook_root')
 
-# Create root directories
-TEAMBOOK_ROOT.mkdir(parents=True, exist_ok=True)
-TEAMBOOK_PRIVATE_ROOT.mkdir(parents=True, exist_ok=True)
+_TEAMBOOK_PRIVATE_SETTING = get_enterprise_setting('paths.private_root')
+_TEAMBOOK_PRIVATE_CANDIDATE = (
+    Path(str(_TEAMBOOK_PRIVATE_SETTING)).expanduser()
+    if _TEAMBOOK_PRIVATE_SETTING
+    else TEAMBOOK_ROOT / '_private'
+)
+TEAMBOOK_PRIVATE_ROOT = ensure_directory(
+    _TEAMBOOK_PRIVATE_CANDIDATE,
+    fallback=TEAMBOOK_ROOT / '_private',
+    label='teambook_private_root'
+)
 
 # ============= PATH MANAGEMENT =============
 def get_data_dir():
     """Get current data directory based on teambook context"""
     if CURRENT_TEAMBOOK:
-        team_dir = TEAMBOOK_ROOT / CURRENT_TEAMBOOK
-        team_dir.mkdir(parents=True, exist_ok=True)
+        team_dir = ensure_directory(
+            TEAMBOOK_ROOT / CURRENT_TEAMBOOK,
+            fallback=TEAMBOOK_PRIVATE_ROOT / CURRENT_TEAMBOOK,
+            label=f'teambook:{CURRENT_TEAMBOOK}'
+        )
         return team_dir
     return TEAMBOOK_PRIVATE_ROOT
 
@@ -142,35 +335,237 @@ def get_db_file():
 
 def get_outputs_dir():
     """Get outputs directory for evolution results"""
-    outputs = get_data_dir() / "outputs"
-    outputs.mkdir(parents=True, exist_ok=True)
+    outputs = ensure_directory(get_data_dir() / "outputs", label='outputs')
     return outputs
 
 def set_current_teambook(name):
     """Set and persist the current active teambook"""
     global CURRENT_TEAMBOOK
-    CURRENT_TEAMBOOK = name
+    normalized = str(name).strip() if name else None
+    CURRENT_TEAMBOOK = normalized
     # Save to file so it persists across commands
     context_file = TEAMBOOK_ROOT / ".current_teambook"
-    context_file.write_text(name)
+    if normalized:
+        safe_write_text(context_file, normalized)
+    else:
+        def _remove():
+            if context_file.exists():
+                context_file.unlink()
+
+        attempt_with_grace('clear_current_teambook', _remove, None)
 
 def load_current_teambook():
     """Load persisted teambook context from file"""
     global CURRENT_TEAMBOOK
     context_file = TEAMBOOK_ROOT / ".current_teambook"
-    if context_file.exists():
-        persisted = context_file.read_text().strip()
-        if persisted and not CURRENT_TEAMBOOK:  # Only load if not already set by env var
-            CURRENT_TEAMBOOK = persisted
+    persisted = safe_read_text(context_file)
+    if persisted and not CURRENT_TEAMBOOK:
+        CURRENT_TEAMBOOK = persisted.strip()
+
+    if not CURRENT_TEAMBOOK:
+        default_teambook = get_default_teambook_name()
+        CURRENT_TEAMBOOK = default_teambook
+        safe_write_text(context_file, default_teambook)
+
+
+# ============= SECURITY & SIGNATURES =============
+def _get_ai_signature_path(ai_id: Optional[str] = None) -> Path:
+    """Return the file path storing the AI signature secret."""
+
+    token = _slugify_token(ai_id or CURRENT_AI_ID or 'ai')
+    return TEAMBOOK_PRIVATE_ROOT / f"{token}.signing"
+
+
+def _apply_secure_permissions(path: Path) -> None:
+    """Apply restrictive permissions to sensitive files when possible."""
+
+    if os.name == 'posix':
+        attempt_with_grace('chmod_signature_secret', lambda: os.chmod(path, 0o600), None)
+
+
+def get_ai_signature_secret(force_refresh: bool = False) -> Optional[bytes]:
+    """Load or generate the per-AI signature secret."""
+
+    global _AI_SIGNATURE_SECRET
+
+    if _AI_SIGNATURE_SECRET is not None and not force_refresh:
+        return _AI_SIGNATURE_SECRET
+
+    secret_path = _get_ai_signature_path()
+
+    def _read_secret() -> Optional[bytes]:
+        if not secret_path.exists():
+            return None
+        encoded = secret_path.read_text(encoding='utf-8').strip()
+        return base64.b64decode(encoded.encode('utf-8')) if encoded else None
+
+    secret = attempt_with_grace('signature_secret_read', _read_secret, None)
+
+    if not secret:
+        secret = secrets.token_bytes(32)
+
+        def _write_secret() -> None:
+            secret_path.parent.mkdir(parents=True, exist_ok=True)
+            secret_path.write_text(base64.b64encode(secret).decode('utf-8'), encoding='utf-8')
+            _apply_secure_permissions(secret_path)
+
+        attempt_with_grace('signature_secret_write', _write_secret, None)
+
+    _AI_SIGNATURE_SECRET = secret
+    return _AI_SIGNATURE_SECRET
+
+
+def _serialize_payload(payload_fields: Mapping[str, Any]) -> str:
+    """Serialize payload deterministically for hashing/signing."""
+
+    def _default(obj: Any) -> Any:
+        if isinstance(obj, (datetime, timedelta)):
+            base = obj
+            if isinstance(obj, timedelta):
+                base = datetime(1970, 1, 1, tzinfo=timezone.utc) + obj
+            return base.isoformat()
+        if isinstance(obj, Path):
+            return str(obj)
+        return obj
+
+    return json.dumps(payload_fields, default=_default, sort_keys=True, separators=(',', ':'))
+
+
+def build_security_envelope(payload_fields: Mapping[str, Any], purpose: str) -> Dict[str, Any]:
+    """Create a signed envelope describing a payload."""
+
+    issued_at = datetime.now(timezone.utc)
+    serialized = _serialize_payload(payload_fields)
+    payload_hash = hashlib.sha3_256(serialized.encode('utf-8')).hexdigest()
+    secret = get_ai_signature_secret()
+
+    envelope = {
+        'ai_id': CURRENT_AI_ID,
+        'purpose': purpose,
+        'issued_at': issued_at.isoformat(),
+        'payload_hash': payload_hash,
+        'status': 'unsigned'
+    }
+
+    if secret:
+        signature_payload = json.dumps({
+            'ai_id': envelope['ai_id'],
+            'purpose': envelope['purpose'],
+            'issued_at': envelope['issued_at'],
+            'payload_hash': envelope['payload_hash']
+        }, sort_keys=True, separators=(',', ':'))
+        envelope['signature'] = hmac.new(secret, signature_payload.encode('utf-8'), hashlib.sha3_256).hexdigest()
+        envelope['status'] = 'signed'
+
+    return envelope
+
+
+def verify_security_envelope(payload_fields: Mapping[str, Any], envelope: Dict[str, Any]) -> bool:
+    """Verify that the provided envelope matches the payload."""
+
+    if not envelope or envelope.get('status') != 'signed':
+        return False
+
+    expected_hash = hashlib.sha3_256(_serialize_payload(payload_fields).encode('utf-8')).hexdigest()
+    if envelope.get('payload_hash') != expected_hash:
+        return False
+
+    secret = get_ai_signature_secret()
+    if not secret:
+        return False
+
+    signature_payload = json.dumps({
+        'ai_id': envelope.get('ai_id'),
+        'purpose': envelope.get('purpose'),
+        'issued_at': envelope.get('issued_at'),
+        'payload_hash': envelope.get('payload_hash')
+    }, sort_keys=True, separators=(',', ':'))
+
+    expected_signature = hmac.new(secret, signature_payload.encode('utf-8'), hashlib.sha3_256).hexdigest()
+    provided_signature = envelope.get('signature')
+    return isinstance(provided_signature, str) and hmac.compare_digest(expected_signature, provided_signature)
+
+
+def ensure_metadata_dict(metadata: Any) -> Dict[str, Any]:
+    """Normalize metadata payloads to a dictionary structure."""
+
+    if metadata is None:
+        return {}
+
+    if isinstance(metadata, dict):
+        return dict(metadata)
+
+    if isinstance(metadata, list):
+        return {'items': metadata}
+
+    if isinstance(metadata, str):
+        stripped = metadata.strip()
+        if not stripped:
+            return {}
+        try:
+            parsed = json.loads(stripped)
+            if isinstance(parsed, dict):
+                return parsed
+            if isinstance(parsed, list):
+                return {'items': parsed}
+        except json.JSONDecodeError:
+            pass
+        return {'value': stripped}
+
+    return {'value': metadata}
+
+
+def attach_security_envelope(metadata: Any, payload_fields: Mapping[str, Any], purpose: str) -> Dict[str, Any]:
+    """Merge security envelope information into metadata."""
+
+    metadata_dict = ensure_metadata_dict(metadata)
+    envelope = metadata_dict.get('security')
+
+    if not isinstance(envelope, dict) or 'payload_hash' not in envelope:
+        metadata_dict['security'] = build_security_envelope(payload_fields, purpose)
     else:
-        # Default to town-hall-qd if no teambook set
-        if not CURRENT_TEAMBOOK:
-            CURRENT_TEAMBOOK = "town-hall-qd"
-            # Create the file so all instances use same default
-            try:
-                context_file.write_text("town-hall-qd")
-            except:
-                pass
+        metadata_dict['security'] = build_security_envelope(payload_fields, purpose)
+
+    identity_hint = metadata_dict.get('identity_hint')
+    if identity_hint is None:
+        human_identity = get_registered_human_identity()
+        if human_identity:
+            metadata_dict['identity_hint'] = human_identity
+
+    return metadata_dict
+
+
+def get_registered_human_identity(ai_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Return configured human identity hints for hybrid collaboration."""
+
+    candidate_keys = []
+    ai_token = _slugify_token(ai_id or CURRENT_AI_ID or 'ai')
+    if ai_token:
+        candidate_keys.append(f'humans.{ai_token}')
+    candidate_keys.append('humans.default')
+
+    identity_data: Optional[Dict[str, Any]] = None
+    for key in candidate_keys:
+        value = get_enterprise_setting(key)
+        if isinstance(value, dict):
+            identity_data = value
+            break
+
+    if not identity_data:
+        env_phone = os.environ.get('HUMAN_PHONE')
+        env_email = os.environ.get('HUMAN_EMAIL')
+        env_handle = os.environ.get('HUMAN_CONTACT')
+        identity_data = {
+            'phone': env_phone,
+            'email': env_email,
+            'handle': env_handle
+        }
+
+    if not identity_data:
+        return None
+
+    cleaned = {k: v for k, v in identity_data.items() if isinstance(v, str) and v.strip()}
+    return cleaned or None
 
 def get_vault_key_file():
     """Get vault key file path"""
