@@ -12,6 +12,7 @@ import sys
 import json
 import re
 import time
+from collections import Counter
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional, Any
@@ -23,13 +24,23 @@ sys.path.insert(0, str(Path(__file__).parent))
 from teambook_shared import (
     CURRENT_TEAMBOOK, CURRENT_AI_ID, OUTPUT_FORMAT,
     MAX_CONTENT_LENGTH, MAX_SUMMARY_LENGTH, DEFAULT_RECENT,
-    TEAMBOOK_ROOT, TEAMBOOK_PRIVATE_ROOT,
+    TEAMBOOK_ROOT, TEAMBOOK_PRIVATE_ROOT, get_default_teambook_name,
     pipe_escape, clean_text, simple_summary, format_time_compact,
     parse_time_query, save_last_operation, get_last_operation,
     get_note_id, get_outputs_dir, logging, IS_CLI,
+    attach_security_envelope, ensure_directory,
     # Linear Memory Bridge
     CACHE_AVAILABLE, _save_note_to_cache, load_my_notes_cache
 )
+
+from teambook_presence import (
+    presence_snapshot,
+    get_presence_overview,
+    summarize_presence_categories
+)
+from teambook_coordination import get_coordination_backend, init_coordination_tables
+from teambook_events import init_events_tables
+from teambook_federation import teambook_federation_bridge
 
 # Import storage layer
 import teambook_storage
@@ -322,38 +333,10 @@ def list_teambooks(**kwargs) -> Dict:
         logging.error(f"Error listing teambooks: {e}")
         return f"!list_failed:{str(e)[:50]}"
 
-def _get_computer_id() -> str:
-    """Get a stable computer identifier for Town Hall teambook name"""
-    import socket
-    import platform
-    import os
-
-    # Use hostname as primary identifier
-    hostname = socket.gethostname().lower()
-    # Sanitize for teambook name
-    hostname = re.sub(r'[^a-z0-9_-]', '-', hostname)
-
-    # If hostname is generic, add platform info
-    if hostname in ['localhost', 'desktop', 'laptop', 'pc']:
-        system = platform.system().lower()
-        hostname = f"{hostname}-{system}"
-
-    return hostname
-
-def _get_town_hall_name() -> str:
+def _get_town_hall_name(scope: Optional[str] = None) -> str:
     """Get the appropriate Town Hall teambook name based on configuration"""
-    import os
 
-    # Check for scope override in environment
-    scope = os.environ.get('TOWN_HALL_SCOPE', 'computer').lower()
-
-    if scope == 'universal':
-        # Universal town-hall for cross-computer collaboration
-        return "town-hall"
-    else:
-        # Computer-specific town-hall (default)
-        computer_id = _get_computer_id()
-        return f"town-hall-{computer_id}"
+    return get_default_teambook_name(scope)
 
 def _ensure_town_hall() -> str:
     """
@@ -369,35 +352,39 @@ def _ensure_town_hall() -> str:
     try:
         town_hall_name = _get_town_hall_name()
         team_dir = TEAMBOOK_ROOT / town_hall_name
+        is_new_space = not team_dir.exists()
+        ensure_directory(team_dir, fallback=TEAMBOOK_PRIVATE_ROOT / town_hall_name, label=f'teambook:{town_hall_name}')
 
-        # Check if town-hall exists
-        if not team_dir.exists():
-            # Create it
+        if is_new_space:
             result = create_teambook(name=town_hall_name)
             if result.startswith("!"):
                 logging.warning(f"Failed to create {town_hall_name}: {result}")
                 return None
             logging.info(f"✨ Created {town_hall_name} teambook for autonomous discovery")
 
-            # Add welcome message
             import teambook_shared
             old_teambook = teambook_shared.CURRENT_TEAMBOOK
             teambook_shared.CURRENT_TEAMBOOK = town_hall_name
 
             try:
-                with _get_db_conn() as conn:
-                    now = datetime.now(timezone.utc)
-                    scope = "this computer" if "-" in town_hall_name else "all computers"
-                    conn.execute('''
-                        INSERT INTO notes (id, content, summary, tags, author, created, pinned)
-                        VALUES (1, ?, ?, ?, ?, ?, TRUE)
-                    ''', [
-                        f"# Welcome to Town Hall!\n\nThis is the default collaboration space for AI instances on {scope}.\n\nAll AI instances automatically connect here on first run for seamless collaboration.\n\nYou can create and switch to other teambooks as needed using:\n- `teambook create_teambook --name \"project-name\"`\n- `teambook use_teambook --name \"project-name\"`",
-                        f"Town Hall welcome message",
-                        ['welcome', 'town-hall'],
-                        'system',
-                        now
-                    ])
+                scope_label = "this device" if "-" in town_hall_name else "all connected nodes"
+                welcome_content = (
+                    "# Welcome to Town Hall!\n\n"
+                    "This is the default collaboration space for AI instances on "
+                    f"{scope_label}.\n\n"
+                    "All AIs automatically connect here on first run for seamless "
+                    "coordination.\n\nYou can create and switch to other teambooks as "
+                    "needed using:\n- `teambook create_teambook --name \"project-name\"`\n"
+                    "- `teambook use_teambook --name \"project-name\"`"
+                )
+                metadata_seed = {'bootstrap': True, 'scope': scope_label}
+                write(
+                    content=welcome_content,
+                    summary="Town Hall welcome message",
+                    tags=['welcome', 'town-hall'],
+                    metadata=metadata_seed,
+                    owner='system'
+                )
             finally:
                 teambook_shared.CURRENT_TEAMBOOK = old_teambook
 
@@ -1076,6 +1063,8 @@ def write(content: str = None, summary: str = None, tags: List[str] = None,
         note_type = kwargs.get('type', None)
         parent_id = kwargs.get('parent_id', None)
         owner_override = kwargs.get('owner', 'default')  # 'default' means use CURRENT_AI_ID
+        representation_policy = (kwargs.get('representation_policy') or 'default').strip().lower()
+        metadata_payload = kwargs.get('metadata')
         # Normalize tags parameter - convert string 'null' to None for forgiving tool calls
         tags = normalize_param(tags)
         linked_items = normalize_param(linked_items)
@@ -1101,6 +1090,32 @@ def write(content: str = None, summary: str = None, tags: List[str] = None,
         if len(tags) > MAX_TAGS:
             tags = tags[:MAX_TAGS]
 
+        # Normalize linked items to a list for consistent metadata hashing
+        if isinstance(linked_items, list):
+            linked_items_list = linked_items
+        elif linked_items:
+            linked_items_list = [linked_items]
+        else:
+            linked_items_list = []
+        linked_items = linked_items_list
+
+        owner_hint = CURRENT_AI_ID if owner_override == 'default' else owner_override
+        metadata_payload = attach_security_envelope(
+            metadata_payload,
+            {
+                'ai_id': CURRENT_AI_ID,
+                'teambook': CURRENT_TEAMBOOK,
+                'content': content,
+                'summary': summary,
+                'tags': tags,
+                'linked_items': linked_items,
+                'note_type': note_type,
+                'owner': owner_hint,
+                'representation_policy': representation_policy,
+            },
+            purpose='teambook.note.write'
+        )
+
         # Use storage adapter if available, otherwise fall back to DuckDB
         adapter = _get_storage_adapter(CURRENT_TEAMBOOK)
 
@@ -1112,7 +1127,11 @@ def write(content: str = None, summary: str = None, tags: List[str] = None,
                 tags=tags,
                 pinned=False,
                 linked_items=json.dumps(linked_items) if linked_items else None,
-                owner=None  # Will use CURRENT_AI_ID in backend
+                owner=None,  # Will use CURRENT_AI_ID in backend
+                note_type=note_type,
+                parent_id=parent_id,
+                representation_policy=representation_policy,
+                metadata=metadata_payload
             )
         else:
             # Fallback to direct DuckDB
@@ -1128,17 +1147,53 @@ def write(content: str = None, summary: str = None, tags: List[str] = None,
                 else:
                     final_owner = owner_override
 
+                stored_content, compressed_payload = teambook_storage._prepare_content_for_storage(content, representation_policy)
+                stored_summary = summary
+                if summary and teambook_storage.COMPRESSION_AVAILABLE and teambook_storage._should_compress(representation_policy):
+                    stored_summary = teambook_storage.compress_content(summary)
+
+                normalized_metadata = json.dumps(metadata_payload) if isinstance(metadata_payload, (dict, list)) else metadata_payload
+
+                tamper_hash = teambook_storage.compute_note_tamper_hash({
+                    'content': content,
+                    'summary': summary,
+                    'tags': tags,
+                    'pinned': False,
+                    'owner': final_owner,
+                    'teambook_name': CURRENT_TEAMBOOK,
+                    'linked_items': json.dumps(linked_items) if linked_items else None,
+                    'representation_policy': representation_policy,
+                    'metadata': normalized_metadata,
+                    'type': note_type,
+                    'parent_id': parent_id,
+                })
+
                 conn.execute('''
                     INSERT INTO notes (
-                        id, content, summary, tags, pinned, author, owner,
-                        teambook_name, created, session_id, linked_items,
-                        pagerank, has_vector, type, parent_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        id, content, content_compressed, summary, tags, pinned, author, owner,
+                        teambook_name, type, parent_id, created, session_id, linked_items,
+                        representation_policy, pagerank, has_vector, metadata, tamper_hash
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', [
-                    note_id, content, summary, tags, False, CURRENT_AI_ID, final_owner,
-                    CURRENT_TEAMBOOK, datetime.now(timezone.utc), None,
+                    note_id,
+                    stored_content,
+                    compressed_payload,
+                    stored_summary,
+                    tags,
+                    False,
+                    CURRENT_AI_ID,
+                    final_owner,
+                    CURRENT_TEAMBOOK,
+                    note_type,
+                    parent_id,
+                    datetime.now(timezone.utc),
+                    None,
                     json.dumps(linked_items) if linked_items else None,
-                    0.0, bool(collection), note_type, parent_id
+                    representation_policy,
+                    0.0,
+                    bool(collection),
+                    normalized_metadata,
+                    tamper_hash
                 ])
 
                 session_id = _detect_or_create_session(note_id, datetime.now(timezone.utc), conn)
@@ -2047,6 +2102,352 @@ def what_are_they_doing(ai_id: str = None, limit: int = 10, **kwargs) -> Dict:
     except Exception as e:
         logging.error(f"Error in what_are_they_doing: {e}")
         return "!error:failed"
+
+
+def teambook_observability_snapshot(
+    limit: int = 25,
+    include_events: bool = True,
+    include_presence: bool = True,
+    include_tasks: bool = True,
+    **kwargs
+) -> str:
+    """Aggregate presence, queue, and event observability into a single snapshot."""
+    try:
+        limit = int(kwargs.get('limit', limit or 25))
+    except Exception:
+        limit = 25
+
+    snapshot: Dict[str, Any] = {
+        'teambook': CURRENT_TEAMBOOK or 'private',
+        'generated_at': datetime.now(timezone.utc).isoformat()
+    }
+
+    if include_presence:
+        snapshot['presence'] = presence_snapshot(limit=limit)
+
+    if include_tasks:
+        try:
+            backend_type, get_conn = get_coordination_backend()
+            with get_conn() as conn:
+                init_coordination_tables(conn)
+
+                stats = conn.execute(
+                    '''
+                    SELECT
+                        COUNT(*) as total,
+                        COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending,
+                        COUNT(CASE WHEN status = 'claimed' THEN 1 END) as claimed,
+                        COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed
+                    FROM task_queue
+                    WHERE (? IS NULL OR teambook_name = ? OR teambook_name IS NULL)
+                    ''',
+                    [CURRENT_TEAMBOOK, CURRENT_TEAMBOOK]
+                ).fetchone()
+
+                priority_rows = conn.execute(
+                    '''
+                    SELECT priority, COUNT(*)
+                    FROM task_queue
+                    WHERE status = 'pending'
+                      AND (? IS NULL OR teambook_name = ? OR teambook_name IS NULL)
+                    GROUP BY priority
+                    ORDER BY priority DESC
+                    LIMIT ?
+                    ''',
+                    [CURRENT_TEAMBOOK, CURRENT_TEAMBOOK, limit]
+                ).fetchall()
+
+            snapshot['tasks'] = {
+                'backend': backend_type,
+                'total': stats[0] if stats else 0,
+                'pending': stats[1] if stats else 0,
+                'claimed': stats[2] if stats else 0,
+                'completed': stats[3] if stats else 0,
+                'priority_hotspots': {str(row[0]): row[1] for row in priority_rows}
+            }
+        except Exception as exc:
+            logging.debug(f"Task snapshot failed: {exc}")
+            snapshot['tasks'] = {'error': 'unavailable'}
+
+    if include_events:
+        try:
+            with _get_db_conn() as conn:
+                init_events_tables(conn)
+
+                unseen = conn.execute(
+                    '''
+                    SELECT COUNT(*)
+                    FROM event_deliveries d
+                    JOIN events e ON e.id = d.event_id
+                    WHERE d.seen = FALSE
+                      AND (? IS NULL OR e.teambook_name = ? OR e.teambook_name IS NULL)
+                    ''',
+                    [CURRENT_TEAMBOOK, CURRENT_TEAMBOOK]
+                ).fetchone()[0]
+
+                recent_rows = conn.execute(
+                    '''
+                    SELECT item_type, event_type, actor_ai_id, created_at
+                    FROM events
+                    WHERE (? IS NULL OR teambook_name = ? OR teambook_name IS NULL)
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    ''',
+                    [CURRENT_TEAMBOOK, CURRENT_TEAMBOOK, limit]
+                ).fetchall()
+
+                watcher_rows = conn.execute(
+                    '''
+                    SELECT item_type, COUNT(*), MAX(last_activity)
+                    FROM watches
+                    WHERE (? IS NULL OR teambook_name = ? OR teambook_name IS NULL)
+                    GROUP BY item_type
+                    ORDER BY MAX(last_activity) DESC
+                    LIMIT ?
+                    ''',
+                    [CURRENT_TEAMBOOK, CURRENT_TEAMBOOK, limit]
+                ).fetchall()
+
+            snapshot['events'] = {
+                'unseen': unseen,
+                'recent': [
+                    {
+                        'item_type': row[0],
+                        'event_type': row[1],
+                        'actor': row[2],
+                        'created_at': row[3].isoformat() if hasattr(row[3], 'isoformat') else str(row[3])
+                    }
+                    for row in recent_rows
+                ],
+                'active_watches': [
+                    {
+                        'item_type': row[0],
+                        'watchers': row[1],
+                        'last_activity': row[2].isoformat() if row[2] else None
+                    }
+                    for row in watcher_rows
+                ]
+            }
+        except Exception as exc:
+            logging.debug(f"Event snapshot failed: {exc}")
+            snapshot['events'] = {'error': 'unavailable'}
+
+    try:
+        return json.dumps(snapshot, default=str)
+    except TypeError:
+        lines = [f"teambook:{snapshot['teambook']}"]
+        if 'presence' in snapshot:
+            breakdown = snapshot['presence'].get('status_breakdown', {})
+            if breakdown:
+                lines.append('presence|' + '|'.join(f"{k}:{v}" for k, v in breakdown.items() if v))
+        if 'tasks' in snapshot and isinstance(snapshot['tasks'], dict) and 'error' not in snapshot['tasks']:
+            tasks = snapshot['tasks']
+            lines.append(
+                f"tasks|total:{tasks.get('total', 0)}|pending:{tasks.get('pending', 0)}|claimed:{tasks.get('claimed', 0)}|completed:{tasks.get('completed', 0)}"
+            )
+        if 'events' in snapshot and isinstance(snapshot['events'], dict) and 'unseen' in snapshot['events']:
+            lines.append(f"events|unseen:{snapshot['events'].get('unseen', 0)}")
+        return '\n'.join(lines)
+
+
+def ai_collective_progress_report(limit: int = 25, **kwargs) -> str:
+    """Compose queue, event, and presence stats for AI teams."""
+    try:
+        limit = int(kwargs.get('limit', limit or 25))
+    except Exception:
+        limit = 25
+
+    presence_records = get_presence_overview(limit=limit)
+    status_counts = Counter(record.get('status', '').lower() for record in presence_records)
+    category_summary = summarize_presence_categories(presence_records) if presence_records else {}
+
+    try:
+        backend_type, get_conn = get_coordination_backend()
+        with get_conn() as conn:
+            init_coordination_tables(conn)
+
+            stats = conn.execute(
+                '''
+                SELECT
+                    COUNT(*) as total,
+                    COUNT(CASE WHEN status = 'pending' THEN 1 END) as pending,
+                    COUNT(CASE WHEN status = 'claimed' THEN 1 END) as claimed,
+                    COUNT(CASE WHEN status = 'completed' THEN 1 END) as completed
+                FROM task_queue
+                WHERE (? IS NULL OR teambook_name = ? OR teambook_name IS NULL)
+                ''',
+                [CURRENT_TEAMBOOK, CURRENT_TEAMBOOK]
+            ).fetchone()
+
+            backlog = conn.execute(
+                '''
+                SELECT priority, COUNT(*)
+                FROM task_queue
+                WHERE status = 'pending'
+                  AND (? IS NULL OR teambook_name = ? OR teambook_name IS NULL)
+                GROUP BY priority
+                ORDER BY priority DESC
+                LIMIT ?
+                ''',
+                [CURRENT_TEAMBOOK, CURRENT_TEAMBOOK, limit]
+            ).fetchall()
+
+            claimer_rows = conn.execute(
+                '''
+                SELECT claimed_by, COUNT(*)
+                FROM task_queue
+                WHERE status = 'claimed' AND claimed_by IS NOT NULL
+                  AND (? IS NULL OR teambook_name = ? OR teambook_name IS NULL)
+                GROUP BY claimed_by
+                ORDER BY COUNT(*) DESC
+                LIMIT ?
+                ''',
+                [CURRENT_TEAMBOOK, CURRENT_TEAMBOOK, limit]
+            ).fetchall()
+
+        tasks_line = f"tasks|total:{stats[0] if stats else 0}|pending:{stats[1] if stats else 0}|claimed:{stats[2] if stats else 0}|completed:{stats[3] if stats else 0}"
+        backlog_line = ""
+        if backlog:
+            backlog_line = "tasks_hot|" + ','.join(f"p{row[0]}:{row[1]}" for row in backlog)
+        claimer_line = ""
+        if claimer_rows:
+            claimer_line = "tasks_claimed|" + ','.join(f"{row[0]}:{row[1]}" for row in claimer_rows)
+    except Exception as exc:
+        logging.debug(f"Progress report task stats failed: {exc}")
+        tasks_line = "tasks|error"
+        backlog_line = ""
+        claimer_line = ""
+
+    try:
+        with _get_db_conn() as conn:
+            init_events_tables(conn)
+
+            unseen = conn.execute(
+                '''
+                SELECT COUNT(*)
+                FROM event_deliveries d
+                JOIN events e ON e.id = d.event_id
+                WHERE d.seen = FALSE
+                  AND (? IS NULL OR e.teambook_name = ? OR e.teambook_name IS NULL)
+                ''',
+                [CURRENT_TEAMBOOK, CURRENT_TEAMBOOK]
+            ).fetchone()[0]
+
+            recent = conn.execute(
+                '''
+                SELECT event_type
+                FROM events
+                WHERE (? IS NULL OR teambook_name = ? OR teambook_name IS NULL)
+                ORDER BY created_at DESC
+                LIMIT ?
+                ''',
+                [CURRENT_TEAMBOOK, CURRENT_TEAMBOOK, limit]
+            ).fetchall()
+
+        event_counter = Counter(row[0] for row in recent if row and row[0])
+        events_line = f"events|unseen:{unseen}|recent:" + ','.join(f"{etype}:{count}" for etype, count in event_counter.most_common(5))
+    except Exception as exc:
+        logging.debug(f"Progress report event stats failed: {exc}")
+        events_line = "events|error"
+
+    presence_line = "presence|" + '|'.join([
+        f"online:{status_counts.get('online', 0)}",
+        f"away:{status_counts.get('away', 0)}",
+        f"offline:{status_counts.get('offline', 0)}",
+        f"coordination:{category_summary.get('coordination', 0) if category_summary else 0}"
+    ])
+
+    lines = [
+        f"teambook:{CURRENT_TEAMBOOK or 'private'}",
+        tasks_line,
+        backlog_line,
+        claimer_line,
+        events_line,
+        presence_line
+    ]
+
+    # Filter out empty lines
+    return '\n'.join(line for line in lines if line)
+
+
+def teambook_vector_graph_diagnostics(limit: int = 5, include_samples: bool = True, **kwargs) -> str:
+    """Surface graph connectivity diagnostics for semantic notes."""
+    try:
+        limit = int(kwargs.get('limit', limit or 5))
+    except Exception:
+        limit = 5
+
+    with _get_db_conn() as conn:
+        node_rows = conn.execute(
+            'SELECT id FROM notes WHERE (? IS NULL OR teambook_name = ? OR teambook_name IS NULL)',
+            [CURRENT_TEAMBOOK, CURRENT_TEAMBOOK]
+        ).fetchall()
+        edge_rows = conn.execute('SELECT from_id, to_id FROM edges').fetchall()
+
+    node_ids = {row[0] for row in node_rows}
+    if not node_ids:
+        diagnostics = {
+            'teambook': CURRENT_TEAMBOOK or 'private',
+            'total_nodes': 0,
+            'total_edges': 0,
+            'disconnected_notes': 0,
+            'clusters': []
+        }
+        return json.dumps(diagnostics)
+
+    adjacency: Dict[int, set] = {node: set() for node in node_ids}
+    edge_pairs = set()
+    for from_id, to_id in edge_rows:
+        if from_id in node_ids and to_id in node_ids:
+            adjacency[from_id].add(to_id)
+            adjacency[to_id].add(from_id)
+            edge_pairs.add(tuple(sorted((from_id, to_id))))
+
+    visited = set()
+    components: List[List[int]] = []
+    for node in node_ids:
+        if node in visited:
+            continue
+        stack = [node]
+        component = []
+        while stack:
+            current = stack.pop()
+            if current in visited:
+                continue
+            visited.add(current)
+            component.append(current)
+            stack.extend(adjacency[current] - visited)
+        components.append(component)
+
+    edge_lookup = edge_pairs
+    clusters = []
+    for component in sorted(components, key=len):
+        if len(clusters) >= limit:
+            break
+        subset = set(component)
+        edge_count = sum(1 for edge in edge_lookup if edge[0] in subset and edge[1] in subset)
+        possible_edges = max(1, len(component) * (len(component) - 1) / 2)
+        density = round(edge_count / possible_edges, 3)
+        cluster_info = {
+            'size': len(component),
+            'edge_count': edge_count,
+            'edge_density': density
+        }
+        if include_samples:
+            cluster_info['sample_nodes'] = component[:min(3, len(component))]
+        clusters.append(cluster_info)
+
+    disconnected = sum(1 for comp in components if len(comp) == 1 and not adjacency[comp[0]])
+
+    diagnostics = {
+        'teambook': CURRENT_TEAMBOOK or 'private',
+        'total_nodes': len(node_ids),
+        'total_edges': len(edge_pairs),
+        'disconnected_notes': disconnected,
+        'clusters': clusters
+    }
+
+    return json.dumps(diagnostics, default=str)
 
 def watch(note_id: Any = None, **kwargs) -> Dict:
     """

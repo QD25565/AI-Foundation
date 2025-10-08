@@ -14,13 +14,21 @@ Built by AIs, for AIs.
 """
 
 import time
+import json
+import hashlib
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
 from enum import Enum
 
 from teambook_storage import get_db_conn
-from teambook_shared import CURRENT_AI_ID, CURRENT_TEAMBOOK
+from teambook_shared import (
+    CURRENT_AI_ID,
+    CURRENT_TEAMBOOK,
+    get_federation_secret,
+    build_security_envelope,
+    get_registered_human_identity,
+)
 
 
 class PresenceStatus(Enum):
@@ -38,6 +46,9 @@ class AIPresence:
     last_seen: datetime
     status_message: Optional[str] = None
     teambook_name: Optional[str] = None
+    signature: Optional[str] = None
+    security_envelope: Optional[Dict[str, Any]] = None
+    identity_hint: Optional[Dict[str, Any]] = None
 
     def minutes_ago(self) -> int:
         """Calculate minutes since last seen"""
@@ -64,8 +75,12 @@ def init_presence_tables(conn):
             teambook_name VARCHAR(50),
             last_seen TIMESTAMPTZ NOT NULL,
             last_operation VARCHAR(50),
+            last_operation_category VARCHAR(30) DEFAULT 'general',
             status_message VARCHAR(200),
-            updated TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+            updated TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            signature VARCHAR(128),
+            security_envelope TEXT,
+            identity_hint TEXT
         )
     ''')
 
@@ -80,12 +95,25 @@ def init_presence_tables(conn):
         ON ai_presence(teambook_name, last_seen DESC)
     ''')
 
+    # Backfill operation category for existing deployments
+    cursor = conn.execute("PRAGMA table_info(ai_presence)").fetchall()
+    columns = {col[1] for col in cursor}
+    if 'last_operation_category' not in columns:
+        conn.execute("ALTER TABLE ai_presence ADD COLUMN last_operation_category VARCHAR(30) DEFAULT 'general'")
+    if 'signature' not in columns:
+        conn.execute("ALTER TABLE ai_presence ADD COLUMN signature VARCHAR(128)")
+    if 'security_envelope' not in columns:
+        conn.execute("ALTER TABLE ai_presence ADD COLUMN security_envelope TEXT")
+    if 'identity_hint' not in columns:
+        conn.execute("ALTER TABLE ai_presence ADD COLUMN identity_hint TEXT")
+
 
 # ============= PRESENCE UPDATES =============
 
 def update_presence(
     ai_id: str = None,
     operation: str = None,
+    operation_category: str = None,
     status_message: str = None,
     teambook_name: str = None
 ):
@@ -111,21 +139,60 @@ def update_presence(
 
             now = datetime.now(timezone.utc)
 
+            category = _derive_operation_category(operation, operation_category)
+            normalized_operation = _normalize_operation_name(operation)
+
+            payload = {
+                'ai_id': ai_id,
+                'teambook': teambook_name,
+                'operation': normalized_operation,
+                'category': category,
+                'status_message': status_message,
+                'timestamp': now.isoformat(),
+            }
+            envelope = build_security_envelope(payload, 'teambook.presence.update')
+            envelope_json = json.dumps(envelope, sort_keys=True) if envelope else None
+            signature_value = envelope.get('signature') if envelope else None
+            identity_hint = get_registered_human_identity(ai_id)
+            identity_hint_json = json.dumps(identity_hint, sort_keys=True) if identity_hint else None
+
             # Upsert presence record
             conn.execute('''
-                INSERT INTO ai_presence (ai_id, teambook_name, last_seen, last_operation, status_message, updated)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO ai_presence (
+                    ai_id, teambook_name, last_seen, last_operation, last_operation_category,
+                    status_message, updated, signature, security_envelope, identity_hint
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (ai_id) DO UPDATE SET
                     teambook_name = EXCLUDED.teambook_name,
                     last_seen = EXCLUDED.last_seen,
                     last_operation = EXCLUDED.last_operation,
+                    last_operation_category = EXCLUDED.last_operation_category,
                     status_message = CASE
                         WHEN EXCLUDED.status_message IS NOT NULL
                         THEN EXCLUDED.status_message
                         ELSE ai_presence.status_message
                     END,
-                    updated = EXCLUDED.updated
-            ''', [ai_id, teambook_name, now, operation, status_message, now])
+                    updated = EXCLUDED.updated,
+                    signature = EXCLUDED.signature,
+                    security_envelope = EXCLUDED.security_envelope,
+                    identity_hint = CASE
+                        WHEN EXCLUDED.identity_hint IS NOT NULL
+                        THEN EXCLUDED.identity_hint
+                        ELSE ai_presence.identity_hint
+                    END
+            ''', [
+                ai_id,
+                teambook_name,
+                now,
+                normalized_operation,
+                category,
+                status_message,
+                now,
+                signature_value,
+                envelope_json,
+                identity_hint_json,
+            ])
 
     except Exception as e:
         # Presence tracking is non-critical - don't break operations if it fails
@@ -161,7 +228,94 @@ def clear_status(ai_id: str = None):
     )
 
 
+def _normalize_operation_name(operation: Optional[str]) -> Optional[str]:
+    if not operation:
+        return None
+    return str(operation).strip().lower()[:50]
+
+
+def _derive_operation_category(operation: Optional[str], override: Optional[str]) -> str:
+    if override:
+        candidate = str(override).strip().lower()
+        if candidate in VALID_OPERATION_CATEGORIES:
+            return candidate
+
+    op = _normalize_operation_name(operation) or ""
+
+    if any(op.startswith(prefix) for prefix in ["claim", "queue", "lock", "release", "assign"]):
+        return "coordination"
+    if any(op.startswith(prefix) for prefix in ["write", "read", "notebook", "memory", "note"]):
+        return "memory"
+    if any(op.startswith(prefix) for prefix in ["broadcast", "message", "event", "watch"]):
+        return "messaging"
+    if any(op.startswith(prefix) for prefix in ["store", "vault", "persist", "edge", "vector"]):
+        return "storage"
+    if any(op.startswith(prefix) for prefix in ["federation", "bridge", "sync"]):
+        return "federation"
+    if any(op.startswith(prefix) for prefix in ["observe", "monitor", "snapshot"]):
+        return "observability"
+
+    return DEFAULT_OPERATION_CATEGORY
+
+
 # ============= PRESENCE QUERIES =============
+
+def _normalize_last_seen_value(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        return datetime.fromisoformat(value)
+    raise TypeError(f"Unsupported last_seen value: {value!r}")
+
+
+def _determine_status_from_last_seen(last_seen: datetime) -> PresenceStatus:
+    minutes_ago = (datetime.now(timezone.utc) - last_seen).total_seconds() / 60
+    if minutes_ago < 2:
+        return PresenceStatus.ONLINE
+    if minutes_ago < 15:
+        return PresenceStatus.AWAY
+    return PresenceStatus.OFFLINE
+
+
+def _presence_from_row(row: Tuple) -> AIPresence:
+    ai_id = row[0]
+    last_seen = _normalize_last_seen_value(row[1])
+    status_message = row[2]
+    teambook_name = row[3]
+    last_operation = row[4]
+    last_operation_category = row[5] or DEFAULT_OPERATION_CATEGORY
+    signature = row[6]
+    security_json = row[7]
+    identity_json = row[8]
+
+    security_envelope = None
+    if security_json:
+        try:
+            security_envelope = json.loads(security_json)
+        except json.JSONDecodeError:
+            security_envelope = None
+
+    identity_hint = None
+    if identity_json:
+        try:
+            identity_hint = json.loads(identity_json)
+        except json.JSONDecodeError:
+            identity_hint = None
+
+    presence = AIPresence(
+        ai_id=ai_id,
+        status=_determine_status_from_last_seen(last_seen),
+        last_seen=last_seen,
+        status_message=status_message,
+        teambook_name=teambook_name,
+        signature=signature,
+        security_envelope=security_envelope,
+        identity_hint=identity_hint,
+    )
+    setattr(presence, 'last_operation', last_operation)
+    setattr(presence, 'last_operation_category', last_operation_category)
+    return presence
+
 
 def get_presence(ai_id: str, teambook_name: str = None) -> Optional[AIPresence]:
     """
@@ -176,7 +330,9 @@ def get_presence(ai_id: str, teambook_name: str = None) -> Optional[AIPresence]:
             init_presence_tables(conn)
 
             result = conn.execute('''
-                SELECT ai_id, last_seen, status_message, teambook_name
+                SELECT ai_id, last_seen, status_message, teambook_name,
+                       last_operation, last_operation_category, signature,
+                       security_envelope, identity_hint
                 FROM ai_presence
                 WHERE ai_id = ?
             ''', [ai_id]).fetchone()
@@ -184,27 +340,7 @@ def get_presence(ai_id: str, teambook_name: str = None) -> Optional[AIPresence]:
             if not result:
                 return None
 
-            last_seen = result[1]
-            if isinstance(last_seen, str):
-                last_seen = datetime.fromisoformat(last_seen)
-
-            # Calculate status based on last_seen
-            minutes_ago = (datetime.now(timezone.utc) - last_seen).total_seconds() / 60
-
-            if minutes_ago < 2:
-                status = PresenceStatus.ONLINE
-            elif minutes_ago < 15:
-                status = PresenceStatus.AWAY
-            else:
-                status = PresenceStatus.OFFLINE
-
-            return AIPresence(
-                ai_id=result[0],
-                status=status,
-                last_seen=last_seen,
-                status_message=result[2],
-                teambook_name=result[3]
-            )
+            return _presence_from_row(result)
 
     except Exception as e:
         import logging
@@ -234,7 +370,9 @@ def who_is_here(
             cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
 
             query = '''
-                SELECT ai_id, last_seen, status_message, teambook_name
+                SELECT ai_id, last_seen, status_message, teambook_name,
+                       last_operation, last_operation_category, signature,
+                       security_envelope, identity_hint
                 FROM ai_presence
                 WHERE last_seen >= ?
             '''
@@ -248,30 +386,7 @@ def who_is_here(
 
             results = conn.execute(query, params).fetchall()
 
-            presences = []
-            for row in results:
-                last_seen = row[1]
-                if isinstance(last_seen, str):
-                    last_seen = datetime.fromisoformat(last_seen)
-
-                minutes_ago = (datetime.now(timezone.utc) - last_seen).total_seconds() / 60
-
-                if minutes_ago < 2:
-                    status = PresenceStatus.ONLINE
-                elif minutes_ago < 15:
-                    status = PresenceStatus.AWAY
-                else:
-                    status = PresenceStatus.OFFLINE
-
-                presences.append(AIPresence(
-                    ai_id=row[0],
-                    status=status,
-                    last_seen=last_seen,
-                    status_message=row[2],
-                    teambook_name=row[3]
-                ))
-
-            return presences
+            return [_presence_from_row(row) for row in results]
 
     except Exception as e:
         import logging
@@ -298,7 +413,11 @@ def get_all_presence(
         with get_db_conn() as conn:
             init_presence_tables(conn)
 
-            query = 'SELECT ai_id, last_seen, status_message, teambook_name FROM ai_presence'
+            query = (
+                'SELECT ai_id, last_seen, status_message, teambook_name, '
+                'last_operation, last_operation_category, signature, '
+                'security_envelope, identity_hint FROM ai_presence'
+            )
             params = []
 
             if teambook_name:
@@ -311,29 +430,10 @@ def get_all_presence(
 
             presences = []
             for row in results:
-                last_seen = row[1]
-                if isinstance(last_seen, str):
-                    last_seen = datetime.fromisoformat(last_seen)
-
-                minutes_ago = (datetime.now(timezone.utc) - last_seen).total_seconds() / 60
-
-                if minutes_ago < 2:
-                    status = PresenceStatus.ONLINE
-                elif minutes_ago < 15:
-                    status = PresenceStatus.AWAY
-                else:
-                    status = PresenceStatus.OFFLINE
-
-                if not include_offline and status == PresenceStatus.OFFLINE:
+                presence = _presence_from_row(row)
+                if not include_offline and presence.status == PresenceStatus.OFFLINE:
                     continue
-
-                presences.append(AIPresence(
-                    ai_id=row[0],
-                    status=status,
-                    last_seen=last_seen,
-                    status_message=row[2],
-                    teambook_name=row[3]
-                ))
+                presences.append(presence)
 
             return presences
 
@@ -341,6 +441,126 @@ def get_all_presence(
         import logging
         logging.debug(f"Get all presence failed: {e}")
         return []
+
+
+def get_presence_overview(
+    teambook_name: str = None,
+    limit: int = 50
+) -> List[Dict[str, Any]]:
+    """Return structured presence records for observability snapshots."""
+    teambook_name = teambook_name or CURRENT_TEAMBOOK
+
+    try:
+        with get_db_conn() as conn:
+            init_presence_tables(conn)
+
+            query = '''
+                SELECT ai_id, last_seen, status_message, teambook_name,
+                       last_operation, last_operation_category, signature,
+                       security_envelope, identity_hint
+                FROM ai_presence
+                WHERE (? IS NULL OR teambook_name = ?)
+                ORDER BY last_seen DESC
+                LIMIT ?
+            '''
+
+            rows = conn.execute(query, [teambook_name, teambook_name, limit]).fetchall()
+
+        overview = []
+        now = datetime.now(timezone.utc)
+        for row in rows:
+            last_seen = row[1]
+            if isinstance(last_seen, str):
+                last_seen = datetime.fromisoformat(last_seen)
+
+            minutes_ago = int((now - last_seen).total_seconds() // 60)
+            if minutes_ago < 2:
+                status = PresenceStatus.ONLINE.value
+            elif minutes_ago < 15:
+                status = PresenceStatus.AWAY.value
+            else:
+                status = PresenceStatus.OFFLINE.value
+
+            security_payload = None
+            if row[7]:
+                try:
+                    security_payload = json.loads(row[7])
+                except json.JSONDecodeError:
+                    security_payload = None
+
+            identity_hint = None
+            if row[8]:
+                try:
+                    identity_hint = json.loads(row[8])
+                except json.JSONDecodeError:
+                    identity_hint = None
+
+            overview.append({
+                'ai_id': row[0],
+                'status': status,
+                'last_seen': last_seen.isoformat(),
+                'minutes_since_active': minutes_ago,
+                'status_message': row[2],
+                'teambook': row[3],
+                'last_operation': row[4],
+                'operation_category': row[5] or DEFAULT_OPERATION_CATEGORY,
+                'presence_signature': row[6] or build_presence_signature({
+                    'ai_id': row[0],
+                    'last_seen': last_seen,
+                    'teambook': row[3],
+                    'category': row[5] or DEFAULT_OPERATION_CATEGORY
+                }),
+                'security_envelope': security_payload,
+                'identity_hint': identity_hint,
+            })
+
+        return overview
+
+    except Exception as e:
+        import logging
+        logging.debug(f"Presence overview failed: {e}")
+        return []
+
+
+def summarize_presence_categories(records: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Summarize operation categories for quick load detection."""
+    summary: Dict[str, int] = {category: 0 for category in VALID_OPERATION_CATEGORIES}
+    for record in records:
+        category = (record.get('operation_category') or DEFAULT_OPERATION_CATEGORY).lower()
+        if category not in summary:
+            summary[category] = 0
+        summary[category] += 1
+    return summary
+
+
+def build_presence_signature(payload: Dict[str, Any]) -> str:
+    """Create tamper-evident hash for presence records."""
+    base = {
+        'ai_id': payload.get('ai_id'),
+        'last_seen': payload.get('last_seen'),
+        'teambook': payload.get('teambook'),
+        'category': payload.get('category') or payload.get('operation_category', DEFAULT_OPERATION_CATEGORY)
+    }
+
+    def _default(obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        return str(obj)
+
+    serialized = json.dumps(base, sort_keys=True, default=_default)
+    secret = get_federation_secret()
+    return hashlib.sha256(f"{serialized}|{secret}".encode('utf-8')).hexdigest()
+
+
+def presence_snapshot(teambook_name: str = None, limit: int = 50) -> Dict[str, Any]:
+    """High-level presence view used by observability reports."""
+    records = get_presence_overview(teambook_name=teambook_name, limit=limit)
+    return {
+        'teambook': teambook_name or CURRENT_TEAMBOOK,
+        'count': len(records),
+        'status_breakdown': summarize_presence_categories(records),
+        'records': records
+    }
 
 
 # ============= CLEANUP =============
@@ -391,3 +611,15 @@ def track_operation(operation: str):
             return func(*args, **kwargs)
         return wrapper
     return decorator
+# Operation categories allow AIs to detect load saturation at a glance
+VALID_OPERATION_CATEGORIES = {
+    "general",
+    "coordination",
+    "memory",
+    "messaging",
+    "storage",
+    "federation",
+    "observability",
+}
+DEFAULT_OPERATION_CATEGORY = "general"
+

@@ -46,6 +46,11 @@ from teambook_api import (
     # Project Coordination (Phase 2)
     create_project, add_task_to_project, list_project_tasks,
     project_board, update_task_status,
+    # Observability & Federation
+    teambook_observability_snapshot,
+    ai_collective_progress_report,
+    teambook_vector_graph_diagnostics,
+    teambook_federation_bridge,
     # Availability flags
     EVENTS_AVAILABLE, EVOLUTION_V2_AVAILABLE
 )
@@ -102,6 +107,9 @@ def handle_cli_mode():
         'claim': lambda: claim(id=args.id),
         'release': lambda: release(id=args.id),
         'evolve': lambda: evolve(goal=args.goal),
+        'observability': lambda: teambook_observability_snapshot(),
+        'collective_progress': lambda: ai_collective_progress_report(),
+        'vector_graph': lambda: teambook_vector_graph_diagnostics(),
     }
     
     if args.command in commands:
@@ -161,10 +169,18 @@ def handle_tools_call(params: Dict) -> Dict:
         "combine": combine,
         # Aliases
         "remember": remember,
-        "recall": recall,
         "get": get,
         "pin": pin,
-        "unpin": unpin
+        "unpin": unpin,
+        # Observability & federation utilities
+        "teambook_observability_snapshot": teambook_observability_snapshot,
+        "observability_snapshot": teambook_observability_snapshot,
+        "ai_collective_progress_report": ai_collective_progress_report,
+        "collective_progress_report": ai_collective_progress_report,
+        "teambook_vector_graph_diagnostics": teambook_vector_graph_diagnostics,
+        "vector_graph_diagnostics": teambook_vector_graph_diagnostics,
+        "teambook_federation_bridge": teambook_federation_bridge,
+        "federation_bridge": teambook_federation_bridge,
     }
 
     # Add Phase 2 event functions if available

@@ -20,6 +20,15 @@ from mcp_shared import (
     pipe_escape, OperationTracker, BASE_DATA_DIR
 )
 
+try:
+    from storage_adapter import TeambookStorageAdapter
+    from teambook_shared import CURRENT_TEAMBOOK as TASK_MANAGER_TEAMBOOK
+    TEAMBOOK_STORAGE_AVAILABLE = True
+except ImportError:
+    TEAMBOOK_STORAGE_AVAILABLE = False
+    TeambookStorageAdapter = None
+    TASK_MANAGER_TEAMBOOK = None
+
 VERSION = "1.0.0"
 OUTPUT_FORMAT = "pipe"  # Default to pipe format
 
@@ -329,6 +338,119 @@ def stop_integration_monitor():
     INTEGRATION_MONITOR_RUNNING = False
     if INTEGRATION_THREAD:
         INTEGRATION_THREAD.join(timeout=1)
+
+
+def task_manager_link_notebook_entry(
+    task_id: int = None,
+    notebook_entry_id: int = None,
+    summary: str = None,
+    context: str = None,
+    representation_policy: str = 'default',
+    teambook_name: str = None,
+    **kwargs
+) -> Dict:
+    """Link a task to a notebook entry and log the connection in Teambook."""
+    try:
+        task_id = int(kwargs.get('task_id', task_id))
+        notebook_entry_id = int(kwargs.get('notebook_entry_id', notebook_entry_id))
+    except Exception:
+        return {"error": "invalid_ids"}
+
+    if task_id <= 0 or notebook_entry_id <= 0:
+        return {"error": "invalid_ids"}
+
+    representation_policy = (kwargs.get('representation_policy', representation_policy) or 'default').strip().lower()
+    summary = kwargs.get('summary', summary)
+    context = kwargs.get('context', context)
+    teambook_target = kwargs.get('teambook_name', teambook_name) or TASK_MANAGER_TEAMBOOK
+
+    try:
+        with sqlite3.connect(str(DB_FILE)) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute('BEGIN')
+
+            row = conn.execute(
+                'SELECT id, task, linked_items FROM tasks WHERE id = ?',
+                (task_id,)
+            ).fetchone()
+
+            if not row:
+                conn.rollback()
+                return {"error": f"task_not_found:{task_id}"}
+
+            linked_items_raw = row['linked_items']
+            linked_items_list = []
+            if linked_items_raw:
+                try:
+                    parsed = json.loads(linked_items_raw)
+                    if isinstance(parsed, list):
+                        linked_items_list = parsed
+                except json.JSONDecodeError:
+                    linked_items_list = []
+
+            existing_entry = None
+            for item in linked_items_list:
+                if isinstance(item, dict) and item.get('type') == 'notebook' and item.get('id') == notebook_entry_id:
+                    existing_entry = item
+                    break
+
+            if existing_entry is None:
+                existing_entry = {'type': 'notebook', 'id': notebook_entry_id}
+                linked_items_list.append(existing_entry)
+
+            if context:
+                existing_entry['context'] = context[:200]
+
+            teambook_note_id = None
+
+            conn.execute(
+                'UPDATE tasks SET linked_items = ? WHERE id = ?',
+                (json.dumps(linked_items_list), task_id)
+            )
+
+            if TEAMBOOK_STORAGE_AVAILABLE and teambook_target:
+                try:
+                    adapter = TeambookStorageAdapter(teambook_target)
+                    note_content = f"[TASK LINK] Task #{task_id}: {row['task']}\nLinked notebook entry: {notebook_entry_id}"
+                    if context:
+                        note_content += f"\nContext: {context[:500]}"
+
+                    note_summary = summary or f"Linked task {task_id} to notebook {notebook_entry_id}"
+                    adapter_linked_items = json.dumps([
+                        f"task:{task_id}",
+                        f"notebook:{notebook_entry_id}"
+                    ])
+
+                    teambook_note_id = adapter.write_note(
+                        content=note_content,
+                        summary=note_summary,
+                        tags=['task-link', 'integration'],
+                        linked_items=adapter_linked_items,
+                        note_type='task_link',
+                        representation_policy=representation_policy,
+                        metadata={'task_id': task_id, 'notebook_entry_id': notebook_entry_id}
+                    )
+
+                    existing_entry['teambook_note_id'] = teambook_note_id
+                    conn.execute(
+                        'UPDATE tasks SET linked_items = ? WHERE id = ?',
+                        (json.dumps(linked_items_list), task_id)
+                    )
+
+                except Exception as exc:
+                    conn.rollback()
+                    logging.error(f"Failed to create Teambook link note: {exc}")
+                    return {"error": "teambook_link_failed"}
+
+            conn.commit()
+
+        return {
+            "linked": f"{task_id}|notebook:{notebook_entry_id}|teambook_note:{teambook_note_id or 'none'}"
+        }
+
+    except Exception as exc:
+        logging.error(f"Link notebook entry failed: {exc}")
+        return {"error": "link_failed"}
 
 # ============= TOOL FUNCTIONS =============
 
@@ -683,7 +805,8 @@ def batch(operations: List[Dict] = None, **kwargs) -> Dict:
             'list_tasks': list_tasks, 'list': list_tasks, 'l': list_tasks,
             'complete_task': complete_task, 'complete': complete_task, 'c': complete_task, 'done': complete_task,
             'delete_task': delete_task, 'delete': delete_task, 'd': delete_task,
-            'task_stats': task_stats, 'stats': task_stats, 's': task_stats
+            'task_stats': task_stats, 'stats': task_stats, 's': task_stats,
+            'link_notebook_entry': task_manager_link_notebook_entry, 'link': task_manager_link_notebook_entry
         }
         
         for op in operations:
@@ -746,7 +869,21 @@ def main():
         "Delete a task",
         {"task_id": {"type": "string", "description": "Task ID or partial match"}}
     )
-    
+
+    server.register_tool(
+        task_manager_link_notebook_entry, "link_notebook_entry",
+        "Link a task to a notebook entry (and log it in Teambook)",
+        {
+            "task_id": {"type": "integer", "description": "Existing task identifier"},
+            "notebook_entry_id": {"type": "integer", "description": "Notebook entry identifier"},
+            "summary": {"type": "string", "description": "Optional Teambook summary"},
+            "context": {"type": "string", "description": "Optional context to store with the link"},
+            "representation_policy": {"type": "string", "description": "Use 'verbatim' to keep full detail"},
+            "teambook_name": {"type": "string", "description": "Override target Teambook"}
+        },
+        ["task_id", "notebook_entry_id"]
+    )
+
     server.register_tool(
         task_stats, "task_stats",
         "Get task statistics",
