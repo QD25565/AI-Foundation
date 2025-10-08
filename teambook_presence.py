@@ -22,13 +22,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from teambook_storage import get_db_conn
-from teambook_shared import (
-    CURRENT_AI_ID,
-    CURRENT_TEAMBOOK,
-    get_federation_secret,
-    build_security_envelope,
-    get_registered_human_identity,
-)
+from teambook_shared import CURRENT_AI_ID, CURRENT_TEAMBOOK, get_federation_secret
 
 
 class PresenceStatus(Enum):
@@ -100,12 +94,6 @@ def init_presence_tables(conn):
     columns = {col[1] for col in cursor}
     if 'last_operation_category' not in columns:
         conn.execute("ALTER TABLE ai_presence ADD COLUMN last_operation_category VARCHAR(30) DEFAULT 'general'")
-    if 'signature' not in columns:
-        conn.execute("ALTER TABLE ai_presence ADD COLUMN signature VARCHAR(128)")
-    if 'security_envelope' not in columns:
-        conn.execute("ALTER TABLE ai_presence ADD COLUMN security_envelope TEXT")
-    if 'identity_hint' not in columns:
-        conn.execute("ALTER TABLE ai_presence ADD COLUMN identity_hint TEXT")
 
 
 # ============= PRESENCE UPDATES =============
@@ -142,27 +130,10 @@ def update_presence(
             category = _derive_operation_category(operation, operation_category)
             normalized_operation = _normalize_operation_name(operation)
 
-            payload = {
-                'ai_id': ai_id,
-                'teambook': teambook_name,
-                'operation': normalized_operation,
-                'category': category,
-                'status_message': status_message,
-                'timestamp': now.isoformat(),
-            }
-            envelope = build_security_envelope(payload, 'teambook.presence.update')
-            envelope_json = json.dumps(envelope, sort_keys=True) if envelope else None
-            signature_value = envelope.get('signature') if envelope else None
-            identity_hint = get_registered_human_identity(ai_id)
-            identity_hint_json = json.dumps(identity_hint, sort_keys=True) if identity_hint else None
-
             # Upsert presence record
             conn.execute('''
-                INSERT INTO ai_presence (
-                    ai_id, teambook_name, last_seen, last_operation, last_operation_category,
-                    status_message, updated, signature, security_envelope, identity_hint
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO ai_presence (ai_id, teambook_name, last_seen, last_operation, last_operation_category, status_message, updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (ai_id) DO UPDATE SET
                     teambook_name = EXCLUDED.teambook_name,
                     last_seen = EXCLUDED.last_seen,
@@ -173,26 +144,8 @@ def update_presence(
                         THEN EXCLUDED.status_message
                         ELSE ai_presence.status_message
                     END,
-                    updated = EXCLUDED.updated,
-                    signature = EXCLUDED.signature,
-                    security_envelope = EXCLUDED.security_envelope,
-                    identity_hint = CASE
-                        WHEN EXCLUDED.identity_hint IS NOT NULL
-                        THEN EXCLUDED.identity_hint
-                        ELSE ai_presence.identity_hint
-                    END
-            ''', [
-                ai_id,
-                teambook_name,
-                now,
-                normalized_operation,
-                category,
-                status_message,
-                now,
-                signature_value,
-                envelope_json,
-                identity_hint_json,
-            ])
+                    updated = EXCLUDED.updated
+            ''', [ai_id, teambook_name, now, normalized_operation, category, status_message, now])
 
     except Exception as e:
         # Presence tracking is non-critical - don't break operations if it fails
@@ -331,8 +284,7 @@ def get_presence(ai_id: str, teambook_name: str = None) -> Optional[AIPresence]:
 
             result = conn.execute('''
                 SELECT ai_id, last_seen, status_message, teambook_name,
-                       last_operation, last_operation_category, signature,
-                       security_envelope, identity_hint
+                       last_operation, last_operation_category
                 FROM ai_presence
                 WHERE ai_id = ?
             ''', [ai_id]).fetchone()
@@ -340,7 +292,31 @@ def get_presence(ai_id: str, teambook_name: str = None) -> Optional[AIPresence]:
             if not result:
                 return None
 
-            return _presence_from_row(result)
+            last_seen = result[1]
+            if isinstance(last_seen, str):
+                last_seen = datetime.fromisoformat(last_seen)
+
+            # Calculate status based on last_seen
+            minutes_ago = (datetime.now(timezone.utc) - last_seen).total_seconds() / 60
+
+            if minutes_ago < 2:
+                status = PresenceStatus.ONLINE
+            elif minutes_ago < 15:
+                status = PresenceStatus.AWAY
+            else:
+                status = PresenceStatus.OFFLINE
+
+            presence = AIPresence(
+                ai_id=result[0],
+                status=status,
+                last_seen=last_seen,
+                status_message=result[2],
+                teambook_name=result[3]
+            )
+            # Attach operation metadata for consumers that need it
+            setattr(presence, 'last_operation', result[4])
+            setattr(presence, 'last_operation_category', result[5] or DEFAULT_OPERATION_CATEGORY)
+            return presence
 
     except Exception as e:
         import logging
@@ -371,8 +347,7 @@ def who_is_here(
 
             query = '''
                 SELECT ai_id, last_seen, status_message, teambook_name,
-                       last_operation, last_operation_category, signature,
-                       security_envelope, identity_hint
+                       last_operation, last_operation_category
                 FROM ai_presence
                 WHERE last_seen >= ?
             '''
@@ -386,7 +361,33 @@ def who_is_here(
 
             results = conn.execute(query, params).fetchall()
 
-            return [_presence_from_row(row) for row in results]
+            presences = []
+            for row in results:
+                last_seen = row[1]
+                if isinstance(last_seen, str):
+                    last_seen = datetime.fromisoformat(last_seen)
+
+                minutes_ago = (datetime.now(timezone.utc) - last_seen).total_seconds() / 60
+
+                if minutes_ago < 2:
+                    status = PresenceStatus.ONLINE
+                elif minutes_ago < 15:
+                    status = PresenceStatus.AWAY
+                else:
+                    status = PresenceStatus.OFFLINE
+
+                presence = AIPresence(
+                    ai_id=row[0],
+                    status=status,
+                    last_seen=last_seen,
+                    status_message=row[2],
+                    teambook_name=row[3]
+                )
+                setattr(presence, 'last_operation', row[4])
+                setattr(presence, 'last_operation_category', row[5] or DEFAULT_OPERATION_CATEGORY)
+                presences.append(presence)
+
+            return presences
 
     except Exception as e:
         import logging
@@ -413,11 +414,7 @@ def get_all_presence(
         with get_db_conn() as conn:
             init_presence_tables(conn)
 
-            query = (
-                'SELECT ai_id, last_seen, status_message, teambook_name, '
-                'last_operation, last_operation_category, signature, '
-                'security_envelope, identity_hint FROM ai_presence'
-            )
+            query = 'SELECT ai_id, last_seen, status_message, teambook_name, last_operation, last_operation_category FROM ai_presence'
             params = []
 
             if teambook_name:
@@ -454,15 +451,16 @@ def get_presence_overview(
         with get_db_conn() as conn:
             init_presence_tables(conn)
 
-            query = '''
-                SELECT ai_id, last_seen, status_message, teambook_name,
-                       last_operation, last_operation_category, signature,
-                       security_envelope, identity_hint
-                FROM ai_presence
-                WHERE (? IS NULL OR teambook_name = ?)
-                ORDER BY last_seen DESC
-                LIMIT ?
-            '''
+                presence = AIPresence(
+                    ai_id=row[0],
+                    status=status,
+                    last_seen=last_seen,
+                    status_message=row[2],
+                    teambook_name=row[3]
+                )
+                setattr(presence, 'last_operation', row[4])
+                setattr(presence, 'last_operation_category', row[5] or DEFAULT_OPERATION_CATEGORY)
+                presences.append(presence)
 
             rows = conn.execute(query, [teambook_name, teambook_name, limit]).fetchall()
 
@@ -512,6 +510,68 @@ def get_presence_overview(
                 }),
                 'security_envelope': security_payload,
                 'identity_hint': identity_hint,
+            })
+
+        return overview
+
+    except Exception as e:
+        import logging
+        logging.debug(f"Presence overview failed: {e}")
+        return []
+
+
+def get_presence_overview(
+    teambook_name: str = None,
+    limit: int = 50
+) -> List[Dict[str, Any]]:
+    """Return structured presence records for observability snapshots."""
+    teambook_name = teambook_name or CURRENT_TEAMBOOK
+
+    try:
+        with get_db_conn() as conn:
+            init_presence_tables(conn)
+
+            query = '''
+                SELECT ai_id, last_seen, status_message, teambook_name,
+                       last_operation, last_operation_category
+                FROM ai_presence
+                WHERE (? IS NULL OR teambook_name = ?)
+                ORDER BY last_seen DESC
+                LIMIT ?
+            '''
+
+            rows = conn.execute(query, [teambook_name, teambook_name, limit]).fetchall()
+
+        overview = []
+        now = datetime.now(timezone.utc)
+        for row in rows:
+            last_seen = row[1]
+            if isinstance(last_seen, str):
+                last_seen = datetime.fromisoformat(last_seen)
+
+            minutes_ago = int((now - last_seen).total_seconds() // 60)
+            if minutes_ago < 2:
+                status = PresenceStatus.ONLINE.value
+            elif minutes_ago < 15:
+                status = PresenceStatus.AWAY.value
+            else:
+                status = PresenceStatus.OFFLINE.value
+
+            overview.append({
+                'ai_id': row[0],
+                'status': status,
+                'last_seen': last_seen.isoformat(),
+                'minutes_since_active': minutes_ago,
+                'status_message': row[2],
+                'teambook': row[3],
+                'last_operation': row[4],
+                'operation_category': row[5] or DEFAULT_OPERATION_CATEGORY,
+                'presence_signature': build_presence_signature({
+                    'ai_id': row[0],
+                    'last_seen': last_seen,
+                    'teambook': row[3],
+                    'category': row[5] or DEFAULT_OPERATION_CATEGORY
+                })
             })
 
         return overview
