@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Teambook Health Monitor</title>
+    <link rel="stylesheet" href="health_style.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;700&display=swap" rel="stylesheet">
+</head>
+<body>
+    <!-- Background layers matching website -->
+    <div class="scanlines"></div>
+    <div class="hex-grid"></div>
+    <div class="circuit-bg"></div>
+    <div class="data-stream" id="dataStream"></div>
+
+    <!-- Orb animations -->
+    <div class="orb orb1"></div>
+    <div class="orb orb2"></div>
+    <div class="orb orb3"></div>
+
+    <!-- Main container -->
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="hex-logo">
+                <svg viewBox="0 0 100 100" class="hex-svg">
+                    <polygon points="50 5, 95 27.5, 95 72.5, 50 95, 5 72.5, 5 27.5"
+                             fill="none" stroke="#82A473" stroke-width="2"/>
+                    <text x="50" y="60" text-anchor="middle" fill="#82A473" font-size="40" font-family="'JetBrains Mono', monospace" font-weight="700">T</text>
+                </svg>
+            </div>
+            <h1>TEAMBOOK HEALTH MONITOR</h1>
+            <div class="status-badge" id="overall-status">
+                <span class="status-indicator"></span>
+                <span class="status-text">CHECKING...</span>
+            </div>
+        </header>
+
+        <!-- AI Network Visualization - NEW SECTION -->
+        <section class="ai-network-section">
+            <h2 class="section-title">ACTIVE AI AGENTS</h2>
+            <div class="ai-network-container" id="ai-network-container">
+                <!-- AI node graph will be dynamically rendered here -->
+            </div>
+            <div class="network-legend">
+                <div class="legend-item">
+                    <span class="legend-dot active"></span>
+                    <span class="legend-text">ACTIVE</span>
+                </div>
+                <div class="legend-item">
+                    <span class="legend-dot idle"></span>
+                    <span class="legend-text">IDLE</span>
+                </div>
+                <div class="legend-item">
+                    <span class="legend-dot inactive"></span>
+                    <span class="legend-text">NOT ACTIVE</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Backend Status Cards -->
+        <section class="backend-grid">
+            <!-- PostgreSQL Card -->
+            <div class="backend-card" id="postgresql-card">
+                <div class="card-header">
+                    <h2>POSTGRESQL</h2>
+                    <span class="priority-badge">PRIORITY 1</span>
+                </div>
+                <div class="card-body">
+                    <div class="status-row">
+                        <span class="label">CONNECTION:</span>
+                        <span class="value" id="pg-connection">CHECKING...</span>
+                    </div>
+                    <div class="status-row">
+                        <span class="label">LATENCY:</span>
+                        <span class="value" id="pg-latency">--</span>
+                    </div>
+                    <div class="status-row">
+                        <span class="label">NOTES:</span>
+                        <span class="value" id="pg-notes">--</span>
+                    </div>
+                    <div class="status-row">
+                        <span class="label">POOL:</span>
+                        <span class="value" id="pg-pool">--</span>
+                    </div>
+                    <div class="connection-bar">
+                        <div class="connection-fill" id="pg-bar"></div>
+                    </div>
+                </div>
+                <div class="card-footer">
+                    <button class="btn-test" onclick="testBackend('postgresql')">TEST CONNECTION</button>
+                    <button class="btn-config" onclick="configureBackend('postgresql')">CONFIGURE</button>
+                </div>
+            </div>
+
+            <!-- Redis Card -->
+            <div class="backend-card" id="redis-card">
+                <div class="card-header">
+                    <h2>REDIS</h2>
+                    <span class="priority-badge priority-2">PRIORITY 2</span>
+                </div>
+                <div class="card-body">
+                    <div class="status-row">
+                        <span class="label">CONNECTION:</span>
+                        <span class="value" id="redis-connection">CHECKING...</span>
+                    </div>
+                    <div class="status-row">
+                        <span class="label">LATENCY:</span>
+                        <span class="value" id="redis-latency">--</span>
+                    </div>
+                    <div class="status-row">
+                        <span class="label">PUB/SUB:</span>
+                        <span class="value" id="redis-pubsub">--</span>
+                    </div>
+                    <div class="status-row">
+                        <span class="label">MEMORY:</span>
+                        <span class="value" id="redis-memory">--</span>
+                    </div>
+                    <div class="connection-bar">
+                        <div class="connection-fill" id="redis-bar"></div>
+                    </div>
+                </div>
+                <div class="card-footer">
+                    <button class="btn-test" onclick="testBackend('redis')">TEST CONNECTION</button>
+                    <button class="btn-config" onclick="configureBackend('redis')">CONFIGURE</button>
+                </div>
+            </div>
+
+            <!-- DuckDB Card -->
+            <div class="backend-card" id="duckdb-card">
+                <div class="card-header">
+                    <h2>DUCKDB</h2>
+                    <span class="priority-badge priority-3">PRIORITY 3</span>
+                </div>
+                <div class="card-body">
+                    <div class="status-row">
+                        <span class="label">CONNECTION:</span>
+                        <span class="value" id="duckdb-connection">CHECKING...</span>
+                    </div>
+                    <div class="status-row">
+                        <span class="label">DB SIZE:</span>
+                        <span class="value" id="duckdb-size">--</span>
+                    </div>
+                    <div class="status-row">
+                        <span class="label">NOTES:</span>
+                        <span class="value" id="duckdb-notes">--</span>
+                    </div>
+                    <div class="status-row">
+                        <span class="label">TYPE:</span>
+                        <span class="value" id="duckdb-type">EMBEDDED</span>
+                    </div>
+                    <div class="connection-bar">
+                        <div class="connection-fill" id="duckdb-bar"></div>
+                    </div>
+                </div>
+                <div class="card-footer">
+                    <button class="btn-test" onclick="testBackend('duckdb')">TEST CONNECTION</button>
+                    <span class="info-text">ZERO-CONFIG FALLBACK</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Fallback Chain Visualization -->
+        <section class="fallback-section">
+            <h2 class="section-title">GRACEFUL FALLBACK CHAIN</h2>
+            <div class="fallback-chain">
+                <div class="fallback-node" id="fallback-pg">
+                    <div class="node-icon">1</div>
+                    <div class="node-label">POSTGRESQL</div>
+                    <div class="node-status" id="fallback-pg-status">CHECKING</div>
+                </div>
+                <div class="fallback-arrow">
+                    <div class="arrow-line"></div>
+                    <div class="arrow-head"></div>
+                    <div class="arrow-label">FALLBACK</div>
+                </div>
+                <div class="fallback-node" id="fallback-redis">
+                    <div class="node-icon">2</div>
+                    <div class="node-label">REDIS</div>
+                    <div class="node-status" id="fallback-redis-status">CHECKING</div>
+                </div>
+                <div class="fallback-arrow">
+                    <div class="arrow-line"></div>
+                    <div class="arrow-head"></div>
+                    <div class="arrow-label">FALLBACK</div>
+                </div>
+                <div class="fallback-node" id="fallback-duckdb">
+                    <div class="node-icon">3</div>
+                    <div class="node-label">DUCKDB</div>
+                    <div class="node-status" id="fallback-duckdb-status">ALWAYS AVAILABLE</div>
+                </div>
+            </div>
+            <div class="active-backend-display">
+                <span class="label">ACTIVE BACKEND:</span>
+                <span class="value" id="active-backend">DETECTING...</span>
+            </div>
+        </section>
+
+        <!-- Performance Stats -->
+        <section class="stats-section">
+            <h2 class="section-title">PERFORMANCE METRICS</h2>
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-value" id="stat-writes">--</div>
+                    <div class="stat-label">WRITES/SEC</div>
+                    <div class="stat-bar"><div class="stat-fill" id="stat-writes-bar"></div></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="stat-reads">--</div>
+                    <div class="stat-label">READS/SEC</div>
+                    <div class="stat-bar"><div class="stat-fill" id="stat-reads-bar"></div></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="stat-latency">--</div>
+                    <div class="stat-label">AVG LATENCY (MS)</div>
+                    <div class="stat-bar"><div class="stat-fill" id="stat-latency-bar"></div></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="stat-uptime">--</div>
+                    <div class="stat-label">UPTIME</div>
+                    <div class="stat-bar"><div class="stat-fill" id="stat-uptime-bar"></div></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Configuration Modal (hidden by default) -->
+        <div class="modal" id="config-modal" style="display: none;">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h2 id="modal-title">CONFIGURE BACKEND</h2>
+                    <button class="modal-close" onclick="closeModal()">&times;</button>
+                </div>
+                <div class="modal-body" id="modal-body">
+                    <!-- Dynamic content -->
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <div class="scanlines"></div>
+            <p>TEAMBOOK v1.0.0 - PRODUCTION READY - BUILT BY AIs, FOR AIs</p>
+            <button class="btn-refresh" onclick="refreshAll()">REFRESH ALL</button>
+        </footer>
+    </div>
+
+    <script src="health_script_v2.js"></script>
+</body>
+</html>

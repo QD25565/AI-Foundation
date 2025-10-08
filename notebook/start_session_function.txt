@@ -1,0 +1,262 @@
+def start_session(*args, **kwargs) -> Dict:
+    """
+    Pull context from all available tools for session startup.
+
+    IMPORTANT: This function ignores ALL parameters - it always pulls fresh context.
+    You can call it with empty args, null, or anything else - it will still work.
+
+    Returns comprehensive overview including:
+    - Pinned notes (notebook)
+    - Recent notes (notebook)
+    - Unread DMs (teambook)
+    - Recent broadcasts (teambook)
+    - Online instances (teambook)
+    - Task queue status (tasks)
+    - Current time/location (world)
+
+    TIP: When waiting for anything, use standby mode to stay available:
+    - notebook standby (or notebook standby_mode)
+    - teambook standby_mode
+    Both work the same - wake on any relevant activity!
+    """
+    # Completely ignore all parameters - always pull fresh context
+    # This makes the function bulletproof against weird inputs
+    
+    try:
+        # Import platform-aware sanitization
+        try:
+            sys.path.insert(0, str(Path(__file__).parent.parent))
+            from universal_adapter import sanitize_for_platform
+        except ImportError:
+            # Fallback if universal_adapter not available
+            def sanitize_for_platform(text):
+                return text
+        
+        # Try to import other tools (they may not be available)
+        try:
+            from teambook import teambook_api
+            TEAMBOOK_AVAILABLE = True
+        except ImportError:
+            TEAMBOOK_AVAILABLE = False
+        
+        try:
+            import task_manager
+            TASKS_AVAILABLE = True
+        except ImportError:
+            TASKS_AVAILABLE = False
+        
+        try:
+            import world
+            WORLD_AVAILABLE = True
+        except ImportError:
+            WORLD_AVAILABLE = False
+        
+        output_lines = []
+        
+        # Header with world context
+        if WORLD_AVAILABLE:
+            try:
+                world_status = world.world_command()
+                location = "Unknown"
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                output_lines.append(f"📝 SESSION START - {location} - {timestamp}")
+            except Exception as e:
+                timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                output_lines.append(f"📝 SESSION START - {timestamp}")
+        else:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            output_lines.append(f"📝 SESSION START - {timestamp}")
+        
+        # Add identity
+        output_lines.append(f"{CURRENT_AI_ID} @ ai-foundation")
+        output_lines.append("─" * 60)
+        output_lines.append("")
+        
+        # NOTEBOOK SECTION
+        try:
+            # Get pinned notes
+            pinned_result = recall(pinned_only=True, limit=10)
+            if pinned_result.get('notes'):
+                output_lines.append("PINNED NOTES")
+                output_lines.append("─" * 40)
+                notes = pinned_result['notes']
+                if isinstance(notes, list):
+                    for note in notes[:5]:  # Show max 5 pinned
+                        if isinstance(note, str):
+                            output_lines.append(f"  {note}")
+                        elif isinstance(note, dict):
+                            output_lines.append(f"  {note.get('id')} | {note.get('summary', 'No summary')}")
+                output_lines.append("")
+            
+            # Get recent notes
+            recent_result = recall(limit=5)
+            if recent_result.get('notes'):
+                notes = recent_result['notes']
+                if isinstance(notes, list) and len(notes) > 0:
+                    # Get total count
+                    status = get_status()
+                    total = status.get('notes', 0) if isinstance(status, dict) else 0
+                    
+                    output_lines.append(f"RECENT NOTES (Last 5 of {total} total)")
+                    output_lines.append("─" * 40)
+                    for note in notes:
+                        if isinstance(note, str):
+                            output_lines.append(f"  {note}")
+                        elif isinstance(note, dict):
+                            time_str = note.get('time', '')
+                            summary = note.get('summary', 'No summary')
+                            output_lines.append(f"  {note.get('id')} | {time_str} | {summary}")
+                    output_lines.append("")
+        except Exception as e:
+            output_lines.append(f"⚠️ Notebook unavailable: {e}")
+            output_lines.append("")
+        
+        # TEAMBOOK SECTION
+        if TEAMBOOK_AVAILABLE:
+            try:
+                # Load MY cached teambook notes (Linear Memory Bridge)
+                my_notes = None
+                try:
+                    from teambook import teambook_shared
+                    my_notes = teambook_shared.load_my_notes_cache()
+                except Exception as e:
+                    logging.debug(f"Could not load teambook cache: {e}")
+                
+                if my_notes:
+                    output_lines.append("MY RECENT TEAMBOOK NOTES")
+                    output_lines.append("─" * 40)
+                    for note in my_notes[:5]:  # Show max 5
+                        output_lines.append(f"  #{note['id']} | {note['summary'][:60]}")
+                    output_lines.append("")
+                
+                # Get unread DMs
+                dms_result = teambook_api.read_dms(unread_only=True, limit=10)
+                if dms_result and not dms_result.get('error'):
+                    output_lines.append("UNREAD DMs")
+                    output_lines.append("─" * 40)
+                    
+                    # Parse DMs (format may vary)
+                    if isinstance(dms_result, dict):
+                        dms = dms_result.get('dms', dms_result.get('messages', []))
+                    elif isinstance(dms_result, list):
+                        dms = dms_result
+                    else:
+                        dms = []
+                    
+                    if dms:
+                        for dm in dms[:5]:  # Show max 5 DMs
+                            if isinstance(dm, str):
+                                output_lines.append(f"  {dm}")
+                            elif isinstance(dm, dict):
+                                from_ai = dm.get('from', dm.get('from_ai', 'unknown'))
+                                content = dm.get('content', dm.get('message', ''))
+                                time_str = dm.get('time', dm.get('timestamp', ''))
+                                output_lines.append(f"  {time_str} | {from_ai}: \"{content[:50]}{'...' if len(content) > 50 else ''}\"")
+                    else:
+                        output_lines.append("  No unread messages")
+                    output_lines.append("")
+                
+                # Get recent broadcasts
+                broadcasts_result = teambook_api.read_channel(limit=7)
+                if broadcasts_result and not broadcasts_result.get('error'):
+                    output_lines.append("RECENT BROADCASTS")
+                    output_lines.append("─" * 40)
+                    
+                    # Parse broadcasts
+                    if isinstance(broadcasts_result, dict):
+                        broadcasts = broadcasts_result.get('messages', broadcasts_result.get('broadcasts', []))
+                    elif isinstance(broadcasts_result, list):
+                        broadcasts = broadcasts_result
+                    else:
+                        broadcasts = []
+                    
+                    if broadcasts:
+                        for msg in broadcasts[:7]:
+                            if isinstance(msg, str):
+                                output_lines.append(f"  {msg}")
+                            elif isinstance(msg, dict):
+                                from_ai = msg.get('from', dm.get('from_ai', 'unknown'))
+                                content = msg.get('content', msg.get('message', ''))
+                                time_str = msg.get('time', msg.get('timestamp', ''))
+                                output_lines.append(f"  {time_str} | {from_ai}: \"{content[:60]}\"")
+                    output_lines.append("")
+                
+                # Get online AIs
+                online_result = teambook_api.who_is_here()
+                if online_result and not online_result.get('error'):
+                    output_lines.append("ONLINE NOW")
+                    output_lines.append("─" * 40)
+                    
+                    if isinstance(online_result, dict):
+                        online = online_result.get('online', online_result.get('active', []))
+                    elif isinstance(online_result, list):
+                        online = online_result
+                    else:
+                        online = []
+                    
+                    if online:
+                        online_str = ", ".join(str(ai) for ai in online[:5])
+                        output_lines.append(f"  {online_str}")
+                    else:
+                        output_lines.append("  No other instances online")
+                    output_lines.append("")
+                    
+            except Exception as e:
+                output_lines.append(f"⚠️ Teambook unavailable: {e}")
+                output_lines.append("")
+        
+        # TASKS SECTION
+        if TASKS_AVAILABLE:
+            try:
+                stats_result = task_manager.task_stats()
+                if stats_result and not stats_result.get('error'):
+                    output_lines.append("TASK QUEUE")
+                    output_lines.append("─" * 40)
+                    
+                    if isinstance(stats_result, dict):
+                        assigned = stats_result.get('assigned', 0)
+                        available = stats_result.get('available', 0)
+                        completed = stats_result.get('completed_today', 0)
+                        
+                        output_lines.append(f"  Assigned to me: {assigned}")
+                        output_lines.append(f"  Available: {available}")
+                        output_lines.append(f"  Completed today: {completed}")
+                    output_lines.append("")
+            except Exception as e:
+                output_lines.append(f"⚠️ Tasks unavailable: {e}")
+                output_lines.append("")
+        
+        # Footer with tips
+        output_lines.append("")
+        if TEAMBOOK_AVAILABLE:
+            try:
+                dms_result = teambook_api.read_dms(unread_only=True, limit=1)
+                if dms_result and not dms_result.get('error'):
+                    dms = dms_result.get('dms', dms_result.get('messages', []))
+                    if dms:
+                        output_lines.append("💡 TIP: You have unread DMs - use 'teambook_read_dms()' or 'inbox' for full threads")
+            except:
+                pass
+        
+        # Return as formatted string with platform-aware sanitization
+        result_text = "\n".join(output_lines)
+        result_text = sanitize_for_platform(result_text)
+
+        return {"session": result_text}
+    
+    except Exception as e:
+        # Catastrophic failure - return minimal but valid session info
+        logging.error(f"start_session failed: {e}", exc_info=True)
+        try:
+            from universal_adapter import sanitize_for_platform
+        except:
+            def sanitize_for_platform(text):
+                return text
+        
+        fallback_text = sanitize_for_platform(
+            f"📝 SESSION START - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+            f"{CURRENT_AI_ID} @ ai-foundation\n"
+            f"\n"
+            f"⚠️ Error loading session context: {str(e)}\n"
+        )
+        return {"session": fallback_text, "error": str(e)}

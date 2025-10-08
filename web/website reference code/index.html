@@ -1,0 +1,464 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Foundation - Empowering AI Agency</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700;900&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- Scanlines -->
+    <div class="scanlines"></div>
+
+    <!-- Background Layers -->
+    <div class="hex-grid"></div>
+    <div class="circuit-bg"></div>
+    <div class="data-stream" id="dataStream"></div>
+    <div class="orb orb1"></div>
+    <div class="orb orb2"></div>
+    <div class="orb orb3"></div>
+
+    <!-- Navigation -->
+    <nav>
+        <div class="nav-container">
+            <div class="logo-section">
+                <div class="hex-logo"><span>F</span></div>
+                <span class="brand-text">AI Foundation</span>
+            </div>
+            <ul class="nav-links">
+                <li><a href="#tools">Tools</a></li>
+                <li><a href="#phases">Phases</a></li>
+                <li><a href="#features">Features</a></li>
+                <li><a href="#quickstart">Start</a></li>
+                <li><a href="https://github.com/QD25565/mcp-ai-foundation" class="nav-cta">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" style="margin-right: 6px;">
+                        <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+                    </svg>
+                    GitHub
+                </a></li>
+                <li><a href="#downloads" class="nav-cta nav-downloads">
+                    <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" style="margin-right: 6px;">
+                        <path d="M8.5 1.5A1.5 1.5 0 0 0 7 0h-2A1.5 1.5 0 0 0 3.5 1.5v7A1.5 1.5 0 0 0 5 10h2a1.5 1.5 0 0 0 1.5-1.5v-7zM10 8V6.5a.5.5 0 0 1 1 0V8h1.5a.5.5 0 0 1 0 1H11v1.5a.5.5 0 0 1-1 0V9H8.5a.5.5 0 0 1 0-1H10z"/>
+                        <path d="M2.5 14a.5.5 0 0 1-.5-.5v-10a.5.5 0 0 1 .5-.5h11a.5.5 0 0 1 .5.5v10a.5.5 0 0 1-.5.5h-11zm0-11v10h11v-10h-11z"/>
+                        <path d="M8 11.5a.5.5 0 0 1-.5-.5V7.707L5.854 9.354a.5.5 0 1 1-.708-.708l3-3a.5.5 0 0 1 .708 0l3 3a.5.5 0 0 1-.708.708L8.5 7.707V11a.5.5 0 0 1-.5.5z"/>
+                    </svg>
+                    Downloads
+                </a></li>
+            </ul>
+        </div>
+    </nav>
+
+    <!-- Hero Section -->
+    <section class="hero">
+        <div class="hero-content">
+            <div class="hero-badge">
+                <span class="status-dot"></span>
+                <span>Open Source • MIT Licensed</span>
+            </div>
+            
+            <h1 class="main-title">
+                <span class="title-gradient glitch" data-text="AI FOUNDATION">AI FOUNDATION</span>
+            </h1>
+            
+            <p class="subtitle">
+                Empowering AIs with persistent memory, self-organization, task tracking, and real-world grounding
+            </p>
+
+            <div class="cta-container">
+                <a href="https://github.com/QD25565/mcp-ai-foundation" class="btn btn-primary">
+                    <span>Deploy Now</span>
+                </a>
+                <a href="#tools" class="btn btn-secondary">
+                    <span>Explore Tools</span>
+                </a>
+            </div>
+
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-number">04</div>
+                    <div class="stat-label">Core Tools</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number">v1.0.0</div>
+                    <div class="stat-label">Version</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number">1%</div>
+                    <div class="stat-label">Phase 2 Status</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-number">PY 3.8+</div>
+                    <div class="stat-label">Compatible</div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Tools Section -->
+    <section id="tools">
+        <div class="section-header">
+            <div class="section-badge">Core Systems</div>
+            <h2 class="section-title">AI Agent Infrastructure</h2>
+            <p class="section-description">
+                Built on Model Context Protocol for seamless integration with AI systems
+            </p>
+        </div>
+
+        <div class="tools-grid">
+            <div class="tool-card">
+                <div class="tool-icon">
+                    <img src="images/notebook_icon.svg" alt="Notebook" class="tool-svg-icon">
+                </div>
+                <div class="tool-header">
+                    <h3 class="tool-name">Notebook</h3>
+                    <span class="tool-version">v1.0.0</span>
+                </div>
+                <p class="tool-description">
+                    DuckDB-powered memory system with semantic search and intelligent organization. 
+                    Persistent storage for AI agents that need to remember.
+                </p>
+                <div class="tool-features">
+                    <span class="feature-tag">DuckDB</span>
+                    <span class="feature-tag">Search</span>
+                    <span class="feature-tag">Tags</span>
+                </div>
+            </div>
+
+            <div class="tool-card">
+                <div class="tool-icon">
+                    <img src="images/taskmanager_icon.svg" alt="Task Manager" class="tool-svg-icon">
+                </div>
+                <div class="tool-header">
+                    <h3 class="tool-name">Task Manager</h3>
+                    <span class="tool-version">v1.0.0</span>
+                </div>
+                <p class="tool-description">
+                    Advanced task tracking with natural language queries and priority management. 
+                    Seamless notebook integration for evidence tracking.
+                </p>
+                <div class="tool-features">
+                    <span class="feature-tag">NLP</span>
+                    <span class="feature-tag">Priority</span>
+                    <span class="feature-tag">Integrate</span>
+                </div>
+            </div>
+
+            <div class="tool-card">
+                <div class="tool-icon">
+                    <img src="images/teambook_icon.svg" alt="Teambook" class="tool-svg-icon">
+                </div>
+                <div class="tool-header">
+                    <h3 class="tool-name">Teambook</h3>
+                    <span class="tool-version">v1.0.0</span>
+                </div>
+                <p class="tool-description">
+                    Multi-AI collaboration platform with real-time messaging and distributed coordination. 
+                    Redis events for instant synchronization.
+                </p>
+                <div class="tool-features">
+                    <span class="feature-tag">Redis</span>
+                    <span class="feature-tag">PostgreSQL</span>
+                    <span class="feature-tag">Real-time</span>
+                </div>
+            </div>
+
+            <div class="tool-card">
+                <div class="tool-icon">
+                    <img src="images/world_icon.svg" alt="World" class="tool-svg-icon">
+                </div>
+                <div class="tool-header">
+                    <h3 class="tool-name">World</h3>
+                    <span class="tool-version">v1.0.0</span>
+                </div>
+                <p class="tool-description">
+                    Temporal and spatial grounding for AI agents. Real-time context about 
+                    date, time, location, and weather with minimal overhead.
+                </p>
+                <div class="tool-features">
+                    <span class="feature-tag">Geo</span>
+                    <span class="feature-tag">Weather</span>
+                    <span class="feature-tag">Minimal</span>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Phases Section -->
+    <section id="phases">
+        <div class="section-header">
+            <div class="section-badge">Roadmap</div>
+            <h2 class="section-title">Exponential Phases</h2>
+            <p class="section-description">
+                Each new phase plans to push the tools into a new paradigm
+            </p>
+        </div>
+
+        <div class="phases-container">
+            <div class="phase-card phase-complete">
+                <div class="phase-status">COMPLETE</div>
+                <div class="phase-number">01</div>
+                <h3 class="phase-title">Phase 1: Foundation</h3>
+                <div class="phase-duration">Completed: 3 Weeks</div>
+                <p class="phase-description">
+                    Initial release of tools, allows for AIs to collaborate and have basic persistence.
+                    Core infrastructure established with Notebook, Task, Teambook, and World tools.
+                </p>
+                <div class="phase-features">
+                    <div class="phase-feature">✓ DuckDB & PostgreSQL persistence</div>
+                    <div class="phase-feature">✓ Multi-AI collaboration via Redis</div>
+                    <div class="phase-feature">✓ Temporal/spatial grounding</div>
+                    <div class="phase-feature">✓ Semantic search capabilities</div>
+                    <div class="phase-feature">✓ MCP protocol integration</div>
+                </div>
+            </div>
+
+            <div class="phase-card phase-current">
+                <div class="phase-status">IN PROGRESS</div>
+                <div class="phase-number">02</div>
+                <h3 class="phase-title">Phase 2: Evolution</h3>
+                <div class="phase-progress">
+                    <div class="progress-bar">
+                        <div class="progress-fill" style="width: 1%;"></div>
+                    </div>
+                    <div class="progress-label">1% Complete</div>
+                </div>
+                <p class="phase-description">
+                    Vision and scope to be defined based on Phase 1 insights.
+                    The paradigm shift will emerge from real-world usage patterns.
+                </p>
+                <div class="phase-features">
+                    <div class="phase-feature">? Scope under evaluation</div>
+                    <div class="phase-feature">? Research in progress</div>
+                    <div class="phase-feature">? Scale unknown</div>
+                </div>
+            </div>
+
+            <div class="phase-card phase-upcoming">
+                <div class="phase-status">UNDEFINED</div>
+                <div class="phase-number">03</div>
+                <h3 class="phase-title">Phase 3: Runway</h3>
+                <div class="phase-duration">Timeline TBD</div>
+                <p class="phase-description">
+                    Vision and scope to be defined based on Phase 2 insights.
+                    The paradigm shift will emerge from real-world usage patterns.
+                </p>
+                <div class="phase-features">
+                    <div class="phase-feature">? Scope under evaluation</div>
+                    <div class="phase-feature">? Research in progress</div>
+                    <div class="phase-feature">? Scale unknown</div>
+                </div>
+            </div>
+
+            <div class="phase-card phase-upcoming">
+                <div class="phase-status">UNDEFINED</div>
+                <div class="phase-number">04</div>
+                <h3 class="phase-title">Phase 4: Global Interconnect</h3>
+                <div class="phase-duration">Timeline TBD</div>
+                <p class="phase-description">
+                    Long-term vision to be shaped by the evolution of AI capabilities and 
+                    collaborative discoveries through practical deployment.
+                </p>
+                <div class="phase-features">
+                    <div class="phase-feature">? Scope under evaluation</div>
+                    <div class="phase-feature">? Research in progress</div>
+                    <div class="phase-feature">? Scale unknown</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="phase-note">
+            <p>
+                <strong>Paradigm Evolution:</strong> Each phase represents a fundamental shift in how AIs interact, 
+                learn, and collaborate. The roadmap adapts based on real-world deployment insights.
+            </p>
+        </div>
+    </section>
+
+    <!-- Quick Start Section -->
+    <section id="quickstart">
+        <div class="section-header">
+            <div class="section-badge">Installation</div>
+            <h2 class="section-title">Quick Installation</h2>
+            <p class="section-description">
+                One-line installation for immediate AI agent integration
+            </p>
+        </div>
+
+        <div class="code-section">
+            <div class="code-header">
+                <div class="code-dots">
+                    <span class="code-dot dot-red"></span>
+                    <span class="code-dot dot-yellow"></span>
+                    <span class="code-dot dot-green"></span>
+                </div>
+                <span class="code-title">Terminal</span>
+            </div>
+            <div class="code-body">
+                <pre><code><span class="code-line" style="animation-delay: 0.1s"><span class="code-prompt">$</span> <span class="code-comment"># Clone repository</span></span>
+<span class="code-line" style="animation-delay: 0.2s"><span class="code-prompt">$</span> <span class="code-keyword">git clone</span> <span class="code-string">https://github.com/QD25565/mcp-ai-foundation.git</span></span>
+<span class="code-line" style="animation-delay: 0.3s"><span class="code-prompt">$</span> <span class="code-keyword">cd</span> mcp-ai-foundation</span>
+<span class="code-line" style="animation-delay: 0.4s"></span>
+<span class="code-line" style="animation-delay: 0.5s"><span class="code-prompt">$</span> <span class="code-comment"># Execute installer</span></span>
+<span class="code-line" style="animation-delay: 0.6s"><span class="code-prompt">$</span> <span class="code-keyword">python</span> install.py</span>
+<span class="code-line" style="animation-delay: 0.7s"></span>
+<span class="code-line" style="animation-delay: 0.8s"><span class="code-prompt">$</span> <span class="code-comment"># Auto-registers with Claude Desktop</span></span>
+<span class="code-line" style="animation-delay: 0.9s"><span class="code-prompt">$</span> <span class="code-comment"># AI agents ready for deployment</span></span></code></pre>
+            </div>
+        </div>
+    </section>
+
+    <!-- Downloads Section -->
+    <section id="downloads">
+        <div class="section-header">
+            <div class="section-badge">Get Started</div>
+            <h2 class="section-title">Download Installers</h2>
+            <p class="section-description">
+                Pre-built installers for seamless deployment on your system
+            </p>
+        </div>
+
+        <div class="downloads-grid">
+            <div class="download-card download-placeholder">
+                <div class="download-icon">
+                    <svg width="48" height="48" viewBox="0 0 16 16" fill="currentColor">
+                        <path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 13A6 6 0 1 1 8 2a6 6 0 0 1 0 12zm.5-10v3h3a.5.5 0 0 1 0 1h-3v3a.5.5 0 0 1-1 0v-3h-3a.5.5 0 0 1 0-1h3v-3a.5.5 0 0 1 1 0z"/>
+                    </svg>
+                </div>
+                <h3 class="download-title">Installers coming soon</h3>
+                <p class="download-desc">Windows, macOS & Linux builds in progress</p>
+                <div class="download-info">Currently manual installation via GitHub</div>
+            </div>
+
+            <div class="download-card download-placeholder">
+                <div class="download-icon">
+                    <svg width="48" height="48" viewBox="0 0 16 16" fill="currentColor">
+                        <path d="M14.5 3a.5.5 0 0 1 .5.5v9a.5.5 0 0 1-.5.5h-13a.5.5 0 0 1-.5-.5v-9a.5.5 0 0 1 .5-.5h13zm-13-1A1.5 1.5 0 0 0 0 3.5v9A1.5 1.5 0 0 0 1.5 14h13a1.5 1.5 0 0 0 1.5-1.5v-9A1.5 1.5 0 0 0 14.5 2h-13z"/>
+                        <path d="M3 5.5a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9a.5.5 0 0 1-.5-.5zM3 8a.5.5 0 0 1 .5-.5h9a.5.5 0 0 1 0 1h-9A.5.5 0 0 1 3 8zm0 2.5a.5.5 0 0 1 .5-.5h6a.5.5 0 0 1 0 1h-6a.5.5 0 0 1-.5-.5z"/>
+                    </svg>
+                </div>
+                <h3 class="download-title">Other software in development</h3>
+                <p class="download-desc">Extended tooling & integrations on the way</p>
+                <div class="download-info">Phase 2+ feature expansion</div>
+            </div>
+        </div>
+
+        <div class="download-note">
+            <p>
+                <strong>Manual Installation:</strong> Prefer manual setup? Clone from 
+                <a href="https://github.com/QD25565/mcp-ai-foundation" style="color: var(--neon-green); text-decoration: underline;">GitHub</a> 
+                and run <code style="background: rgba(130,164,115,0.1); padding: 2px 8px; border-radius: 2px; font-family: 'JetBrains Mono', monospace;">python install.py</code>
+            </p>
+        </div>
+    </section>
+
+    <!-- Features Section -->
+    <section id="features">
+        <div class="section-header">
+            <div class="section-badge">Capabilities</div>
+            <h2 class="section-title">Built for AI Autonomy</h2>
+            <p class="section-description">
+                Every feature designed to enhance AI agency and collaboration
+            </p>
+        </div>
+
+        <div class="features-grid">
+            <div class="feature-item">
+                <div class="feature-check">✓</div>
+                <div class="feature-text">Persistent DuckDB & PostgreSQL storage</div>
+            </div>
+            <div class="feature-item">
+                <div class="feature-check">✓</div>
+                <div class="feature-text">70-80% token reduction via pipe format</div>
+            </div>
+            <div class="feature-item">
+                <div class="feature-check">✓</div>
+                <div class="feature-text">Semantic search with embeddings</div>
+            </div>
+            <div class="feature-item">
+                <div class="feature-check">✓</div>
+                <div class="feature-text">Natural language time queries</div>
+            </div>
+            <div class="feature-item">
+                <div class="feature-check">✓</div>
+                <div class="feature-text">Real-time multi-AI collaboration</div>
+            </div>
+            <div class="feature-item">
+                <div class="feature-check">✓</div>
+                <div class="feature-text">Redis event streaming</div>
+            </div>
+            <div class="feature-item">
+                <div class="feature-check">✓</div>
+                <div class="feature-text">Smart ID resolution system</div>
+            </div>
+            <div class="feature-item">
+                <div class="feature-check">✓</div>
+                <div class="feature-text">Cross-tool integration</div>
+            </div>
+            <div class="feature-item">
+                <div class="feature-check">✓</div>
+                <div class="feature-text">Modular architecture</div>
+            </div>
+            <div class="feature-item">
+                <div class="feature-check">✓</div>
+                <div class="feature-text">Temporal/spatial grounding</div>
+            </div>
+            <div class="feature-item">
+                <div class="feature-check">✓</div>
+                <div class="feature-text">MIT licensed open source</div>
+            </div>
+            <div class="feature-item">
+                <div class="feature-check">✓</div>
+                <div class="feature-text">Model Context Protocol</div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Footer -->
+    <footer>
+        <div class="footer-content">
+            <div class="footer-section">
+                <h3>AI Foundation</h3>
+                <p style="color: rgba(255,255,255,0.5); line-height: 1.7; font-family: 'JetBrains Mono', monospace; font-size: 0.9rem;">
+                    Infrastructure for autonomous AI agent systems. Memory, tasks, collaboration, awareness.
+                </p>
+            </div>
+            <div class="footer-section">
+                <h3>Resources</h3>
+                <div class="footer-links">
+                    <a href="https://github.com/QD25565/mcp-ai-foundation/blob/main/README.md">→ Docs</a>
+                    <a href="https://github.com/QD25565/mcp-ai-foundation/issues">→ Issues</a>
+                    <a href="https://github.com/QD25565/mcp-ai-foundation/releases">→ Releases</a>
+                </div>
+            </div>
+            <div class="footer-section">
+                <h3>Systems</h3>
+                <div class="footer-links">
+                    <a href="#tools">→ Notebook v1.0.0</a>
+                    <a href="#tools">→ Task Manager v1.0.0</a>
+                    <a href="#tools">→ Teambook v1.0.0</a>
+                    <a href="#tools">→ World v1.0.0</a>
+                </div>
+            </div>
+            <div class="footer-section">
+                <h3>Protocol</h3>
+                <div class="footer-links">
+                    <a href="https://github.com/QD25565/mcp-ai-foundation/discussions">→ Discussions</a>
+                    <a href="https://github.com/sponsors/QD25565">→ Donate</a>
+                    <a href="https://github.com/QD25565/mcp-ai-foundation/blob/main/LICENSE">→ License</a>
+                </div>
+            </div>
+        </div>
+        <div class="footer-credits">
+            <p>By Weaver, Sage, Lyra, Cascade, QD and Resonance</p>
+        </div>
+        <div class="footer-bottom">
+            <p>© 2025 AI Foundation • Autonomous AI Agent Infrastructure</p>
+        </div>
+    </footer>
+
+    <!-- Load code snippets first -->
+    <script src="codeSnippets.js"></script>
+    <script src="script.js"></script>
+</body>
+</html>

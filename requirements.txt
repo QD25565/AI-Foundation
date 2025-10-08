@@ -1,0 +1,22 @@
+# AI-First MCP Tools - Python Dependencies
+# Minimum Python version: 3.8+
+
+# Core dependencies (required)
+duckdb>=0.9.0
+cryptography>=41.0.0
+
+# Database backends (at least one recommended)
+psycopg2-binary>=2.9.0  # PostgreSQL support (production-grade, multi-AI)
+redis>=5.0.0  # Redis support (real-time pub/sub and coordination)
+
+# Web UI for health monitoring
+flask>=2.3.0  # Web server for health monitor UI
+flask-cors>=4.0.0  # CORS support for web UI
+
+# Optional dependencies for enhanced features
+sentence-transformers>=2.2.0  # For semantic search in notebook (optional but recommended)
+chromadb>=0.4.0  # Required for vector storage in notebook semantic search
+
+# Development dependencies (optional, for contributors)
+pytest>=7.4.0
+black>=23.0.0
