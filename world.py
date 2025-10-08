@@ -7,6 +7,7 @@ Uses shared MCP utilities for consistency.
 """
 
 import os
+import json
 import requests
 from datetime import datetime as dt_class  # Fixed: renamed to avoid collision with function name
 from typing import Dict, List, Optional
@@ -198,6 +199,76 @@ def get_weather():
     }
     weather_cache_time = dt_class.now()
     return weather_cache
+
+
+def set_location_hint(
+    city: str = None,
+    region: str = None,
+    country: str = None,
+    lat: float = None,
+    lon: float = None,
+    timezone_hint: str = None,
+    **kwargs
+) -> Dict:
+    """Persist a trusted location hint for downstream context."""
+    global location_cache, weather_cache, weather_cache_time
+
+    city = str(kwargs.get('city', city or '')).strip()
+    region = str(kwargs.get('region', region or '')).strip()
+    country = str(kwargs.get('country', country or '')).strip()
+    timezone_hint = str(kwargs.get('timezone_hint', kwargs.get('timezone', timezone_hint or ''))).strip()
+
+    lat_value = kwargs.get('lat', lat)
+    lon_value = kwargs.get('lon', lon)
+
+    def _coerce_coordinate(value, minimum, maximum, label):
+        if value is None:
+            return None
+        try:
+            numeric = float(value)
+        except Exception:
+            raise ValueError(f"invalid_{label}")
+        if numeric < minimum or numeric > maximum:
+            raise ValueError(f"invalid_{label}")
+        return round(numeric, 6)
+
+    try:
+        lat_clean = _coerce_coordinate(lat_value, -90.0, 90.0, 'latitude')
+        lon_clean = _coerce_coordinate(lon_value, -180.0, 180.0, 'longitude')
+    except ValueError as err:
+        return {"error": str(err)}
+
+    hint = {
+        'city': city or None,
+        'region': region or None,
+        'country': country or None,
+        'lat': lat_clean,
+        'lon': lon_clean,
+        'timezone': timezone_hint or None
+    }
+
+    # Remove empty fields
+    hint = {k: v for k, v in hint.items() if v not in (None, '')}
+
+    if not hint:
+        return {"error": "no_hint_provided"}
+
+    location_cache = hint
+    weather_cache = None
+    weather_cache_time = None
+
+    try:
+        with open(LOCATION_FILE, 'w', encoding='utf-8') as f:
+            json.dump(location_cache, f, indent=2)
+    except Exception as exc:
+        return {"error": f"persist_failed:{str(exc)[:40]}"}
+
+    parts = [location_cache.get('city'), location_cache.get('region'), location_cache.get('country')]
+    label = ', '.join(part for part in parts if part)
+    if location_cache.get('timezone'):
+        label += f" | tz:{location_cache['timezone']}"
+
+    return {"hint": label or "hint_saved"}
 
 def format_location_short(location: dict) -> str:
     """Format location ultra-compactly"""

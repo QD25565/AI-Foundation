@@ -14,8 +14,10 @@ Security Features:
 """
 
 import time
+import json
+import hashlib
 from datetime import datetime, timedelta, timezone
-from typing import Dict, Optional, Tuple, List
+from typing import Dict, Optional, Tuple, List, Any
 from collections import defaultdict
 import logging
 
@@ -48,6 +50,56 @@ MAX_RESOURCE_ID_LENGTH = 100
 # In-memory lock tracking for performance
 _lock_cache = {}  # resource_id -> (ai_id, expires_at)
 _ai_lock_count = defaultdict(int)  # ai_id -> count
+
+
+def _task_hash_default(obj):
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    return obj
+
+
+def compute_task_tamper_hash(record: Dict[str, Any]) -> str:
+    payload = {
+        'task': record.get('task'),
+        'priority': record.get('priority'),
+        'status': record.get('status'),
+        'claimed_by': record.get('claimed_by'),
+        'created_at': record.get('created_at'),
+        'claimed_at': record.get('claimed_at'),
+        'completed_at': record.get('completed_at'),
+        'result': record.get('result'),
+        'metadata': record.get('metadata'),
+        'teambook_name': record.get('teambook_name'),
+        'representation_policy': record.get('representation_policy', 'default') or 'default'
+    }
+    serialized = json.dumps(payload, sort_keys=True, default=_task_hash_default)
+    return hashlib.sha256(serialized.encode('utf-8')).hexdigest()
+
+
+def _refresh_task_tamper_hash(conn, task_id: int) -> None:
+    try:
+        row = conn.execute(
+            '''
+            SELECT task, priority, status, claimed_by, created_at, claimed_at,
+                   completed_at, result, metadata, teambook_name, representation_policy
+            FROM task_queue
+            WHERE id = ?
+            ''',
+            [task_id]
+        ).fetchone()
+
+        if not row:
+            return
+
+        columns = [
+            'task', 'priority', 'status', 'claimed_by', 'created_at', 'claimed_at',
+            'completed_at', 'result', 'metadata', 'teambook_name', 'representation_policy'
+        ]
+        record = dict(zip(columns, row))
+        tamper_hash = compute_task_tamper_hash(record)
+        conn.execute('UPDATE task_queue SET tamper_hash = ? WHERE id = ?', [tamper_hash, task_id])
+    except Exception as exc:
+        logging.debug(f"Tamper hash refresh failed for task {task_id}: {exc}")
 
 # ============= STORAGE BACKEND SELECTION =============
 
@@ -156,12 +208,24 @@ def init_coordination_tables(conn):
             completed_at TIMESTAMPTZ,
             result TEXT,
             teambook_name VARCHAR(50),
-            metadata TEXT
+            metadata TEXT,
+            representation_policy VARCHAR DEFAULT 'default',
+            tamper_hash VARCHAR
         )
     ''')
 
     conn.execute('CREATE INDEX IF NOT EXISTS idx_queue_status_priority ON task_queue(status, priority DESC, created_at)')
     conn.execute('CREATE INDEX IF NOT EXISTS idx_queue_claimed ON task_queue(claimed_by, status)')
+
+    try:
+        conn.execute("ALTER TABLE task_queue ADD COLUMN representation_policy VARCHAR DEFAULT 'default'")
+    except Exception:
+        pass
+
+    try:
+        conn.execute("ALTER TABLE task_queue ADD COLUMN tamper_hash VARCHAR")
+    except Exception:
+        pass
 
     conn.commit()
 
@@ -419,7 +483,8 @@ def list_locks(show_all: bool = False, **kwargs) -> str:
 
 # ============= TASK QUEUE =============
 
-def queue_task(task: str = None, priority: int = 5, metadata: str = None, **kwargs) -> str:
+def queue_task(task: str = None, priority: int = 5, metadata: str = None,
+               representation_policy: str = 'default', **kwargs) -> str:
     """
     Add task to distributed queue.
 
@@ -436,6 +501,7 @@ def queue_task(task: str = None, priority: int = 5, metadata: str = None, **kwar
 
         priority = validate_priority(kwargs.get('priority', priority))
         metadata = kwargs.get('metadata', metadata)
+        representation_policy = (kwargs.get('representation_policy', representation_policy) or 'default').strip().lower()
 
         backend_type, get_conn = get_coordination_backend()
         with get_conn() as conn:
@@ -450,12 +516,23 @@ def queue_task(task: str = None, priority: int = 5, metadata: str = None, **kwar
                 return f"!queue_full|max:{MAX_QUEUE_SIZE}|pending:{count}"
 
             cursor = conn.execute('''
-                INSERT INTO task_queue (task, priority, status, created_at, metadata)
-                VALUES (?, ?, 'pending', ?, ?)
+                INSERT INTO task_queue (
+                    task, priority, status, created_at, metadata, teambook_name,
+                    representation_policy, tamper_hash
+                )
+                VALUES (?, ?, 'pending', ?, ?, ?, ?, NULL)
                 RETURNING id
-            ''', [task, priority, datetime.now(timezone.utc), metadata])
+            ''', [
+                task,
+                priority,
+                datetime.now(timezone.utc),
+                metadata,
+                CURRENT_TEAMBOOK,
+                representation_policy
+            ])
 
             task_id = cursor.fetchone()[0]
+            _refresh_task_tamper_hash(conn, task_id)
 
         log_operation_to_db('queue_task')
 
@@ -517,6 +594,8 @@ def claim_task(prefer_priority: bool = True, **kwargs) -> str:
                 SET status = 'claimed', claimed_by = ?, claimed_at = ?
                 WHERE id = ? AND status = 'pending'
             ''', [CURRENT_AI_ID, datetime.now(timezone.utc), task_id])
+
+            _refresh_task_tamper_hash(conn, task_id)
 
             # Verify we got it (handles race conditions)
             claimed = conn.execute(
@@ -582,6 +661,8 @@ def complete_task(task_id: int = None, result: str = None, **kwargs) -> str:
                 SET status = 'completed', completed_at = ?, result = ?
                 WHERE id = ?
             ''', [datetime.now(timezone.utc), result_text, task_id])
+
+            _refresh_task_tamper_hash(conn, task_id)
 
         log_operation_to_db('complete_task')
 

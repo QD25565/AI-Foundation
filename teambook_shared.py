@@ -15,6 +15,7 @@ import re
 import json
 import random
 import logging
+import hashlib
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, Tuple, List
@@ -92,6 +93,7 @@ ATTEMPT_CLEANUP_HOURS = 24
 CURRENT_TEAMBOOK = TEAMBOOK_NAME_ENV  # Set from environment variable if provided
 CURRENT_AI_ID = MCP_AI_ID  # Use shared AI identity
 LAST_OPERATION = None
+_FEDERATION_SECRET = None
 
 # Knowledge bases
 KNOWN_ENTITIES = set()
@@ -181,6 +183,33 @@ def get_last_op_file():
 def get_vector_dir():
     """Get vector database directory"""
     return get_data_dir() / "vectors"
+
+
+def get_federation_secret() -> str:
+    """Derive a deterministic secret for federation signatures."""
+    global _FEDERATION_SECRET
+
+    if _FEDERATION_SECRET is not None:
+        return _FEDERATION_SECRET
+
+    env_secret = os.environ.get('TEAMBOOK_FEDERATION_SECRET')
+    if env_secret:
+        _FEDERATION_SECRET = env_secret.strip()
+        return _FEDERATION_SECRET
+
+    try:
+        vault_file = get_vault_key_file()
+        if vault_file.exists():
+            data = vault_file.read_bytes()
+            _FEDERATION_SECRET = hashlib.sha256(data).hexdigest()
+        else:
+            seed = f"{TEAMBOOK_ROOT}|{CURRENT_TEAMBOOK or 'private'}"
+            _FEDERATION_SECRET = hashlib.sha256(seed.encode('utf-8')).hexdigest()
+    except Exception:
+        seed = f"fallback|{CURRENT_TEAMBOOK or 'private'}"
+        _FEDERATION_SECRET = hashlib.sha256(seed.encode('utf-8')).hexdigest()
+
+    return _FEDERATION_SECRET
 
 # ============= TEXT UTILITIES =============
 def clean_text(text: str) -> str:

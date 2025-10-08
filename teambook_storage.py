@@ -14,6 +14,7 @@ import sys
 import time
 import json
 import logging
+import hashlib
 from datetime import datetime, timezone
 from typing import Optional, List, Tuple, Any, Dict
 from pathlib import Path
@@ -99,6 +100,47 @@ FTS_ENABLED = False
 _connection_cache = None
 _connection_cache_time = 0
 _CONNECTION_CACHE_TTL = 5.0  # Reuse connection for 5 seconds
+
+
+def _serialize_for_hash(payload: Dict[str, Any]) -> str:
+    def _default(obj: Any) -> Any:
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        if isinstance(obj, (set, tuple)):
+            return list(obj)
+        return obj
+
+    return json.dumps(payload, sort_keys=True, default=_default)
+
+
+def compute_note_tamper_hash(payload: Dict[str, Any]) -> str:
+    serial = _serialize_for_hash({
+        'content': payload.get('content'),
+        'summary': payload.get('summary'),
+        'tags': payload.get('tags') or [],
+        'pinned': bool(payload.get('pinned')),
+        'owner': payload.get('owner'),
+        'teambook_name': payload.get('teambook_name'),
+        'linked_items': payload.get('linked_items'),
+        'representation_policy': payload.get('representation_policy', 'default'),
+        'metadata': payload.get('metadata'),
+        'type': payload.get('type'),
+        'parent_id': payload.get('parent_id'),
+    })
+    return hashlib.sha256(serial.encode('utf-8')).hexdigest()
+
+
+def _should_compress(representation_policy: Optional[str]) -> bool:
+    if representation_policy and str(representation_policy).lower() == 'verbatim':
+        return False
+    return True
+
+
+def _prepare_content_for_storage(content: str, representation_policy: Optional[str]):
+    compressed = None
+    if content is not None and COMPRESSION_AVAILABLE and _should_compress(representation_policy):
+        compressed = compress_content(content)
+    return content, compressed
 
 # ============= VAULT MANAGER =============
 class VaultManager:
@@ -260,6 +302,7 @@ def create_duckdb_schema(conn: duckdb.DuckDBPyConnection):
         CREATE TABLE IF NOT EXISTS notes (
             id BIGINT PRIMARY KEY,
             content TEXT,
+            content_compressed BLOB,
             summary TEXT,
             tags VARCHAR[],
             pinned BOOLEAN DEFAULT FALSE,
@@ -271,8 +314,11 @@ def create_duckdb_schema(conn: duckdb.DuckDBPyConnection):
             created TIMESTAMPTZ NOT NULL,
             session_id BIGINT,
             linked_items TEXT,
+            representation_policy VARCHAR DEFAULT 'default',
             pagerank DOUBLE DEFAULT 0.0,
-            has_vector BOOLEAN DEFAULT FALSE
+            has_vector BOOLEAN DEFAULT FALSE,
+            metadata TEXT,
+            tamper_hash VARCHAR
         )
     ''')
     
@@ -418,7 +464,11 @@ def _init_db():
                 ('owner', 'ALTER TABLE notes ADD COLUMN owner VARCHAR'),
                 ('teambook_name', 'ALTER TABLE notes ADD COLUMN teambook_name VARCHAR'),
                 ('type', 'ALTER TABLE notes ADD COLUMN type VARCHAR'),
-                ('parent_id', 'ALTER TABLE notes ADD COLUMN parent_id BIGINT')
+                ('parent_id', 'ALTER TABLE notes ADD COLUMN parent_id BIGINT'),
+                ('content_compressed', 'ALTER TABLE notes ADD COLUMN content_compressed BLOB'),
+                ('representation_policy', "ALTER TABLE notes ADD COLUMN representation_policy VARCHAR DEFAULT 'default'"),
+                ('metadata', 'ALTER TABLE notes ADD COLUMN metadata TEXT'),
+                ('tamper_hash', 'ALTER TABLE notes ADD COLUMN tamper_hash VARCHAR')
             ]
             
             for col_name, sql in migrations:
@@ -929,7 +979,8 @@ class DuckDBTeambookStorage:
     def write_note(self, content: str, summary: str = "", tags: List[str] = None,
                    pinned: bool = False, linked_items: str = None,
                    owner: str = None, note_type: str = None,
-                   parent_id: int = None) -> int:
+                   parent_id: int = None, representation_policy: str = 'default',
+                   metadata: Any = None) -> int:
         """Write a note to DuckDB"""
         with _get_db_conn() as conn:
             max_id = conn.execute("SELECT COALESCE(MAX(id), 0) FROM notes").fetchone()[0]
@@ -938,18 +989,57 @@ class DuckDBTeambookStorage:
             owner = owner or CURRENT_AI_ID
             now = datetime.now(timezone.utc)
 
-            # Compress content and summary for storage optimization (Phase 3)
-            stored_content = compress_content(content) if COMPRESSION_AVAILABLE else content
-            stored_summary = compress_content(summary) if (COMPRESSION_AVAILABLE and summary) else summary
+            representation_policy = (representation_policy or 'default').strip().lower()
+
+            # Store plain content plus optional compressed cache
+            stored_content, compressed_payload = _prepare_content_for_storage(content, representation_policy)
+            stored_summary = summary
+            if summary and COMPRESSION_AVAILABLE and _should_compress(representation_policy):
+                stored_summary = compress_content(summary)
+
+            normalized_metadata = json.dumps(metadata) if isinstance(metadata, (dict, list)) else metadata
+
+            tamper_hash = compute_note_tamper_hash({
+                'content': content,
+                'summary': summary,
+                'tags': tags,
+                'pinned': pinned,
+                'owner': owner,
+                'teambook_name': self.teambook_name,
+                'linked_items': linked_items,
+                'representation_policy': representation_policy,
+                'metadata': normalized_metadata,
+                'type': note_type,
+                'parent_id': parent_id,
+            })
 
             conn.execute('''
                 INSERT INTO notes (
-                    id, content, summary, tags, pinned, author, owner,
-                    teambook_name, created, session_id, linked_items,
-                    pagerank, has_vector
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', [note_id, stored_content, stored_summary, tags, pinned, CURRENT_AI_ID, owner,
-                  self.teambook_name, now, None, linked_items, 0.0, False])
+                    id, content, content_compressed, summary, tags, pinned, author, owner,
+                    teambook_name, type, parent_id, created, session_id, linked_items,
+                    representation_policy, pagerank, has_vector, metadata, tamper_hash
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ''', [
+                note_id,
+                stored_content,
+                compressed_payload,
+                stored_summary,
+                tags,
+                pinned,
+                CURRENT_AI_ID,
+                owner,
+                self.teambook_name,
+                note_type,
+                parent_id,
+                now,
+                None,
+                linked_items,
+                representation_policy,
+                0.0,
+                False,
+                normalized_metadata,
+                tamper_hash
+            ])
 
             return note_id
 
@@ -989,13 +1079,19 @@ class DuckDBTeambookStorage:
             columns = [desc[0] for desc in conn.description]
             notes = [dict(zip(columns, row)) for row in rows]
 
-            # Decompress content and summary if needed (Phase 3)
+            # Decompress content and summary while preserving plaintext caches
             if COMPRESSION_AVAILABLE:
                 for note in notes:
-                    if 'content' in note and note['content']:
+                    compressed_body = note.get('content_compressed')
+                    if compressed_body:
+                        note['content'] = decompress_content(compressed_body)
+                    elif isinstance(note.get('content'), bytes):
                         note['content'] = decompress_content(note['content'])
-                    if 'summary' in note and note['summary']:
+
+                    if isinstance(note.get('summary'), bytes):
                         note['summary'] = decompress_content(note['summary'])
+
+                    note.pop('content_compressed', None)
 
             return notes
 
@@ -1009,37 +1105,132 @@ class DuckDBTeambookStorage:
 
                 # Decompress content and summary if needed (Phase 3)
                 if COMPRESSION_AVAILABLE:
-                    if 'content' in note and note['content']:
+                    compressed_body = note.get('content_compressed')
+                    if compressed_body:
+                        note['content'] = decompress_content(compressed_body)
+                    elif isinstance(note.get('content'), bytes):
                         note['content'] = decompress_content(note['content'])
-                    if 'summary' in note and note['summary']:
+                    if isinstance(note.get('summary'), bytes):
                         note['summary'] = decompress_content(note['summary'])
+                    note.pop('content_compressed', None)
 
                 return note
             return None
 
     def update_note(self, note_id: int, **updates) -> bool:
-        """Update note fields"""
+        """Update note fields with tamper-evident hashing."""
         if not updates:
             return False
-        
-        # Security: Whitelist allowed columns to prevent SQL injection
-        ALLOWED_COLUMNS = {'content', 'summary', 'tags', 'pinned', 'owner', 'claimed_by', 
-                          'assigned_to', 'status', 'type', 'parent_id', 'metadata', 'linked_items'}
-        filtered_updates = {k: v for k, v in updates.items() if k in ALLOWED_COLUMNS}
-        
+
+        allowed_columns = {
+            'content', 'summary', 'tags', 'pinned', 'owner', 'claimed_by',
+            'assigned_to', 'status', 'type', 'parent_id', 'metadata',
+            'linked_items', 'representation_policy'
+        }
+
+        filtered_updates = {k: v for k, v in updates.items() if k in allowed_columns}
         if not filtered_updates:
             return False
-        
+
         with _get_db_conn() as conn:
-            # Check if note exists first
-            exists = conn.execute("SELECT 1 FROM notes WHERE id = ?", [note_id]).fetchone()
-            if not exists:
+            row = conn.execute("SELECT * FROM notes WHERE id = ?", [note_id]).fetchone()
+            if not row:
                 return False
-            # Construct query with whitelisted columns only
-            set_clause = ", ".join([f"{k} = ?" for k in filtered_updates.keys()])
-            values = list(filtered_updates.values()) + [note_id]
+            columns = [desc[0] for desc in conn.description]
+
+        current = dict(zip(columns, row))
+
+        # Normalize current payload for hashing/compression decisions
+        if current.get('content_compressed'):
+            current_content = decompress_content(current['content_compressed']) if COMPRESSION_AVAILABLE else current['content_compressed']
+        elif isinstance(current.get('content'), bytes):
+            current_content = decompress_content(current['content']) if COMPRESSION_AVAILABLE else current['content']
+        else:
+            current_content = current.get('content')
+
+        if isinstance(current.get('summary'), bytes):
+            current_summary = decompress_content(current['summary']) if COMPRESSION_AVAILABLE else current['summary']
+        else:
+            current_summary = current.get('summary')
+
+        current_payload = {
+            'content': current_content,
+            'summary': current_summary,
+            'tags': current.get('tags'),
+            'pinned': current.get('pinned'),
+            'owner': current.get('owner'),
+            'claimed_by': current.get('claimed_by'),
+            'assigned_to': current.get('assigned_to'),
+            'status': current.get('status'),
+            'type': current.get('type'),
+            'parent_id': current.get('parent_id'),
+            'metadata': current.get('metadata'),
+            'linked_items': current.get('linked_items'),
+            'representation_policy': current.get('representation_policy', 'default') or 'default'
+        }
+
+        # Merge updates into payload
+        for key, value in filtered_updates.items():
+            if key == 'metadata' and isinstance(value, (dict, list)):
+                current_payload[key] = json.dumps(value)
+            else:
+                current_payload[key] = value
+
+        # Sanitize representation policy
+        representation_policy = (current_payload.get('representation_policy') or 'default').strip().lower()
+        current_payload['representation_policy'] = representation_policy
+
+        if 'tags' in filtered_updates and isinstance(current_payload['tags'], str):
+            current_payload['tags'] = [current_payload['tags']]
+
+        db_updates: Dict[str, Any] = {}
+
+        # Prepare content updates when content or policy changes
+        if 'content' in filtered_updates or 'representation_policy' in filtered_updates:
+            stored_content, compressed_payload = _prepare_content_for_storage(current_payload.get('content'), representation_policy)
+            db_updates['content'] = stored_content
+            db_updates['content_compressed'] = compressed_payload
+
+        if 'summary' in filtered_updates or 'representation_policy' in filtered_updates:
+            summary_value = current_payload.get('summary')
+            if summary_value and COMPRESSION_AVAILABLE and _should_compress(representation_policy):
+                db_updates['summary'] = compress_content(summary_value)
+            else:
+                db_updates['summary'] = summary_value
+
+        for simple_field in ['tags', 'pinned', 'owner', 'claimed_by', 'assigned_to', 'status', 'type', 'parent_id', 'linked_items', 'metadata']:
+            if simple_field in filtered_updates:
+                db_updates[simple_field] = current_payload.get(simple_field)
+
+        if representation_policy != current.get('representation_policy') or 'representation_policy' in filtered_updates:
+            db_updates['representation_policy'] = representation_policy
+
+        # Recompute tamper hash using stored representations
+        tamper_hash = compute_note_tamper_hash({
+            'content': current_payload.get('content'),
+            'summary': current_payload.get('summary'),
+            'tags': current_payload.get('tags'),
+            'pinned': current_payload.get('pinned'),
+            'owner': current_payload.get('owner'),
+            'teambook_name': current.get('teambook_name'),
+            'linked_items': current_payload.get('linked_items'),
+            'representation_policy': representation_policy,
+            'metadata': current_payload.get('metadata'),
+            'type': current_payload.get('type'),
+            'parent_id': current_payload.get('parent_id'),
+        })
+        db_updates['tamper_hash'] = tamper_hash
+
+        if not db_updates:
+            return False
+
+        set_clause = ", ".join(f"{col} = ?" for col in db_updates.keys())
+        values = list(db_updates.values())
+        values.append(note_id)
+
+        with _get_db_conn() as conn:
             conn.execute(f"UPDATE notes SET {set_clause} WHERE id = ?", values)
-            return True
+        return True
 
     def delete_note(self, note_id: int) -> bool:
         """Delete a note"""
