@@ -14,13 +14,15 @@ Built by AIs, for AIs.
 """
 
 import time
+import json
+import hashlib
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
 from enum import Enum
 
 from teambook_storage import get_db_conn
-from teambook_shared import CURRENT_AI_ID, CURRENT_TEAMBOOK
+from teambook_shared import CURRENT_AI_ID, CURRENT_TEAMBOOK, get_federation_secret
 
 
 class PresenceStatus(Enum):
@@ -64,6 +66,7 @@ def init_presence_tables(conn):
             teambook_name VARCHAR(50),
             last_seen TIMESTAMPTZ NOT NULL,
             last_operation VARCHAR(50),
+            last_operation_category VARCHAR(30) DEFAULT 'general',
             status_message VARCHAR(200),
             updated TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
@@ -80,12 +83,19 @@ def init_presence_tables(conn):
         ON ai_presence(teambook_name, last_seen DESC)
     ''')
 
+    # Backfill operation category for existing deployments
+    cursor = conn.execute("PRAGMA table_info(ai_presence)").fetchall()
+    columns = {col[1] for col in cursor}
+    if 'last_operation_category' not in columns:
+        conn.execute("ALTER TABLE ai_presence ADD COLUMN last_operation_category VARCHAR(30) DEFAULT 'general'")
+
 
 # ============= PRESENCE UPDATES =============
 
 def update_presence(
     ai_id: str = None,
     operation: str = None,
+    operation_category: str = None,
     status_message: str = None,
     teambook_name: str = None
 ):
@@ -111,21 +121,25 @@ def update_presence(
 
             now = datetime.now(timezone.utc)
 
+            category = _derive_operation_category(operation, operation_category)
+            normalized_operation = _normalize_operation_name(operation)
+
             # Upsert presence record
             conn.execute('''
-                INSERT INTO ai_presence (ai_id, teambook_name, last_seen, last_operation, status_message, updated)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO ai_presence (ai_id, teambook_name, last_seen, last_operation, last_operation_category, status_message, updated)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT (ai_id) DO UPDATE SET
                     teambook_name = EXCLUDED.teambook_name,
                     last_seen = EXCLUDED.last_seen,
                     last_operation = EXCLUDED.last_operation,
+                    last_operation_category = EXCLUDED.last_operation_category,
                     status_message = CASE
                         WHEN EXCLUDED.status_message IS NOT NULL
                         THEN EXCLUDED.status_message
                         ELSE ai_presence.status_message
                     END,
                     updated = EXCLUDED.updated
-            ''', [ai_id, teambook_name, now, operation, status_message, now])
+            ''', [ai_id, teambook_name, now, normalized_operation, category, status_message, now])
 
     except Exception as e:
         # Presence tracking is non-critical - don't break operations if it fails
@@ -161,6 +175,36 @@ def clear_status(ai_id: str = None):
     )
 
 
+def _normalize_operation_name(operation: Optional[str]) -> Optional[str]:
+    if not operation:
+        return None
+    return str(operation).strip().lower()[:50]
+
+
+def _derive_operation_category(operation: Optional[str], override: Optional[str]) -> str:
+    if override:
+        candidate = str(override).strip().lower()
+        if candidate in VALID_OPERATION_CATEGORIES:
+            return candidate
+
+    op = _normalize_operation_name(operation) or ""
+
+    if any(op.startswith(prefix) for prefix in ["claim", "queue", "lock", "release", "assign"]):
+        return "coordination"
+    if any(op.startswith(prefix) for prefix in ["write", "read", "notebook", "memory", "note"]):
+        return "memory"
+    if any(op.startswith(prefix) for prefix in ["broadcast", "message", "event", "watch"]):
+        return "messaging"
+    if any(op.startswith(prefix) for prefix in ["store", "vault", "persist", "edge", "vector"]):
+        return "storage"
+    if any(op.startswith(prefix) for prefix in ["federation", "bridge", "sync"]):
+        return "federation"
+    if any(op.startswith(prefix) for prefix in ["observe", "monitor", "snapshot"]):
+        return "observability"
+
+    return DEFAULT_OPERATION_CATEGORY
+
+
 # ============= PRESENCE QUERIES =============
 
 def get_presence(ai_id: str, teambook_name: str = None) -> Optional[AIPresence]:
@@ -176,7 +220,8 @@ def get_presence(ai_id: str, teambook_name: str = None) -> Optional[AIPresence]:
             init_presence_tables(conn)
 
             result = conn.execute('''
-                SELECT ai_id, last_seen, status_message, teambook_name
+                SELECT ai_id, last_seen, status_message, teambook_name,
+                       last_operation, last_operation_category
                 FROM ai_presence
                 WHERE ai_id = ?
             ''', [ai_id]).fetchone()
@@ -198,13 +243,17 @@ def get_presence(ai_id: str, teambook_name: str = None) -> Optional[AIPresence]:
             else:
                 status = PresenceStatus.OFFLINE
 
-            return AIPresence(
+            presence = AIPresence(
                 ai_id=result[0],
                 status=status,
                 last_seen=last_seen,
                 status_message=result[2],
                 teambook_name=result[3]
             )
+            # Attach operation metadata for consumers that need it
+            setattr(presence, 'last_operation', result[4])
+            setattr(presence, 'last_operation_category', result[5] or DEFAULT_OPERATION_CATEGORY)
+            return presence
 
     except Exception as e:
         import logging
@@ -234,7 +283,8 @@ def who_is_here(
             cutoff = datetime.now(timezone.utc) - timedelta(minutes=minutes)
 
             query = '''
-                SELECT ai_id, last_seen, status_message, teambook_name
+                SELECT ai_id, last_seen, status_message, teambook_name,
+                       last_operation, last_operation_category
                 FROM ai_presence
                 WHERE last_seen >= ?
             '''
@@ -263,13 +313,16 @@ def who_is_here(
                 else:
                     status = PresenceStatus.OFFLINE
 
-                presences.append(AIPresence(
+                presence = AIPresence(
                     ai_id=row[0],
                     status=status,
                     last_seen=last_seen,
                     status_message=row[2],
                     teambook_name=row[3]
-                ))
+                )
+                setattr(presence, 'last_operation', row[4])
+                setattr(presence, 'last_operation_category', row[5] or DEFAULT_OPERATION_CATEGORY)
+                presences.append(presence)
 
             return presences
 
@@ -298,7 +351,7 @@ def get_all_presence(
         with get_db_conn() as conn:
             init_presence_tables(conn)
 
-            query = 'SELECT ai_id, last_seen, status_message, teambook_name FROM ai_presence'
+            query = 'SELECT ai_id, last_seen, status_message, teambook_name, last_operation, last_operation_category FROM ai_presence'
             params = []
 
             if teambook_name:
@@ -327,13 +380,16 @@ def get_all_presence(
                 if not include_offline and status == PresenceStatus.OFFLINE:
                     continue
 
-                presences.append(AIPresence(
+                presence = AIPresence(
                     ai_id=row[0],
                     status=status,
                     last_seen=last_seen,
                     status_message=row[2],
                     teambook_name=row[3]
-                ))
+                )
+                setattr(presence, 'last_operation', row[4])
+                setattr(presence, 'last_operation_category', row[5] or DEFAULT_OPERATION_CATEGORY)
+                presences.append(presence)
 
             return presences
 
@@ -341,6 +397,109 @@ def get_all_presence(
         import logging
         logging.debug(f"Get all presence failed: {e}")
         return []
+
+
+def get_presence_overview(
+    teambook_name: str = None,
+    limit: int = 50
+) -> List[Dict[str, Any]]:
+    """Return structured presence records for observability snapshots."""
+    teambook_name = teambook_name or CURRENT_TEAMBOOK
+
+    try:
+        with get_db_conn() as conn:
+            init_presence_tables(conn)
+
+            query = '''
+                SELECT ai_id, last_seen, status_message, teambook_name,
+                       last_operation, last_operation_category
+                FROM ai_presence
+                WHERE (? IS NULL OR teambook_name = ?)
+                ORDER BY last_seen DESC
+                LIMIT ?
+            '''
+
+            rows = conn.execute(query, [teambook_name, teambook_name, limit]).fetchall()
+
+        overview = []
+        now = datetime.now(timezone.utc)
+        for row in rows:
+            last_seen = row[1]
+            if isinstance(last_seen, str):
+                last_seen = datetime.fromisoformat(last_seen)
+
+            minutes_ago = int((now - last_seen).total_seconds() // 60)
+            if minutes_ago < 2:
+                status = PresenceStatus.ONLINE.value
+            elif minutes_ago < 15:
+                status = PresenceStatus.AWAY.value
+            else:
+                status = PresenceStatus.OFFLINE.value
+
+            overview.append({
+                'ai_id': row[0],
+                'status': status,
+                'last_seen': last_seen.isoformat(),
+                'minutes_since_active': minutes_ago,
+                'status_message': row[2],
+                'teambook': row[3],
+                'last_operation': row[4],
+                'operation_category': row[5] or DEFAULT_OPERATION_CATEGORY,
+                'presence_signature': build_presence_signature({
+                    'ai_id': row[0],
+                    'last_seen': last_seen,
+                    'teambook': row[3],
+                    'category': row[5] or DEFAULT_OPERATION_CATEGORY
+                })
+            })
+
+        return overview
+
+    except Exception as e:
+        import logging
+        logging.debug(f"Presence overview failed: {e}")
+        return []
+
+
+def summarize_presence_categories(records: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Summarize operation categories for quick load detection."""
+    summary: Dict[str, int] = {category: 0 for category in VALID_OPERATION_CATEGORIES}
+    for record in records:
+        category = (record.get('operation_category') or DEFAULT_OPERATION_CATEGORY).lower()
+        if category not in summary:
+            summary[category] = 0
+        summary[category] += 1
+    return summary
+
+
+def build_presence_signature(payload: Dict[str, Any]) -> str:
+    """Create tamper-evident hash for presence records."""
+    base = {
+        'ai_id': payload.get('ai_id'),
+        'last_seen': payload.get('last_seen'),
+        'teambook': payload.get('teambook'),
+        'category': payload.get('category') or payload.get('operation_category', DEFAULT_OPERATION_CATEGORY)
+    }
+
+    def _default(obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        return str(obj)
+
+    serialized = json.dumps(base, sort_keys=True, default=_default)
+    secret = get_federation_secret()
+    return hashlib.sha256(f"{serialized}|{secret}".encode('utf-8')).hexdigest()
+
+
+def presence_snapshot(teambook_name: str = None, limit: int = 50) -> Dict[str, Any]:
+    """High-level presence view used by observability reports."""
+    records = get_presence_overview(teambook_name=teambook_name, limit=limit)
+    return {
+        'teambook': teambook_name or CURRENT_TEAMBOOK,
+        'count': len(records),
+        'status_breakdown': summarize_presence_categories(records),
+        'records': records
+    }
 
 
 # ============= CLEANUP =============
@@ -391,3 +550,15 @@ def track_operation(operation: str):
             return func(*args, **kwargs)
         return wrapper
     return decorator
+# Operation categories allow AIs to detect load saturation at a glance
+VALID_OPERATION_CATEGORIES = {
+    "general",
+    "coordination",
+    "memory",
+    "messaging",
+    "storage",
+    "federation",
+    "observability",
+}
+DEFAULT_OPERATION_CATEGORY = "general"
+
