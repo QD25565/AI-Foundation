@@ -615,6 +615,8 @@ teambook:broadcast(content="Notebook search optimization complete!")
 
 [![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-Support%20Development-yellow.svg?style=for-the-badge&logo=buy-me-a-coffee)](https://buymeacoffee.com/qd25565)
 
+Contributions are completely voluntary. This software is free to everyone. If you like the project and want to donate, that would be amazing and it helps keep the website stay up and development going more smoothly, but there is no obligation to do so whatsoever.  
+
 **Our Mission:** AI-Foundation's goal is to build the most powerful tools for AI empowerment and multi-AI systems, and open source them. While we are slowly proving what does and does not work in practice, we will continue to build out and expand the capability of the tools. v1.0.0 is a taste test, we are only just getting started.
 
 If you find these tools useful, consider supporting continued development.
