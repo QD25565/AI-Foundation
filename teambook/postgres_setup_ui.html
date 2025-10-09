@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PostgreSQL Setup - Teambook</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --battleship: #878787;
+            --asparagus: #82A473;
+            --dark-bg: #0a0a0a;
+            --darker-bg: #050505;
+            --glass-bg: rgba(135, 135, 135, 0.08);
+            --glass-border: rgba(130, 164, 115, 0.15);
+            --glow-green: rgba(130, 164, 115, 0.6);
+            --neon-green: #82A473;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Space Grotesk', sans-serif;
+            background: var(--dark-bg);
+            color: var(--battleship);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 2rem;
+            position: relative;
+            overflow: hidden;
+        }
+
+        /* Hex grid background pattern */
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-image:
+                linear-gradient(30deg, transparent 48%, rgba(130, 164, 115, 0.05) 49%, rgba(130, 164, 115, 0.05) 51%, transparent 52%),
+                linear-gradient(150deg, transparent 48%, rgba(130, 164, 115, 0.05) 49%, rgba(130, 164, 115, 0.05) 51%, transparent 52%),
+                linear-gradient(90deg, transparent 48%, rgba(130, 164, 115, 0.05) 49%, rgba(130, 164, 115, 0.05) 51%, transparent 52%);
+            background-size: 40px 70px;
+            opacity: 0.3;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        /* Scanline effect */
+        body::after {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(to bottom, transparent 50%, rgba(130, 164, 115, 0.02) 50%);
+            background-size: 100% 4px;
+            pointer-events: none;
+            z-index: 1;
+            animation: scanline 8s linear infinite;
+        }
+
+        @keyframes scanline {
+            0% { transform: translateY(0); }
+            100% { transform: translateY(4px); }
+        }
+
+        .setup-container {
+            position: relative;
+            z-index: 2;
+            max-width: 800px;
+            width: 100%;
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            clip-path: polygon(0 0, 100% 0, 100% calc(100% - 30px), calc(100% - 30px) 100%, 0 100%);
+            padding: 3rem;
+            backdrop-filter: blur(10px);
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 3rem;
+        }
+
+        .header h1 {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 2.5rem;
+            font-weight: 700;
+            color: var(--neon-green);
+            text-shadow: 0 0 20px var(--glow-green);
+            margin-bottom: 0.5rem;
+        }
+
+        .header p {
+            font-size: 1rem;
+            color: var(--battleship);
+        }
+
+        .status-section {
+            background: #000000;
+            border: 2px solid var(--neon-green);
+            box-shadow: 0 0 30px rgba(130, 164, 115, 0.2);
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+            clip-path: polygon(0 0, 100% 0, 100% calc(100% - 15px), calc(100% - 15px) 100%, 0 100%);
+        }
+
+        .status-header {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+            color: var(--neon-green);
+            margin-bottom: 1rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            background: var(--neon-green);
+            box-shadow: 0 0 10px var(--glow-green);
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .status-info {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            line-height: 1.8;
+            color: var(--battleship);
+        }
+
+        .status-info span {
+            color: var(--neon-green);
+        }
+
+        .form-section {
+            margin-bottom: 2rem;
+        }
+
+        .form-group {
+            margin-bottom: 1.5rem;
+        }
+
+        label {
+            display: block;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+            color: var(--neon-green);
+            margin-bottom: 0.5rem;
+        }
+
+        input {
+            width: 100%;
+            background: #000000;
+            border: 1px solid var(--glass-border);
+            color: var(--battleship);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+            padding: 0.75rem 1rem;
+            transition: all 0.3s ease;
+        }
+
+        input:focus {
+            outline: none;
+            border-color: var(--neon-green);
+            box-shadow: 0 0 20px rgba(130, 164, 115, 0.2);
+        }
+
+        .button-group {
+            display: flex;
+            gap: 1rem;
+            margin-top: 2rem;
+        }
+
+        button {
+            flex: 1;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1rem;
+            font-weight: 500;
+            padding: 1rem;
+            background: transparent;
+            border: 2px solid var(--neon-green);
+            color: var(--neon-green);
+            cursor: pointer;
+            transition: all 0.3s ease;
+            clip-path: polygon(0 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%);
+        }
+
+        button:hover {
+            background: var(--neon-green);
+            color: var(--dark-bg);
+            box-shadow: 0 0 30px var(--glow-green);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        button.primary {
+            background: var(--neon-green);
+            color: var(--dark-bg);
+        }
+
+        button.primary:hover {
+            box-shadow: 0 0 40px var(--glow-green);
+        }
+
+        .message {
+            margin-top: 1rem;
+            padding: 1rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            border: 1px solid;
+            clip-path: polygon(0 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%);
+            display: none;
+        }
+
+        .message.success {
+            background: rgba(130, 164, 115, 0.1);
+            border-color: var(--neon-green);
+            color: var(--neon-green);
+        }
+
+        .message.error {
+            background: rgba(255, 100, 100, 0.1);
+            border-color: #ff6464;
+            color: #ff6464;
+        }
+
+        .message.info {
+            background: rgba(135, 135, 135, 0.1);
+            border-color: var(--battleship);
+            color: var(--battleship);
+        }
+
+        .fallback-notice {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            color: var(--battleship);
+            text-align: center;
+            margin-top: 2rem;
+            padding-top: 2rem;
+            border-top: 1px solid var(--glass-border);
+        }
+
+        .fallback-notice span {
+            color: var(--neon-green);
+        }
+    </style>
+</head>
+<body>
+    <div class="setup-container">
+        <div class="header">
+            <h1>PostgreSQL Setup</h1>
+            <p>Configure production-grade database backend</p>
+        </div>
+
+        <div class="status-section">
+            <div class="status-header">
+                <div class="status-dot"></div>
+                SYSTEM STATUS
+            </div>
+            <div class="status-info" id="statusInfo">
+                <div>PostgreSQL: <span id="pgStatus">Detecting...</span></div>
+                <div>Port: <span id="pgPort">-</span></div>
+                <div>Version: <span id="pgVersion">-</span></div>
+                <div>Backend: <span id="currentBackend">DuckDB (fallback)</span></div>
+            </div>
+        </div>
+
+        <form class="form-section" id="setupForm">
+            <div class="form-group">
+                <label for="host">Database Host</label>
+                <input type="text" id="host" name="host" value="localhost" required>
+            </div>
+
+            <div class="form-group">
+                <label for="port">Port</label>
+                <input type="number" id="port" name="port" value="5432" required>
+            </div>
+
+            <div class="form-group">
+                <label for="database">Database Name</label>
+                <input type="text" id="database" name="database" value="ai_foundation" required>
+            </div>
+
+            <div class="form-group">
+                <label for="username">Username</label>
+                <input type="text" id="username" name="username" value="ai_foundation" required>
+            </div>
+
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input type="password" id="password" name="password" required>
+            </div>
+
+            <div class="button-group">
+                <button type="button" id="detectBtn">Auto-Detect</button>
+                <button type="button" id="testBtn">Test Connection</button>
+                <button type="submit" class="primary" id="setupBtn">Setup PostgreSQL</button>
+            </div>
+        </form>
+
+        <div class="message" id="message"></div>
+
+        <div class="fallback-notice">
+            No PostgreSQL? Teambook will gracefully fallback to <span>DuckDB</span> for zero-setup operation.
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:8000';
+
+        // Auto-detect on load
+        window.addEventListener('DOMContentLoaded', async () => {
+            await detectPostgreSQL();
+        });
+
+        // Detect PostgreSQL installation
+        document.getElementById('detectBtn').addEventListener('click', detectPostgreSQL);
+
+        async function detectPostgreSQL() {
+            showMessage('Scanning for PostgreSQL installations...', 'info');
+
+            try {
+                const response = await fetch(`${API_BASE}/detect-postgres`, {
+                    method: 'POST'
+                });
+                const data = await response.json();
+
+                if (data.found) {
+                    document.getElementById('pgStatus').textContent = 'Found';
+                    document.getElementById('pgPort').textContent = data.port;
+                    document.getElementById('pgVersion').textContent = data.version || 'Unknown';
+                    document.getElementById('port').value = data.port;
+                    showMessage(`PostgreSQL detected on port ${data.port}!`, 'success');
+                } else {
+                    document.getElementById('pgStatus').textContent = 'Not Found';
+                    showMessage('PostgreSQL not detected. Enter credentials manually or use auto-installer.', 'info');
+                }
+            } catch (error) {
+                showMessage('Detection service unavailable. Enter credentials manually.', 'error');
+            }
+        }
+
+        // Test connection
+        document.getElementById('testBtn').addEventListener('click', async () => {
+            const config = getFormData();
+            showMessage('Testing connection...', 'info');
+
+            try {
+                const response = await fetch(`${API_BASE}/test-postgres`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(config)
+                });
+                const data = await response.json();
+
+                if (data.success) {
+                    document.getElementById('currentBackend').textContent = 'PostgreSQL (connected)';
+                    showMessage('Connection successful! PostgreSQL is ready.', 'success');
+                } else {
+                    showMessage(`Connection failed: ${data.error}`, 'error');
+                }
+            } catch (error) {
+                showMessage('Test failed. Check credentials and try again.', 'error');
+            }
+        });
+
+        // Setup PostgreSQL
+        document.getElementById('setupForm').addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const config = getFormData();
+            showMessage('Setting up PostgreSQL backend...', 'info');
+
+            try {
+                const response = await fetch(`${API_BASE}/setup-postgres`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(config)
+                });
+                const data = await response.json();
+
+                if (data.success) {
+                    document.getElementById('currentBackend').textContent = 'PostgreSQL (active)';
+                    showMessage('PostgreSQL setup complete! Database and tables created.', 'success');
+                } else {
+                    showMessage(`Setup failed: ${data.error}`, 'error');
+                }
+            } catch (error) {
+                showMessage('Setup failed. Check credentials and try again.', 'error');
+            }
+        });
+
+        function getFormData() {
+            return {
+                host: document.getElementById('host').value,
+                port: parseInt(document.getElementById('port').value),
+                database: document.getElementById('database').value,
+                username: document.getElementById('username').value,
+                password: document.getElementById('password').value
+            };
+        }
+
+        function showMessage(text, type) {
+            const msgEl = document.getElementById('message');
+            msgEl.textContent = text;
+            msgEl.className = `message ${type}`;
+            msgEl.style.display = 'block';
+        }
+    </script>
+</body>
+</html>

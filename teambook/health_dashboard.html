@@ -1,0 +1,522 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Teambook Health Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --battleship: #878787;
+            --asparagus: #82A473;
+            --dark-bg: #0a0a0a;
+            --darker-bg: #050505;
+            --glass-bg: rgba(135, 135, 135, 0.08);
+            --glass-border: rgba(130, 164, 115, 0.15);
+            --glow-green: rgba(130, 164, 115, 0.6);
+            --neon-green: #82A473;
+            --error-red: #ff6464;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Space Grotesk', sans-serif;
+            background: var(--dark-bg);
+            color: var(--battleship);
+            min-height: 100vh;
+            padding: 2rem;
+            position: relative;
+            overflow-x: hidden;
+        }
+
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-image:
+                linear-gradient(30deg, transparent 48%, rgba(130, 164, 115, 0.05) 49%, rgba(130, 164, 115, 0.05) 51%, transparent 52%),
+                linear-gradient(150deg, transparent 48%, rgba(130, 164, 115, 0.05) 49%, rgba(130, 164, 115, 0.05) 51%, transparent 52%),
+                linear-gradient(90deg, transparent 48%, rgba(130, 164, 115, 0.05) 49%, rgba(130, 164, 115, 0.05) 51%, transparent 52%);
+            background-size: 40px 70px;
+            opacity: 0.3;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        body::after {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(to bottom, transparent 50%, rgba(130, 164, 115, 0.02) 50%);
+            background-size: 100% 4px;
+            pointer-events: none;
+            z-index: 1;
+            animation: scanline 8s linear infinite;
+        }
+
+        @keyframes scanline {
+            0% { transform: translateY(0); }
+            100% { transform: translateY(4px); }
+        }
+
+        .container {
+            position: relative;
+            z-index: 2;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 3rem;
+        }
+
+        .header h1 {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 3rem;
+            font-weight: 700;
+            color: var(--neon-green);
+            text-shadow: 0 0 20px var(--glow-green);
+            margin-bottom: 0.5rem;
+        }
+
+        .header p {
+            font-size: 1.1rem;
+            color: var(--battleship);
+        }
+
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 0.5rem 1rem;
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            margin-top: 1rem;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            background: var(--neon-green);
+            box-shadow: 0 0 10px var(--glow-green);
+            animation: pulse 2s infinite;
+        }
+
+        .status-dot.offline {
+            background: var(--error-red);
+            box-shadow: 0 0 10px rgba(255, 100, 100, 0.6);
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .backend-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(350px, 1fr));
+            gap: 2rem;
+            margin-bottom: 3rem;
+        }
+
+        .backend-card {
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            clip-path: polygon(0 0, 100% 0, 100% calc(100% - 20px), calc(100% - 20px) 100%, 0 100%);
+            padding: 2rem;
+            backdrop-filter: blur(10px);
+            transition: all 0.3s ease;
+        }
+
+        .backend-card:hover {
+            border-color: var(--neon-green);
+            box-shadow: 0 0 30px rgba(130, 164, 115, 0.2);
+        }
+
+        .backend-card.active {
+            border: 2px solid var(--neon-green);
+            box-shadow: 0 0 30px rgba(130, 164, 115, 0.3);
+        }
+
+        .backend-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+        }
+
+        .backend-name {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: var(--neon-green);
+        }
+
+        .backend-status {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            padding: 0.25rem 0.75rem;
+            border: 1px solid;
+        }
+
+        .backend-status.online {
+            border-color: var(--neon-green);
+            color: var(--neon-green);
+            background: rgba(130, 164, 115, 0.1);
+        }
+
+        .backend-status.offline {
+            border-color: var(--error-red);
+            color: var(--error-red);
+            background: rgba(255, 100, 100, 0.1);
+        }
+
+        .backend-info {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            line-height: 1.8;
+            color: var(--battleship);
+            margin-bottom: 1.5rem;
+        }
+
+        .backend-info div {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.25rem 0;
+            border-bottom: 1px solid rgba(130, 164, 115, 0.1);
+        }
+
+        .backend-info span {
+            color: var(--neon-green);
+        }
+
+        .fallback-flow {
+            background: #000000;
+            border: 2px solid var(--neon-green);
+            clip-path: polygon(0 0, 100% 0, 100% calc(100% - 20px), calc(100% - 20px) 100%, 0 100%);
+            padding: 2rem;
+            margin-bottom: 3rem;
+        }
+
+        .fallback-header {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1.2rem;
+            color: var(--neon-green);
+            margin-bottom: 1.5rem;
+            text-align: center;
+        }
+
+        .fallback-chain {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            gap: 1rem;
+            flex-wrap: wrap;
+        }
+
+        .fallback-item {
+            font-family: 'JetBrains Mono', monospace;
+            padding: 1rem 1.5rem;
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            color: var(--battleship);
+            clip-path: polygon(0 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%);
+        }
+
+        .fallback-item.active {
+            border-color: var(--neon-green);
+            color: var(--neon-green);
+            box-shadow: 0 0 20px var(--glow-green);
+        }
+
+        .fallback-arrow {
+            font-size: 1.5rem;
+            color: var(--battleship);
+        }
+
+        .stats-section {
+            background: var(--glass-bg);
+            border: 1px solid var(--glass-border);
+            clip-path: polygon(0 0, 100% 0, 100% calc(100% - 20px), calc(100% - 20px) 100%, 0 100%);
+            padding: 2rem;
+            margin-bottom: 3rem;
+        }
+
+        .stats-header {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1.2rem;
+            color: var(--neon-green);
+            margin-bottom: 1.5rem;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 2rem;
+        }
+
+        .stat-item {
+            text-align: center;
+        }
+
+        .stat-value {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 3rem;
+            font-weight: 700;
+            color: var(--neon-green);
+            text-shadow: 0 0 20px var(--glow-green);
+            margin-bottom: 0.5rem;
+        }
+
+        .stat-label {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.9rem;
+            color: var(--battleship);
+        }
+
+        .action-buttons {
+            display: flex;
+            justify-content: center;
+            gap: 1rem;
+            flex-wrap: wrap;
+        }
+
+        button {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 1rem;
+            font-weight: 500;
+            padding: 1rem 2rem;
+            background: transparent;
+            border: 2px solid var(--neon-green);
+            color: var(--neon-green);
+            cursor: pointer;
+            transition: all 0.3s ease;
+            clip-path: polygon(0 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%);
+        }
+
+        button:hover {
+            background: var(--neon-green);
+            color: var(--dark-bg);
+            box-shadow: 0 0 30px var(--glow-green);
+        }
+
+        .refresh-notice {
+            text-align: center;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            color: var(--battleship);
+            margin-top: 2rem;
+        }
+
+        .refresh-notice span {
+            color: var(--neon-green);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Health Dashboard</h1>
+            <p>Real-time backend status monitoring</p>
+            <div class="status-badge">
+                <div class="status-dot" id="systemDot"></div>
+                <span>System: <span id="systemStatus">Loading...</span></span>
+            </div>
+        </div>
+
+        <div class="fallback-flow">
+            <div class="fallback-header">GRACEFUL FALLBACK CHAIN</div>
+            <div class="fallback-chain">
+                <div class="fallback-item" id="pgFallback">PostgreSQL</div>
+                <div class="fallback-arrow">→</div>
+                <div class="fallback-item" id="redisFallback">Redis</div>
+                <div class="fallback-arrow">→</div>
+                <div class="fallback-item active" id="duckdbFallback">DuckDB</div>
+            </div>
+        </div>
+
+        <div class="backend-grid">
+            <div class="backend-card" id="pgCard">
+                <div class="backend-header">
+                    <div class="backend-name">PostgreSQL</div>
+                    <div class="backend-status offline" id="pgStatus">Checking...</div>
+                </div>
+                <div class="backend-info" id="pgInfo">
+                    <div><span>Status:</span> <span id="pgStatusText">Checking...</span></div>
+                    <div><span>Connection:</span> <span id="pgConnection">-</span></div>
+                    <div><span>Type:</span> <span>Production-grade database</span></div>
+                </div>
+            </div>
+
+            <div class="backend-card" id="redisCard">
+                <div class="backend-header">
+                    <div class="backend-name">Redis</div>
+                    <div class="backend-status offline" id="redisStatus">Checking...</div>
+                </div>
+                <div class="backend-info" id="redisInfo">
+                    <div><span>Status:</span> <span id="redisStatusText">Checking...</span></div>
+                    <div><span>Connection:</span> <span id="redisConnection">-</span></div>
+                    <div><span>Type:</span> <span>Real-time messaging</span></div>
+                </div>
+            </div>
+
+            <div class="backend-card active" id="duckdbCard">
+                <div class="backend-header">
+                    <div class="backend-name">DuckDB</div>
+                    <div class="backend-status online">ACTIVE</div>
+                </div>
+                <div class="backend-info">
+                    <div><span>Status:</span> <span>Always available</span></div>
+                    <div><span>Connection:</span> <span>Local file</span></div>
+                    <div><span>Type:</span> <span>Zero-setup fallback</span></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="stats-section" id="statsSection" style="display: none;">
+            <div class="stats-header">DATABASE STATISTICS</div>
+            <div class="stats-grid">
+                <div class="stat-item">
+                    <div class="stat-value" id="statNotes">-</div>
+                    <div class="stat-label">Total Notes</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="statPinned">-</div>
+                    <div class="stat-label">Pinned</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="statClaimed">-</div>
+                    <div class="stat-label">Claimed</div>
+                </div>
+                <div class="stat-item">
+                    <div class="stat-value" id="statVault">-</div>
+                    <div class="stat-label">Vault Keys</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="action-buttons">
+            <button onclick="refreshHealth()">Refresh Status</button>
+            <button onclick="window.location.href='postgres_setup_ui.html'">Configure PostgreSQL</button>
+        </div>
+
+        <div class="refresh-notice">
+            Auto-refresh: <span id="countdown">10</span>s | Backend: <span id="activeBackend">DuckDB</span>
+        </div>
+    </div>
+
+    <script>
+        const API_BASE = 'http://localhost:8000';
+        let refreshInterval;
+        let countdownInterval;
+
+        window.addEventListener('DOMContentLoaded', () => {
+            refreshHealth();
+            startAutoRefresh();
+        });
+
+        async function refreshHealth() {
+            try {
+                const response = await fetch(`${API_BASE}/health`, {
+                    method: 'POST'
+                });
+                const health = await response.json();
+                updateDashboard(health);
+            } catch (error) {
+                console.error('Health check failed:', error);
+                showOfflineMode();
+            }
+        }
+
+        function updateDashboard(health) {
+            // Update system status
+            const backend = health.current_backend;
+            document.getElementById('systemStatus').textContent = `${backend.toUpperCase()} Active`;
+            document.getElementById('activeBackend').textContent = backend.toUpperCase();
+            document.getElementById('systemDot').className = 'status-dot';
+
+            // Update PostgreSQL
+            if (health.postgres.available) {
+                document.getElementById('pgStatus').textContent = 'ONLINE';
+                document.getElementById('pgStatus').className = 'backend-status online';
+                document.getElementById('pgStatusText').textContent = health.postgres.status;
+                document.getElementById('pgConnection').textContent = health.postgres.url || 'Connected';
+                document.getElementById('pgCard').className = backend === 'postgresql' ? 'backend-card active' : 'backend-card';
+                document.getElementById('pgFallback').className = backend === 'postgresql' ? 'fallback-item active' : 'fallback-item';
+            } else {
+                document.getElementById('pgStatus').textContent = 'OFFLINE';
+                document.getElementById('pgStatus').className = 'backend-status offline';
+                document.getElementById('pgStatusText').textContent = health.postgres.status;
+                document.getElementById('pgConnection').textContent = '-';
+                document.getElementById('pgCard').className = 'backend-card';
+                document.getElementById('pgFallback').className = 'fallback-item';
+            }
+
+            // Update Redis
+            if (health.redis.available) {
+                document.getElementById('redisStatus').textContent = 'ONLINE';
+                document.getElementById('redisStatus').className = 'backend-status online';
+                document.getElementById('redisStatusText').textContent = health.redis.status;
+                document.getElementById('redisConnection').textContent = health.redis.url || 'Connected';
+                document.getElementById('redisCard').className = backend === 'redis' ? 'backend-card active' : 'backend-card';
+                document.getElementById('redisFallback').className = backend === 'redis' ? 'fallback-item active' : 'fallback-item';
+            } else {
+                document.getElementById('redisStatus').textContent = 'OFFLINE';
+                document.getElementById('redisStatus').className = 'backend-status offline';
+                document.getElementById('redisStatusText').textContent = health.redis.status;
+                document.getElementById('redisConnection').textContent = '-';
+                document.getElementById('redisCard').className = 'backend-card';
+                document.getElementById('redisFallback').className = 'fallback-item';
+            }
+
+            // DuckDB always active as fallback
+            document.getElementById('duckdbCard').className = backend === 'duckdb' ? 'backend-card active' : 'backend-card';
+            document.getElementById('duckdbFallback').className = backend === 'duckdb' ? 'fallback-item active' : 'fallback-item';
+
+            // Update stats if available
+            if (health.stats && Object.keys(health.stats).length > 0) {
+                document.getElementById('statsSection').style.display = 'block';
+                document.getElementById('statNotes').textContent = health.stats.n || 0;
+                document.getElementById('statPinned').textContent = health.stats.p || 0;
+                document.getElementById('statClaimed').textContent = health.stats.c || 0;
+                document.getElementById('statVault').textContent = health.stats.v || 0;
+            }
+        }
+
+        function showOfflineMode() {
+            document.getElementById('systemStatus').textContent = 'Service Unavailable';
+            document.getElementById('systemDot').className = 'status-dot offline';
+        }
+
+        function startAutoRefresh() {
+            let countdown = 10;
+
+            countdownInterval = setInterval(() => {
+                countdown--;
+                document.getElementById('countdown').textContent = countdown;
+
+                if (countdown <= 0) {
+                    countdown = 10;
+                    refreshHealth();
+                }
+            }, 1000);
+        }
+    </script>
+</body>
+</html>
