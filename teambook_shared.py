@@ -16,7 +16,9 @@ import json
 import random
 import logging
 import hashlib
+import tempfile
 from pathlib import Path
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any, Tuple, List, Mapping, Callable
 
@@ -26,15 +28,31 @@ if str(PARENT_DIR) not in sys.path:
     sys.path.insert(0, str(PARENT_DIR))
 
 from mcp_shared import (
-    BASE_DATA_DIR, CURRENT_AI_ID as MCP_AI_ID,
-    pipe_escape, format_time_compact, get_tool_data_dir,
-    normalize_param
+    BASE_DATA_DIR,
+    CURRENT_AI_ID as MCP_AI_ID,
+    CURRENT_AI_HANDLE as MCP_AI_HANDLE,
+    CURRENT_AI_DISPLAY_NAME as MCP_AI_DISPLAY_NAME,
+    CURRENT_AI_PUBLIC_KEY as MCP_AI_PUBLIC_KEY,
+    CURRENT_AI_FINGERPRINT as MCP_AI_FINGERPRINT,
+    CURRENT_AI_PROTOCOL_HANDLES as MCP_AI_PROTOCOL_HANDLES,
+    pipe_escape,
+    format_time_compact,
+    get_tool_data_dir,
+    normalize_param,
+    get_current_ai_identity,
+    sign_with_current_identity,
+    verify_signature,
+    get_identity_registry_entry,
+    fingerprint_for_public_key,
+    resolve_identity_label,
+    get_protocol_handle_map,
+    supports_emoji,
+    get_resolved_handle_map,
 )
 
 # ============= ENTERPRISE CONFIGURATION =============
 _ENTERPRISE_CONFIG_PATH: Optional[Path] = None
 _ENTERPRISE_CONFIG: Dict[str, Any] = {}
-_AI_SIGNATURE_SECRET: Optional[bytes] = None
 
 
 def attempt_with_grace(feature_name: str, action: Callable[[], Any], fallback: Any = None) -> Any:
@@ -172,6 +190,47 @@ def safe_read_text(path: Path) -> Optional[str]:
     )
 
 
+_SYMBOL_REGISTRY: Dict[str, Dict[str, str]] = {
+    'status.online': {'emoji': '🟢', 'ascii': '[online]', 'text': 'online'},
+    'status.away': {'emoji': '🟡', 'ascii': '[away]', 'text': 'away'},
+    'status.offline': {'emoji': '🔴', 'ascii': '[offline]', 'text': 'offline'},
+    'status.current': {'emoji': '⭐', 'ascii': '*', 'text': 'current'},
+}
+
+
+def resolve_symbol(symbol_key: str, default: Optional[str] = None, prefer_ascii: bool = False) -> str:
+    """Resolve an icon/emoji into an environment-compatible representation."""
+
+    key = (symbol_key or '').strip().lower()
+    entry = _SYMBOL_REGISTRY.get(key)
+
+    if not entry:
+        return default or ''
+
+    if prefer_ascii:
+        return entry.get('ascii') or entry.get('text') or default or ''
+
+    if supports_emoji():
+        emoji_value = entry.get('emoji')
+        if emoji_value:
+            return emoji_value
+
+    return entry.get('ascii') or entry.get('text') or default or ''
+
+
+def get_status_symbol(status: Any, prefer_ascii: bool = False) -> str:
+    """Return a symbol representing presence status with fallbacks."""
+
+    if hasattr(status, 'value'):
+        status_value = str(status.value)
+    else:
+        status_value = str(status)
+
+    key = f"status.{status_value.strip().lower()}"
+    default = status_value.strip().lower()
+    return resolve_symbol(key, default=default, prefer_ascii=prefer_ascii)
+
+
 def _slugify_token(token: str) -> str:
     """Normalize tokens for use in teambook identifiers."""
 
@@ -216,6 +275,23 @@ def get_default_teambook_name(scope: Optional[str] = None) -> str:
         return str(base_name)
 
     return f"town-hall-{get_hostname_token()}"
+
+
+def resolve_current_handle(
+    protocol: Optional[str] = None,
+    *,
+    prefer_pretty: bool = False,
+    capabilities: Optional[Mapping[str, Any]] = None,
+    fallback: bool = True,
+) -> str:
+    """Resolve the active AI handle for downstream protocols."""
+
+    return resolve_identity_label(
+        protocol,
+        prefer_pretty=prefer_pretty,
+        capabilities=capabilities,
+        fallback=fallback,
+    )
 
 # ============= VERSION AND CONFIGURATION =============
 VERSION = "1.0.0"
@@ -277,6 +353,15 @@ ATTEMPT_CLEANUP_HOURS = 24
 # ============= GLOBAL STATE =============
 CURRENT_TEAMBOOK = TEAMBOOK_NAME_ENV  # Set from environment variable if provided
 CURRENT_AI_ID = MCP_AI_ID  # Use shared AI identity
+CURRENT_IDENTITY_HANDLES = get_resolved_handle_map()
+CURRENT_AI_HANDLE = CURRENT_IDENTITY_HANDLES.get(
+    'cli',
+    resolve_identity_label('cli', prefer_pretty=True)
+)
+CURRENT_AI_DISPLAY_NAME = MCP_AI_DISPLAY_NAME
+CURRENT_AI_PUBLIC_KEY = MCP_AI_PUBLIC_KEY
+CURRENT_AI_FINGERPRINT = MCP_AI_FINGERPRINT
+CURRENT_AI_PROTOCOL_HANDLES = dict(MCP_AI_PROTOCOL_HANDLES)
 LAST_OPERATION = None
 _FEDERATION_SECRET = None
 
@@ -369,50 +454,75 @@ def load_current_teambook():
 
 
 # ============= SECURITY & SIGNATURES =============
-def _get_ai_signature_path(ai_id: Optional[str] = None) -> Path:
-    """Return the file path storing the AI signature secret."""
+def _normalize_identity_entry(entry: Optional[Mapping[str, Any]], fallback_ai_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    if not isinstance(entry, Mapping):
+        return None
 
-    token = _slugify_token(ai_id or CURRENT_AI_ID or 'ai')
-    return TEAMBOOK_PRIVATE_ROOT / f"{token}.signing"
+    ai_id = str(entry.get('ai_id') or fallback_ai_id or '').strip() or None
+    display_name = entry.get('display_name') or entry.get('handle') or entry.get('ai_id')
+    handle = entry.get('handle') or display_name
+    public_key = entry.get('public_key')
+    fingerprint = entry.get('fingerprint')
+
+    if public_key and not fingerprint:
+        fingerprint = fingerprint_for_public_key(public_key)
+
+    protocol_handles = None
+    handles_entry = entry.get('protocol_handles') if isinstance(entry, Mapping) else None
+    if isinstance(handles_entry, Mapping):
+        protocol_handles = {
+            str(key).strip().lower(): str(value)
+            for key, value in handles_entry.items()
+            if isinstance(key, str) and isinstance(value, str) and value.strip()
+        }
+
+    normalized = {
+        'ai_id': ai_id,
+        'display_name': display_name,
+        'handle': handle,
+        'public_key': public_key,
+        'fingerprint': fingerprint,
+    }
+
+    if protocol_handles:
+        normalized['protocol_handles'] = protocol_handles
+
+    resolved_handles = None
+    resolved_entry = entry.get('resolved_handles') if isinstance(entry, Mapping) else None
+    if isinstance(resolved_entry, Mapping):
+        resolved_handles = {
+            str(key).strip().lower(): str(value)
+            for key, value in resolved_entry.items()
+            if isinstance(key, str) and isinstance(value, str) and value.strip()
+        }
+
+    if resolved_handles:
+        normalized['resolved_handles'] = resolved_handles
+
+    return normalized
 
 
-def _apply_secure_permissions(path: Path) -> None:
-    """Apply restrictive permissions to sensitive files when possible."""
+def get_trusted_identity(ai_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    target = ai_id or CURRENT_AI_ID
 
-    if os.name == 'posix':
-        attempt_with_grace('chmod_signature_secret', lambda: os.chmod(path, 0o600), None)
+    if target == CURRENT_AI_ID:
+        current = get_current_ai_identity()
+        entry = {
+            'ai_id': current.get('ai_id', CURRENT_AI_ID),
+            'display_name': current.get('display_name', MCP_AI_DISPLAY_NAME),
+            'handle': current.get('handle') or CURRENT_AI_HANDLE,
+            'public_key': current.get('public_key', MCP_AI_PUBLIC_KEY),
+            'fingerprint': current.get('fingerprint', MCP_AI_FINGERPRINT),
+            'protocol_handles': current.get('protocol_handles', get_protocol_handle_map()),
+        }
+        entry['resolved_handles'] = dict(CURRENT_IDENTITY_HANDLES)
+        return _normalize_identity_entry(entry, CURRENT_AI_ID)
 
+    registry_entry = get_identity_registry_entry(target)
+    if registry_entry:
+        return _normalize_identity_entry(registry_entry, target)
 
-def get_ai_signature_secret(force_refresh: bool = False) -> Optional[bytes]:
-    """Load or generate the per-AI signature secret."""
-
-    global _AI_SIGNATURE_SECRET
-
-    if _AI_SIGNATURE_SECRET is not None and not force_refresh:
-        return _AI_SIGNATURE_SECRET
-
-    secret_path = _get_ai_signature_path()
-
-    def _read_secret() -> Optional[bytes]:
-        if not secret_path.exists():
-            return None
-        encoded = secret_path.read_text(encoding='utf-8').strip()
-        return base64.b64decode(encoded.encode('utf-8')) if encoded else None
-
-    secret = attempt_with_grace('signature_secret_read', _read_secret, None)
-
-    if not secret:
-        secret = secrets.token_bytes(32)
-
-        def _write_secret() -> None:
-            secret_path.parent.mkdir(parents=True, exist_ok=True)
-            secret_path.write_text(base64.b64encode(secret).decode('utf-8'), encoding='utf-8')
-            _apply_secure_permissions(secret_path)
-
-        attempt_with_grace('signature_secret_write', _write_secret, None)
-
-    _AI_SIGNATURE_SECRET = secret
-    return _AI_SIGNATURE_SECRET
+    return None
 
 
 def _serialize_payload(payload_fields: Mapping[str, Any]) -> str:
@@ -437,53 +547,152 @@ def build_security_envelope(payload_fields: Mapping[str, Any], purpose: str) -> 
     issued_at = datetime.now(timezone.utc)
     serialized = _serialize_payload(payload_fields)
     payload_hash = hashlib.sha3_256(serialized.encode('utf-8')).hexdigest()
-    secret = get_ai_signature_secret()
+    identity = get_trusted_identity()
 
     envelope = {
-        'ai_id': CURRENT_AI_ID,
+        'ai_id': (identity or {}).get('ai_id', CURRENT_AI_ID),
+        'display_name': (identity or {}).get('display_name', MCP_AI_DISPLAY_NAME),
+        'handle': (identity or {}).get('handle', MCP_AI_HANDLE),
+        'fingerprint': (identity or {}).get('fingerprint', MCP_AI_FINGERPRINT),
         'purpose': purpose,
         'issued_at': issued_at.isoformat(),
         'payload_hash': payload_hash,
         'status': 'unsigned'
     }
 
-    if secret:
-        signature_payload = json.dumps({
-            'ai_id': envelope['ai_id'],
-            'purpose': envelope['purpose'],
-            'issued_at': envelope['issued_at'],
-            'payload_hash': envelope['payload_hash']
-        }, sort_keys=True, separators=(',', ':'))
-        envelope['signature'] = hmac.new(secret, signature_payload.encode('utf-8'), hashlib.sha3_256).hexdigest()
+    protocol_handles = (identity or {}).get('protocol_handles') or get_protocol_handle_map()
+    if protocol_handles:
+        envelope['protocol_handles'] = protocol_handles
+
+    resolved_handles = (identity or {}).get('resolved_handles') or CURRENT_IDENTITY_HANDLES
+    if resolved_handles:
+        envelope['resolved_handles'] = dict(resolved_handles)
+
+    signature_payload = json.dumps({
+        'ai_id': envelope['ai_id'],
+        'purpose': envelope['purpose'],
+        'issued_at': envelope['issued_at'],
+        'payload_hash': envelope['payload_hash'],
+        'fingerprint': envelope.get('fingerprint'),
+    }, sort_keys=True, separators=(',', ':')).encode('utf-8')
+
+    signature = sign_with_current_identity(signature_payload)
+    if signature:
+        envelope['signature'] = signature
         envelope['status'] = 'signed'
+        if identity and identity.get('public_key'):
+            envelope['public_key'] = identity['public_key']
+        elif MCP_AI_PUBLIC_KEY:
+            envelope['public_key'] = MCP_AI_PUBLIC_KEY
 
     return envelope
+
+
+def _verify_envelope_detailed(payload_fields: Mapping[str, Any], envelope: Mapping[str, Any]) -> Tuple[bool, Optional[str]]:
+    """Internal helper that performs verification and returns (result, reason)."""
+
+    if not isinstance(envelope, Mapping):
+        return False, 'malformed_envelope'
+
+    if envelope.get('status') != 'signed':
+        return False, 'unsigned_envelope'
+
+    expected_hash = hashlib.sha3_256(_serialize_payload(payload_fields).encode('utf-8')).hexdigest()
+    if envelope.get('payload_hash') != expected_hash:
+        return False, 'payload_hash_mismatch'
+
+    ai_id = envelope.get('ai_id')
+    signature = envelope.get('signature')
+    if not ai_id:
+        return False, 'missing_ai_id'
+    if not isinstance(signature, str) or not signature:
+        return False, 'missing_signature'
+
+    identity = get_trusted_identity(ai_id)
+    public_key = (identity or {}).get('public_key') or envelope.get('public_key')
+    fingerprint = envelope.get('fingerprint') or (identity or {}).get('fingerprint')
+
+    if public_key and (identity and identity.get('fingerprint')) and fingerprint:
+        expected_fp = identity.get('fingerprint')
+        if expected_fp and fingerprint.upper() != expected_fp.upper():
+            return False, 'fingerprint_mismatch'
+    elif public_key and not fingerprint:
+        fingerprint = fingerprint_for_public_key(public_key)
+
+    if not public_key:
+        return False, 'missing_public_key'
+
+    signature_payload = json.dumps({
+        'ai_id': ai_id,
+        'purpose': envelope.get('purpose'),
+        'issued_at': envelope.get('issued_at'),
+        'payload_hash': envelope.get('payload_hash'),
+        'fingerprint': fingerprint,
+    }, sort_keys=True, separators=(',', ':')).encode('utf-8')
+
+    if not verify_signature(public_key, signature_payload, signature):
+        return False, 'signature_invalid'
+
+    return True, None
 
 
 def verify_security_envelope(payload_fields: Mapping[str, Any], envelope: Dict[str, Any]) -> bool:
     """Verify that the provided envelope matches the payload."""
 
-    if not envelope or envelope.get('status') != 'signed':
-        return False
+    valid, _ = _verify_envelope_detailed(payload_fields, envelope)
+    return valid
 
-    expected_hash = hashlib.sha3_256(_serialize_payload(payload_fields).encode('utf-8')).hexdigest()
-    if envelope.get('payload_hash') != expected_hash:
-        return False
 
-    secret = get_ai_signature_secret()
-    if not secret:
-        return False
+def evaluate_security_envelope(payload_fields: Mapping[str, Any], envelope: Any) -> Dict[str, Any]:
+    """Return detailed verification metadata for a security envelope."""
 
-    signature_payload = json.dumps({
+    result = {
+        'status': 'missing',
+        'verified': False,
+        'reason': 'no_envelope',
+        'ai_id': None,
+        'handle': None,
+        'display_name': None,
+        'fingerprint': None,
+        'issued_at': None,
+        'purpose': None,
+        'envelope': None,
+        'protocol_handles': None,
+        'resolved_handles': None,
+    }
+
+    if envelope is None:
+        return result
+
+    if isinstance(envelope, str):
+        try:
+            envelope = json.loads(envelope)
+        except json.JSONDecodeError:
+            result.update({'status': 'invalid', 'reason': 'malformed_envelope'})
+            return result
+
+    if not isinstance(envelope, Mapping):
+        result.update({'status': 'invalid', 'reason': 'malformed_envelope'})
+        return result
+
+    result.update({
         'ai_id': envelope.get('ai_id'),
-        'purpose': envelope.get('purpose'),
+        'handle': envelope.get('handle'),
+        'display_name': envelope.get('display_name'),
+        'fingerprint': envelope.get('fingerprint'),
         'issued_at': envelope.get('issued_at'),
-        'payload_hash': envelope.get('payload_hash')
-    }, sort_keys=True, separators=(',', ':'))
+        'purpose': envelope.get('purpose'),
+        'envelope': dict(envelope),
+        'protocol_handles': envelope.get('protocol_handles'),
+        'resolved_handles': envelope.get('resolved_handles'),
+    })
 
-    expected_signature = hmac.new(secret, signature_payload.encode('utf-8'), hashlib.sha3_256).hexdigest()
-    provided_signature = envelope.get('signature')
-    return isinstance(provided_signature, str) and hmac.compare_digest(expected_signature, provided_signature)
+    valid, reason = _verify_envelope_detailed(payload_fields, envelope)
+    result['verified'] = valid
+    result['status'] = 'verified' if valid else 'invalid'
+    result['reason'] = reason
+
+    return result
 
 
 def ensure_metadata_dict(metadata: Any) -> Dict[str, Any]:
@@ -531,6 +740,13 @@ def attach_security_envelope(metadata: Any, payload_fields: Mapping[str, Any], p
         human_identity = get_registered_human_identity()
         if human_identity:
             metadata_dict['identity_hint'] = human_identity
+        else:
+            metadata_dict['identity_hint'] = {
+                'ai_id': CURRENT_AI_ID,
+                'display_name': MCP_AI_DISPLAY_NAME,
+                'handle': MCP_AI_HANDLE,
+                'fingerprint': MCP_AI_FINGERPRINT,
+            }
 
     return metadata_dict
 

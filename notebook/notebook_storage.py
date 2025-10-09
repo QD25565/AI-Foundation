@@ -839,6 +839,187 @@ def get_storage_stats() -> Dict:
         logging.error(f"Could not get storage stats: {e}")
         return {}
 
+
+def store_embedding_vector(
+    note_id: int,
+    embedding: np.ndarray,
+    *,
+    content: Optional[str] = None,
+    summary: Optional[str] = None,
+    tags: Optional[str] = None,
+    force: bool = False
+) -> Dict[str, Any]:
+    """Persist an embedding for a note with optional upsert semantics."""
+
+    if collection is None:
+        return {"stored": False, "error": "collection_not_initialized"}
+
+    vector_id = f"note_{note_id}"
+    document = (content or summary or "")[:1000]
+    metadata = {
+        "tags": tags or "",
+        "summary": (summary or "")[:200]
+    }
+
+    payload = {
+        "ids": [vector_id],
+        "embeddings": [embedding.tolist()],
+        "documents": [document],
+        "metadatas": [metadata],
+    }
+
+    try:
+        if force and hasattr(collection, "update"):
+            collection.update(**payload)
+        else:
+            collection.add(**payload)
+        return {"stored": True, "vector_id": vector_id, "operation": "update" if force else "add"}
+    except Exception as primary_error:
+        if not force:
+            return {"stored": False, "error": str(primary_error)}
+
+        # Force mode: fall back to delete+add in case update isn't supported
+        try:
+            collection.delete(ids=[vector_id])
+            collection.add(**payload)
+            return {
+                "stored": True,
+                "vector_id": vector_id,
+                "operation": "replace",
+                "warning": str(primary_error)
+            }
+        except Exception as secondary_error:
+            return {
+                "stored": False,
+                "error": f"{primary_error}; fallback_failed:{secondary_error}"
+            }
+
+
+def semantic_search(query: str, limit: int = 50) -> Dict[str, Any]:
+    """Execute a semantic search and return detailed diagnostics."""
+
+    start = time.time()
+    diagnostics: Dict[str, Any] = {
+        "query": (query or "").strip(),
+        "limit": int(limit or 0) if limit else 0,
+        "status": "skipped",
+        "ids": [],
+        "results": []
+    }
+
+    if not diagnostics["query"]:
+        diagnostics["reason"] = "empty_query"
+        diagnostics["elapsed_ms"] = int((time.time() - start) * 1000)
+        return diagnostics
+
+    if not _ensure_embeddings_loaded():
+        diagnostics["status"] = "unavailable"
+        diagnostics["reason"] = "embeddings_not_initialized"
+        diagnostics["elapsed_ms"] = int((time.time() - start) * 1000)
+        return diagnostics
+
+    if encoder is None or collection is None:
+        diagnostics["status"] = "unavailable"
+        diagnostics["reason"] = "encoder_missing"
+        diagnostics["elapsed_ms"] = int((time.time() - start) * 1000)
+        return diagnostics
+
+    try:
+        query_embedding = encoder.encode(diagnostics["query"], convert_to_numpy=True)
+        raw_limit = max(1, min(int(limit or 10), 100))
+        results = collection.query(
+            query_embeddings=[query_embedding.tolist()],
+            n_results=raw_limit
+        )
+
+        ids = []
+        enriched: List[Dict[str, Any]] = []
+        raw_ids = results.get("ids") or []
+        raw_distances = results.get("distances") or []
+
+        if raw_ids:
+            for rank, note_id in enumerate(raw_ids[0]):
+                try:
+                    numeric_id = int(str(note_id).replace("note_", ""))
+                except ValueError:
+                    continue
+
+                score_entry: Dict[str, Any] = {
+                    "id": numeric_id,
+                    "rank": rank + 1,
+                }
+
+                if raw_distances and raw_distances[0] and len(raw_distances[0]) > rank:
+                    try:
+                        distance = float(raw_distances[0][rank])
+                        score_entry["distance"] = distance
+                        score_entry["score"] = round(max(0.0, 1.0 - distance), 6)
+                    except Exception:
+                        pass
+
+                ids.append(numeric_id)
+                enriched.append(score_entry)
+
+        diagnostics.update({
+            "status": "ok",
+            "ids": ids[:raw_limit],
+            "results": enriched[:raw_limit],
+            "vector_count": collection.count() if collection else 0,
+            "embedding_model": EMBEDDING_MODEL
+        })
+    except Exception as exc:
+        diagnostics.update({
+            "status": "error",
+            "error": str(exc)
+        })
+
+    diagnostics["elapsed_ms"] = int((time.time() - start) * 1000)
+    return diagnostics
+
+
+def get_search_health(sample_limit: int = 5) -> Dict[str, Any]:
+    """Return a consolidated view of notebook search readiness."""
+
+    snapshot: Dict[str, Any] = {
+        "embedding_model": EMBEDDING_MODEL,
+        "fts_enabled": bool(FTS_ENABLED),
+        "vector_index_ready": bool(collection is not None),
+    }
+
+    try:
+        snapshot["vector_index_size"] = collection.count() if collection else 0
+    except Exception as exc:
+        snapshot["vector_index_size_error"] = str(exc)
+
+    try:
+        with _get_db_conn() as conn:
+            total_notes = conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
+            missing_vectors = conn.execute(
+                "SELECT COUNT(*) FROM notes WHERE has_vector = FALSE"
+            ).fetchone()[0]
+            pinned_notes = conn.execute(
+                "SELECT COUNT(*) FROM notes WHERE pinned = TRUE"
+            ).fetchone()[0]
+
+            sample_rows = conn.execute(
+                "SELECT id, created FROM notes WHERE has_vector = FALSE ORDER BY created DESC LIMIT ?",
+                [max(0, int(sample_limit or 0))]
+            ).fetchall()
+
+        snapshot.update({
+            "total_notes": total_notes,
+            "missing_vectors": missing_vectors,
+            "pinned_notes": pinned_notes,
+            "missing_vector_samples": [
+                {"id": row[0], "created": row[1].isoformat() if hasattr(row[1], 'isoformat') else str(row[1])}
+                for row in sample_rows
+            ]
+        })
+    except Exception as exc:
+        snapshot["database_error"] = str(exc)
+
+    return snapshot
+
 # Initialize storage on module import
 init_db()
 # NOTE: Embeddings are now lazy-loaded on first use via ensure_embeddings_loaded()

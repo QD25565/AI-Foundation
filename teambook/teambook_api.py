@@ -28,6 +28,7 @@ from teambook_shared import (
     pipe_escape, clean_text, simple_summary, format_time_compact,
     parse_time_query, save_last_operation, get_last_operation,
     get_note_id, get_outputs_dir, logging, IS_CLI,
+    get_status_symbol,
     attach_security_envelope, ensure_directory,
     # Linear Memory Bridge
     CACHE_AVAILABLE, _save_note_to_cache, load_my_notes_cache
@@ -48,8 +49,9 @@ from teambook_storage import (
     _get_db_conn, _init_db, _init_vault_manager, _init_vector_db,
     _create_all_edges, _detect_or_create_session,
     _calculate_pagerank_if_needed, _resolve_note_id,
-    _add_to_vector_store, _search_vectors,
-    collection,
+    _add_to_vector_store, _search_vectors, semantic_search,
+    collection, store_embedding_vector, get_search_health,
+    encoder,
     _log_operation_to_db
 )
 
@@ -137,6 +139,42 @@ except ImportError:
 
 # Global storage adapter instance (initialized lazily per teambook)
 _storage_adapters = {}
+
+_LAST_SEARCH_DEBUG: Dict[str, Any] = {}
+
+
+def _record_search_debug(snapshot: Dict[str, Any]) -> None:
+    """Track the most recent teambook search diagnostics."""
+
+    global _LAST_SEARCH_DEBUG
+    payload = dict(snapshot or {})
+    payload.setdefault('captured_at', datetime.utcnow().isoformat())
+    _LAST_SEARCH_DEBUG = payload
+
+
+def _normalize_id_list(raw_ids: Any) -> List[int]:
+    """Normalize CLI/MCP-friendly note id inputs into a list of ints."""
+
+    if raw_ids is None:
+        return []
+
+    if isinstance(raw_ids, int):
+        return [raw_ids]
+
+    if isinstance(raw_ids, (list, tuple, set)):
+        items = raw_ids
+    else:
+        items = re.split(r"[\s,]+", str(raw_ids))
+
+    normalized: List[int] = []
+    for item in items:
+        if not item:
+            continue
+        try:
+            normalized.append(int(str(item).strip()))
+        except ValueError:
+            continue
+    return normalized
 
 def _get_storage_adapter(teambook_name: str = None) -> 'TeambookStorageAdapter':
     """Get or create storage adapter for the current teambook"""
@@ -1263,6 +1301,25 @@ def read(query: str = None, tag: str = None, when: str = None,
         if not any([show_all, query, tag, when, owner, pinned_only]) and limit != 0:
             limit = DEFAULT_RECENT
         
+        mode = str(kwargs.get('mode', mode or 'hybrid')).lower()
+        query_text = str(query or '').strip()
+
+        debug_info: Dict[str, Any] = {
+            "status": "started",
+            "teambook": CURRENT_TEAMBOOK or 'private',
+            "query": query_text,
+            "mode": mode,
+            "limit": int(limit),
+            "filters": {
+                "tag": str(tag).strip() if tag else None,
+                "when": str(when).strip() if when else None,
+                "owner": owner,
+                "pinned_only": bool(pinned_only)
+            },
+            "embedding_model": teambook_storage.EMBEDDING_MODEL,
+            "fts_enabled": bool(teambook_storage.FTS_ENABLED)
+        }
+
         # Handle special owner queries
         if owner == "me":
             owner = CURRENT_AI_ID
@@ -1272,6 +1329,7 @@ def read(query: str = None, tag: str = None, when: str = None,
         # Try storage adapter for simple reads (no advanced features)
         adapter = _get_storage_adapter(CURRENT_TEAMBOOK)
         use_advanced_features = mode in ["semantic", "hybrid"] or when  # Time queries and vector search need DuckDB
+        debug_info["storage_adapter"] = bool(adapter)
 
         if adapter and not use_advanced_features:
             # Use storage adapter (PostgreSQL/Redis/DuckDB)
@@ -1309,7 +1367,20 @@ def read(query: str = None, tag: str = None, when: str = None,
 
                 # Format and return results
                 save_last_operation('read', {"notes": all_notes})
-                _log_operation_to_db('read', int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000))
+                duration_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
+                _log_operation_to_db('read', duration_ms)
+
+                debug_info.update({
+                    "status": "adapter_only",
+                    "returned": {
+                        "notes": len(all_notes),
+                        "pinned_included": 0,
+                        "note_ids": [note[0] for note in all_notes[:min(len(all_notes), 25)]]
+                    },
+                    "duration_ms": duration_ms,
+                    "source": "read"
+                })
+                _record_search_debug(debug_info)
 
                 if not all_notes:
                     return ""
@@ -1366,7 +1437,7 @@ def read(query: str = None, tag: str = None, when: str = None,
             notes = []
             
             # Get pinned notes
-            if not pinned_only and not query and not tag and not when and not owner:
+            if not pinned_only and not query_text and not tag and not when and not owner:
                 pinned_notes = conn.execute('''
                     SELECT id, content, summary, tags, pinned, author, owner, created, pagerank
                     FROM notes WHERE pinned = TRUE AND type IS NULL
@@ -1374,16 +1445,37 @@ def read(query: str = None, tag: str = None, when: str = None,
                 ''').fetchall()
             else:
                 pinned_notes = []
-            
-            if query:
-                # Semantic search
-                semantic_ids = _search_vectors(str(query).strip(), limit) if mode in ["semantic", "hybrid"] else []
-                
-                # Keyword search
-                keyword_ids = []
+
+            debug_info["pinned_prefetch"] = len(pinned_notes)
+
+            if query_text:
+                semantic_ids: List[int] = []
+                if mode in ["semantic", "hybrid"]:
+                    semantic_debug = semantic_search(query_text, limit)
+                    semantic_ids = semantic_debug.get("ids", []) or []
+                    debug_info["semantic"] = semantic_debug
+                else:
+                    debug_info["semantic"] = {
+                        "status": "skipped",
+                        "reason": "mode_disabled",
+                        "mode": mode
+                    }
+
+                keyword_ids: List[int] = []
+                keyword_debug: Dict[str, Any] = {
+                    "status": "skipped",
+                    "mode": mode
+                }
+
                 if mode in ["keyword", "hybrid"]:
+                    keyword_debug = {
+                        "status": "started",
+                        "fts_enabled": bool(teambook_storage.FTS_ENABLED)
+                    }
+
                     if teambook_storage.FTS_ENABLED:
                         try:
+                            start_fts = time.perf_counter()
                             fts_results = conn.execute('''
                                 SELECT DISTINCT n.id
                                 FROM fts_main_notes f
@@ -1391,23 +1483,48 @@ def read(query: str = None, tag: str = None, when: str = None,
                                 WHERE f MATCH ?
                                 ORDER BY n.pagerank DESC, n.created DESC
                                 LIMIT ?
-                            ''', [str(query).strip(), limit]).fetchall()
+                            ''', [query_text, limit]).fetchall()
                             keyword_ids = [row[0] for row in fts_results]
-                        except Exception as e:
+                            keyword_debug.update({
+                                "status": "ok",
+                                "engine": "fts",
+                                "count": len(keyword_ids),
+                                "elapsed_ms": int((time.perf_counter() - start_fts) * 1000)
+                            })
+                        except Exception as exc:
                             teambook_storage.FTS_ENABLED = False
-                            logging.debug(f'FTS failed, using LIKE: {e}')
-                            pass
-                    
+                            keyword_debug.update({
+                                "status": "error",
+                                "engine": "fts",
+                                "error": str(exc)[:160]
+                            })
+
                     if not keyword_ids:
-                        like_query = f"%{str(query).strip()}%"
-                        like_results = conn.execute('''
-                            SELECT id FROM notes 
-                            WHERE (content ILIKE ? OR summary ILIKE ?) AND type IS NULL
-                            ORDER BY pagerank DESC, created DESC
-                            LIMIT ?
-                        ''', [like_query, like_query, limit]).fetchall()
-                        keyword_ids = [row[0] for row in like_results]
-                
+                        like_query = f"%{query_text}%"
+                        try:
+                            start_like = time.perf_counter()
+                            like_results = conn.execute('''
+                                SELECT id FROM notes
+                                WHERE (content ILIKE ? OR summary ILIKE ?) AND type IS NULL
+                                ORDER BY pagerank DESC, created DESC
+                                LIMIT ?
+                            ''', [like_query, like_query, limit]).fetchall()
+                            keyword_ids = [row[0] for row in like_results]
+                            keyword_debug.update({
+                                "status": "ok" if keyword_ids else keyword_debug.get("status", "ok"),
+                                "fallback": "like",
+                                "count": len(keyword_ids),
+                                "elapsed_ms": keyword_debug.get("elapsed_ms", 0) + int((time.perf_counter() - start_like) * 1000)
+                            })
+                        except Exception as exc:
+                            keyword_debug.update({
+                                "status": "error",
+                                "fallback": "like",
+                                "error": str(exc)[:160]
+                            })
+
+                debug_info["keyword"] = keyword_debug
+
                 # Combine results
                 all_ids, seen = [], set()
                 for i in range(max(len(semantic_ids), len(keyword_ids))):
@@ -1417,23 +1534,33 @@ def read(query: str = None, tag: str = None, when: str = None,
                     if i < len(keyword_ids) and keyword_ids[i] not in seen:
                         all_ids.append(keyword_ids[i])
                         seen.add(keyword_ids[i])
-                
+
+                debug_info["merge"] = {
+                    "semantic_candidates": len(semantic_ids),
+                    "keyword_candidates": len(keyword_ids),
+                    "combined": len(all_ids)
+                }
+
                 if all_ids:
                     note_ids = all_ids[:limit]
                     placeholders = ','.join(['?'] * len(note_ids))
-                    
+
                     where_clause = " AND ".join(conditions) if conditions else "1=1"
                     final_params = note_ids + params + ([note_ids[0]] if note_ids else [])
-                    
+
                     notes = conn.execute(f'''
                         SELECT id, content, summary, tags, pinned, author, owner, created, pagerank
                         FROM notes
                         WHERE id IN ({placeholders}) AND {where_clause} AND type IS NULL
-                        ORDER BY 
+                        ORDER BY
                             CASE WHEN id = ? THEN 0 ELSE 1 END,
                             pinned DESC, pagerank DESC, created DESC
                     ''', final_params).fetchall()
             else:
+                debug_info["semantic"] = {"status": "skipped", "reason": "empty_query"}
+                debug_info["keyword"] = {"status": "skipped", "reason": "empty_query"}
+                debug_info["merge"] = {"combined": 0, "semantic_candidates": 0, "keyword_candidates": 0}
+
                 # Regular query without search
                 where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
                 if where_clause:
@@ -1450,9 +1577,18 @@ def read(query: str = None, tag: str = None, when: str = None,
         
         # Combine results
         all_notes = list(pinned_notes) + [n for n in notes if not n[4]]
-        
+
+        duration_ms = int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000)
+        debug_info["duration_ms"] = duration_ms
+        debug_info["returned"] = {
+            "notes": len(all_notes),
+            "pinned_included": len(pinned_notes),
+            "note_ids": [note[0] for note in all_notes[:min(len(all_notes), 25)]]
+        }
+        debug_info.setdefault("source", "read")
+
         save_last_operation('read', {"notes": all_notes})
-        _log_operation_to_db('read', int((datetime.now(timezone.utc) - start_time).total_seconds() * 1000))
+        _log_operation_to_db('read', duration_ms)
 
         # Check for pending notifications (Phase 2 feature)
         notifications = None
@@ -1464,6 +1600,10 @@ def read(query: str = None, tag: str = None, when: str = None,
 
         # Pure pipe format (token optimized!)
         if not all_notes:
+            debug_info["status"] = "empty"
+            if notifications:
+                debug_info["notifications"] = notifications.get('unseen')
+            _record_search_debug(debug_info)
             if notifications:
                 return f"!no_notes|notify:{notifications['unseen']}:{notifications['summary'][:30]}"
             return ""  # Empty = nothing found
@@ -1488,11 +1628,203 @@ def read(query: str = None, tag: str = None, when: str = None,
         # Add notifications if present
         if notifications:
             result = f"NOTIFY:{notifications['unseen']}:{notifications['summary'][:30]}\n{result}"
+            debug_info["notifications"] = notifications.get('unseen')
+
+        debug_info["status"] = "ok"
+        _record_search_debug(debug_info)
         return result
 
     except Exception as e:
         logging.error(f"Error in read: {e}", exc_info=True)
+        debug_snapshot = {
+            "status": "error",
+            "error": str(e),
+            "query": str(query or ''),
+            "mode": mode,
+            "limit": limit,
+            "source": "read"
+        }
+        _record_search_debug(debug_snapshot)
         return f"!read_failed:{str(e)[:50]}"
+
+
+def search_diagnostics(limit: int = 25, **kwargs) -> str:
+    """Expose the most recent teambook search diagnostics snapshot."""
+
+    if not _LAST_SEARCH_DEBUG:
+        return json.dumps({"error": "no_search_history"})
+
+    try:
+        limit_value = int(kwargs.get('limit', limit)) if kwargs.get('limit', limit) is not None else None
+    except Exception:
+        limit_value = limit
+
+    snapshot = json.loads(json.dumps(_LAST_SEARCH_DEBUG))
+
+    semantic_section = snapshot.get('semantic')
+    if isinstance(semantic_section, dict) and isinstance(semantic_section.get('results'), list):
+        if limit_value is not None and limit_value >= 0:
+            semantic_section['results'] = semantic_section['results'][:limit_value]
+
+    returned_section = snapshot.get('returned')
+    if isinstance(returned_section, dict) and isinstance(returned_section.get('note_ids'), list):
+        if limit_value is not None and limit_value >= 0:
+            returned_section['note_ids'] = returned_section['note_ids'][:limit_value]
+
+    return json.dumps(snapshot)
+
+
+def search_health(sample_limit: int = 5, **kwargs) -> str:
+    """Provide a health snapshot for the current teambook search stack."""
+
+    try:
+        sample_limit = int(kwargs.get('sample_limit', kwargs.get('limit', sample_limit)))
+    except Exception:
+        sample_limit = sample_limit or 5
+
+    snapshot = get_search_health(CURRENT_TEAMBOOK, sample_limit)
+    snapshot['captured_at'] = datetime.utcnow().isoformat()
+    return json.dumps(snapshot)
+
+
+def reindex_embeddings(limit: int = None, dry_run: bool = False,
+                       force: bool = False, note_ids: Any = None, **kwargs) -> str:
+    """Rebuild teambook embeddings for missing or selected notes."""
+
+    try:
+        limit = kwargs.get('limit', limit)
+        dry_run = kwargs.get('dry_run', dry_run)
+        force = bool(kwargs.get('force', force))
+        note_ids = kwargs.get('note_ids', note_ids)
+        note_ids_list = _normalize_id_list(note_ids)
+
+        if not encoder or not collection:
+            return json.dumps({"error": "embedding_system_unavailable"})
+
+        with _get_db_conn() as conn:
+            clauses = ["type IS NULL"]
+            params: List[Any] = []
+
+            if CURRENT_TEAMBOOK:
+                clauses.append("(teambook_name = ? OR teambook_name IS NULL)")
+                params.append(CURRENT_TEAMBOOK)
+
+            if note_ids_list:
+                placeholders = ','.join(['?'] * len(note_ids_list))
+                clauses.append(f"id IN ({placeholders})")
+                params.extend(note_ids_list)
+
+            if not force:
+                clauses.append("has_vector = FALSE")
+
+            where_clause = " WHERE " + " AND ".join(clauses) if clauses else ""
+            query = f"SELECT id, content, summary, tags, owner, created FROM notes{where_clause} ORDER BY id"
+
+            if limit:
+                params.append(int(limit))
+                query += " LIMIT ?"
+
+            rows = conn.execute(query, params).fetchall()
+
+            if not rows:
+                return json.dumps({"reindex": "complete", "processed": 0})
+
+            if dry_run:
+                return json.dumps({
+                    "reindex": "dry_run",
+                    "found": len(rows),
+                    "first": rows[0][0],
+                    "last": rows[-1][0]
+                })
+
+            successes = 0
+            failures = 0
+            details: List[Dict[str, Any]] = []
+
+            for note_id, content, summary, tags, owner_val, created in rows:
+                try:
+                    raw_content, raw_summary = content, summary
+                    try:
+                        if teambook_storage.COMPRESSION_AVAILABLE:
+                            raw_content = teambook_storage.decompress_content(content) if content else content
+                            raw_summary = teambook_storage.decompress_content(summary) if summary else summary
+                    except Exception:
+                        raw_content, raw_summary = content, summary
+
+                    tag_list: List[str]
+                    if isinstance(tags, list):
+                        tag_list = tags
+                    elif isinstance(tags, str):
+                        try:
+                            tag_list = json.loads(tags)
+                        except Exception:
+                            tag_list = [t.strip() for t in tags.split(',') if t.strip()]
+                    else:
+                        tag_list = []
+
+                    text = f"{raw_content or ''} {raw_summary or ''} {' '.join(tag_list)}".strip()
+                    if not text:
+                        details.append({"id": note_id, "status": "skipped", "reason": "empty_content"})
+                        continue
+
+                    embedding = encoder.encode(text[:1000], convert_to_numpy=True)
+                    store_result = store_embedding_vector(
+                        note_id,
+                        embedding,
+                        content=raw_content or raw_summary or '',
+                        summary=raw_summary or '',
+                        tags=tag_list,
+                        force=force
+                    )
+
+                    if not store_result.get('stored'):
+                        failures += 1
+                        details.append({
+                            "id": note_id,
+                            "status": "vector_error",
+                            "error": store_result.get('error')
+                        })
+                        continue
+
+                    conn.execute("UPDATE notes SET has_vector = TRUE WHERE id = ?", [note_id])
+                    successes += 1
+                    details.append({
+                        "id": note_id,
+                        "status": "indexed",
+                        "operation": store_result.get('operation'),
+                        "warning": store_result.get('warning')
+                    })
+
+                except Exception as exc:
+                    logging.warning(f"Failed to reindex note {note_id}: {exc}")
+                    failures += 1
+                    details.append({
+                        "id": note_id,
+                        "status": "exception",
+                        "error": str(exc)
+                    })
+
+        summary = {
+            "reindex": "complete",
+            "indexed": successes,
+            "errors": failures,
+            "processed": len(rows),
+            "force": force,
+            "details": details[:50]
+        }
+        return json.dumps(summary)
+
+    except Exception as exc:
+        logging.error(f"reindex_embeddings error: {exc}")
+        return json.dumps({"error": str(exc)})
+
+
+def reembed(limit: int = None, note_ids: Any = None, **kwargs) -> str:
+    """Force refresh embeddings for selected notes."""
+
+    options = dict(kwargs)
+    options['force'] = True
+    return reindex_embeddings(limit=limit, note_ids=note_ids, **options)
 
 def teambook_connection(verbose: bool = False, **kwargs) -> Dict:
     """Get teambook connection status and stats
@@ -2015,7 +2347,10 @@ def who_is_here(minutes: int = 5, **kwargs) -> Dict:
             lines = []
             for ai_id, last_seen in sorted_ais:
                 # Add emoji only for CLI (not MCP)
-                active_marker = "🟢" if (ai_id == CURRENT_AI_ID and IS_CLI) else ""
+                if ai_id == CURRENT_AI_ID and IS_CLI:
+                    active_marker = get_status_symbol('online')
+                else:
+                    active_marker = ""
                 parts = [
                     ai_id,
                     format_time_compact(last_seen),
@@ -2508,6 +2843,10 @@ def batch(operations: List[Dict] = None, **kwargs) -> Dict:
             'claim': claim, 'release': release, 'assign': assign,
             'evolve': evolve, 'attempt': attempt,
             'attempts': attempts, 'combine': combine,
+            'search_diagnostics': search_diagnostics,
+            'search_health': search_health,
+            'reindex_embeddings': reindex_embeddings,
+            'reembed': reembed,
             # Observability
             'who_is_here': who_is_here,
             'what_are_they_doing': what_are_they_doing,

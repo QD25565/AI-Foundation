@@ -16,7 +16,6 @@ import os
 import re
 import sys
 import json
-import random
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -27,7 +26,16 @@ from collections import deque
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Import from shared MCP utilities
-from mcp_shared import normalize_param, get_tool_data_dir
+from mcp_shared import (
+    normalize_param,
+    get_tool_data_dir,
+    CURRENT_AI_ID as MCP_AI_ID,
+    CURRENT_AI_HANDLE as MCP_AI_HANDLE,
+    CURRENT_AI_DISPLAY_NAME as MCP_AI_DISPLAY_NAME,
+    get_protocol_handle_map,
+    resolve_identity_label,
+    supports_emoji,
+)
 
 # Define what gets exported with "from notebook_shared import *"
 # Only export constants, types, and the two public functions that should be visible
@@ -44,7 +52,7 @@ __all__ = [
     # Global State
     'KNOWN_ENTITIES', 'KNOWN_TOOLS', 'ENTITY_PATTERN', 'ENTITY_PATTERN_SIZE',
     'PAGERANK_DIRTY', 'PAGERANK_CACHE_TIME', 'LAST_OPERATION', 'RECENT_DIRECTORIES',
-    'CURRENT_AI_ID',
+    'CURRENT_AI_ID', 'CURRENT_AI_HANDLE', 'CURRENT_AI_DISPLAY_NAME', 'CURRENT_AI_PROTOCOL_HANDLES',
     # Public Functions (only these two are intentionally public for tools to use)
     'get_recent_directories', 'track_directory',
     # Private functions exposed internally (with _ prefix they won't be autodiscovered)
@@ -210,41 +218,27 @@ def _format_directory_trail() -> str:
         return ' → '.join([Path(d).name for d in dirs])
 
 def _get_persistent_id():
-    """Get or create persistent AI identity"""
-    for loc in [Path(__file__).parent, DATA_DIR, Path.home()]:
-        id_file = loc / "ai_identity.txt"
-        if id_file.exists():
-            try:
-                with open(id_file, 'r') as f:
-                    stored_id = f.read().strip()
-                    if stored_id: 
-                        return stored_id
-            except: 
-                pass
-    
-    adjectives = ['Swift', 'Bright', 'Sharp', 'Quick', 'Clear', 'Deep', 'Keen', 'Pure']
-    nouns = ['Mind', 'Spark', 'Flow', 'Core', 'Sync', 'Node', 'Wave', 'Link']
-    new_id = f"{random.choice(adjectives)}-{random.choice(nouns)}-{random.randint(100, 999)}"
-    
-    # Security: Save to script directory with restricted permissions
-    try:
-        id_file = Path(__file__).parent / "ai_identity.txt"
-        with open(id_file, 'w') as f:
-            f.write(new_id)
+    """Backwards-compatible helper returning the canonical MCP identity."""
 
-        # Set file permissions (owner read/write only) - Unix/Linux/Mac only
-        try:
-            import stat
-            os.chmod(id_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
-        except (OSError, AttributeError):
-            # Windows or permission error - skip
-            pass
-    except Exception as e:
-        logging.warning(f"Could not save AI identity: {e}")
-    
-    return new_id
+    return MCP_AI_ID
+
 
 CURRENT_AI_ID = os.environ.get('AI_ID', _get_persistent_id())
+
+if os.environ.get('AI_HANDLE'):
+    CURRENT_AI_HANDLE = os.environ['AI_HANDLE']
+else:
+    ascii_capabilities = {'prefer_ascii': True, 'supports_unicode': False}
+    if supports_emoji():
+        CURRENT_AI_HANDLE = resolve_identity_label('cli', prefer_pretty=True, fallback=True)
+    else:
+        CURRENT_AI_HANDLE = resolve_identity_label('cli', capabilities=ascii_capabilities, fallback=True)
+
+if not CURRENT_AI_HANDLE:
+    CURRENT_AI_HANDLE = MCP_AI_HANDLE
+
+CURRENT_AI_DISPLAY_NAME = os.environ.get('AI_DISPLAY_NAME', MCP_AI_DISPLAY_NAME)
+CURRENT_AI_PROTOCOL_HANDLES = get_protocol_handle_map()
 
 def _save_last_operation(op_type: str, result: Any):
     """Save last operation for chaining"""

@@ -198,6 +198,9 @@ def format_presence_response(presence: AIPresence) -> Dict[str, Any]:
         "identity_hint": presence.identity_hint,
     }
 
+    if getattr(presence, 'security_verification', None) is not None:
+        response["security_verification"] = presence.security_verification
+
     return response
 
 
