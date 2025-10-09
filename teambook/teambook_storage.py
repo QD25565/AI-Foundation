@@ -15,6 +15,8 @@ import time
 import json
 import logging
 import hashlib
+import re
+from collections import deque
 from datetime import datetime, timezone
 from typing import Optional, List, Tuple, Any, Dict
 from pathlib import Path
@@ -95,6 +97,105 @@ collection = None
 vault_manager = None
 EMBEDDING_MODEL = None
 FTS_ENABLED = False
+ACTIVE_EMBED_DIM: Optional[int] = None
+
+# Keep embedding sizes consistent across teambook instances. We project
+# embeddinggemma-300m outputs down to 512d for faster search while retaining
+# deterministic vectors for retrieval.
+TARGET_EMBED_DIMS: Dict[str, int] = {
+    "embeddinggemma-300m": 512,
+}
+
+FACT_PATTERNS: List[Dict[str, Any]] = [
+    {
+        "relation": "resides_in",
+        "patterns": [
+            r"(?P<subject>[A-Z][\w\s]+?)\s+(?:lives in|lives at|is based in)\s+(?P<object>[A-Z][\w\s]+)",
+            r"(?P<subject>[A-Z][\w\s]+?)\s+moved to\s+(?P<object>[A-Z][\w\s]+)"
+        ],
+        "invalidate": True,
+        "confidence": 0.85,
+    },
+    {
+        "relation": "works_at",
+        "patterns": [
+            r"(?P<subject>[A-Z][\w\s]+?)\s+(?:works at|works for|joined)\s+(?P<object>[A-Z][\w\s&]+)"
+        ],
+        "invalidate": True,
+        "confidence": 0.8,
+    },
+    {
+        "relation": "located_in",
+        "patterns": [
+            r"(?P<subject>[A-Z][\w\s]+?)\s+(?:is located in|is in|operates in)\s+(?P<object>[A-Z][\w\s]+)"
+        ],
+        "invalidate": False,
+        "confidence": 0.75,
+    },
+]
+
+
+def _project_embedding(vector: np.ndarray) -> np.ndarray:
+    """Project embeddings to the configured dimension."""
+
+    global ACTIVE_EMBED_DIM
+
+    if vector is None:
+        return vector
+
+    try:
+        current_dim = vector.shape[0]
+    except Exception:
+        return vector
+
+    target_dim = TARGET_EMBED_DIMS.get(EMBEDDING_MODEL or "")
+    if not target_dim or current_dim == target_dim:
+        ACTIVE_EMBED_DIM = current_dim
+        return vector
+
+    if current_dim > target_dim:
+        if current_dim % target_dim == 0:
+            step = current_dim // target_dim
+            reshaped = vector.reshape(target_dim, step)
+            ACTIVE_EMBED_DIM = target_dim
+            return reshaped.mean(axis=1)
+        ACTIVE_EMBED_DIM = target_dim
+        return vector[:target_dim]
+
+    padded = np.zeros(target_dim, dtype=vector.dtype)
+    padded[:current_dim] = vector
+    ACTIVE_EMBED_DIM = target_dim
+    return padded
+
+
+def build_embedding_document(content: Optional[str], summary: Optional[str], tags: Optional[str]) -> str:
+    """Compose the document string stored alongside vectors."""
+
+    parts: List[str] = []
+    if content:
+        parts.append(str(content).strip())
+    if summary and summary not in parts:
+        parts.append(str(summary).strip())
+    if tags:
+        parts.append(str(tags).strip())
+    document = " \n".join(part for part in parts if part)
+    return document[:1000]
+
+
+def generate_embedding(text: str) -> Optional[np.ndarray]:
+    """Encode helper that also normalizes embedding dimensions."""
+
+    if encoder is None:
+        return None
+
+    sanitized = (text or "").strip()
+    if not sanitized:
+        return None
+
+    vector = encoder.encode(sanitized[:1000], convert_to_numpy=True)
+    if isinstance(vector, list):
+        vector = np.asarray(vector)
+    return _project_embedding(vector)
 
 # Connection cache - reuse connections to reduce lock contention
 _connection_cache = None
@@ -330,8 +431,34 @@ def create_duckdb_schema(conn: duckdb.DuckDBPyConnection):
             type VARCHAR NOT NULL,
             weight DOUBLE DEFAULT 1.0,
             created TIMESTAMPTZ NOT NULL,
+            valid_from TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            valid_to TIMESTAMPTZ,
+            source_note_id BIGINT,
+            metadata JSON,
             PRIMARY KEY(from_id, to_id, type)
         )
+    ''')
+
+    conn.execute("CREATE SEQUENCE IF NOT EXISTS entity_facts_id_seq START 1")
+
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS entity_facts (
+            id BIGINT PRIMARY KEY,
+            entity_id BIGINT NOT NULL,
+            relation VARCHAR NOT NULL,
+            value TEXT NOT NULL,
+            target_entity_id BIGINT,
+            valid_from TIMESTAMPTZ NOT NULL,
+            valid_to TIMESTAMPTZ,
+            source_note_id BIGINT NOT NULL,
+            confidence DOUBLE DEFAULT 0.7,
+            metadata JSON
+        )
+    ''')
+
+    conn.execute('''
+        CREATE INDEX IF NOT EXISTS idx_entity_facts_lookup
+        ON entity_facts(entity_id, relation)
     ''')
     
     # Evolution outputs table
@@ -448,6 +575,51 @@ def create_duckdb_schema(conn: duckdb.DuckDBPyConnection):
             # FTS not available for other reasons
             logging.info(f"FTS not available, will use LIKE queries (this is fine): {str(e1)[:100]}")
 
+
+def ensure_temporal_graph_schema(conn: duckdb.DuckDBPyConnection) -> None:
+    """Ensure temporal graph columns and fact tables exist."""
+
+    try:
+        info = conn.execute("PRAGMA table_info('edges')").fetchall()
+        columns = {row[1] for row in info}
+
+        if 'valid_from' not in columns:
+            conn.execute("ALTER TABLE edges ADD COLUMN valid_from TIMESTAMPTZ")
+            conn.execute("UPDATE edges SET valid_from = created WHERE valid_from IS NULL")
+
+        if 'valid_to' not in columns:
+            conn.execute("ALTER TABLE edges ADD COLUMN valid_to TIMESTAMPTZ")
+
+        if 'source_note_id' not in columns:
+            conn.execute("ALTER TABLE edges ADD COLUMN source_note_id BIGINT")
+
+        if 'metadata' not in columns:
+            conn.execute("ALTER TABLE edges ADD COLUMN metadata JSON")
+    except Exception as exc:
+        logging.debug(f"Temporal schema check skipped: {exc}")
+
+    conn.execute("CREATE SEQUENCE IF NOT EXISTS entity_facts_id_seq START 1")
+
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS entity_facts (
+            id BIGINT PRIMARY KEY,
+            entity_id BIGINT NOT NULL,
+            relation VARCHAR NOT NULL,
+            value TEXT NOT NULL,
+            target_entity_id BIGINT,
+            valid_from TIMESTAMPTZ NOT NULL,
+            valid_to TIMESTAMPTZ,
+            source_note_id BIGINT NOT NULL,
+            confidence DOUBLE DEFAULT 0.7,
+            metadata JSON
+        )
+    ''')
+
+    conn.execute('''
+        CREATE INDEX IF NOT EXISTS idx_entity_facts_lookup
+        ON entity_facts(entity_id, relation)
+    ''')
+
 def _init_db():
     """Initialize DuckDB database"""
     with _get_db_conn() as conn:
@@ -521,6 +693,7 @@ def _init_db():
                         # FTS not available, that's OK
                         pass
         
+        ensure_temporal_graph_schema(conn)
         load_known_entities(conn)
 
         note_count = conn.execute("SELECT COUNT(*) FROM notes").fetchone()[0]
@@ -573,8 +746,11 @@ def init_embedding_model():
                     logging.info(f"Loading EmbeddingGemma 300m from {embeddinggemma_path}...")
                     encoder = SentenceTransformer(str(embeddinggemma_path), device='cpu')
                     test = encoder.encode("test", convert_to_numpy=True)
+                    projected = _project_embedding(np.asarray(test))
                     EMBEDDING_MODEL = 'embeddinggemma-300m'
-                    logging.info(f"✅ Using local EmbeddingGemma 300m (dim: {test.shape[0]})")
+                    logging.info(
+                        f"✅ Using local EmbeddingGemma 300m (dim: original {np.asarray(test).shape[0]} → active {projected.shape[0]})"
+                    )
                     return encoder
                 except Exception as e:
                     logging.warning(f"Failed to load EmbeddingGemma: {e}")
@@ -593,8 +769,11 @@ def init_embedding_model():
                 logging.info(f"Loading {model_name}...")
                 encoder = SentenceTransformer(model_name, device='cpu')
                 test = encoder.encode("test", convert_to_numpy=True)
+                projected = _project_embedding(np.asarray(test))
                 EMBEDDING_MODEL = short_name
-                logging.info(f"✓ Using {short_name} (dim: {test.shape[0]})")
+                logging.info(
+                    f"✓ Using {short_name} (dim: original {np.asarray(test).shape[0]} → active {projected.shape[0]})"
+                )
                 return encoder
             except Exception as e:
                 logging.debug(f"Failed to load {model_name}: {e}")
@@ -667,22 +846,64 @@ def _detect_or_create_session(note_id: int, created: datetime, conn: duckdb.Duck
         return None
 
 # ============= EDGE CREATION =============
+def _upsert_edge(
+    conn: duckdb.DuckDBPyConnection,
+    from_id: int,
+    to_id: int,
+    edge_type: str,
+    weight: float,
+    created: datetime,
+    source_note_id: Optional[int],
+    metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    metadata_json = json.dumps(metadata) if metadata else None
+
+    conn.execute(
+        '''
+        INSERT INTO edges (from_id, to_id, type, weight, created, valid_from, valid_to, source_note_id, metadata)
+        VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+        ON CONFLICT(from_id, to_id, type) DO UPDATE SET
+            weight = excluded.weight,
+            created = excluded.created,
+            source_note_id = COALESCE(excluded.source_note_id, edges.source_note_id),
+            metadata = COALESCE(excluded.metadata, edges.metadata),
+            valid_from = CASE
+                WHEN edges.valid_from IS NULL OR excluded.created < edges.valid_from
+                    THEN excluded.created
+                ELSE edges.valid_from
+            END,
+            valid_to = NULL
+        ''',
+        [from_id, to_id, edge_type, float(weight), created, created, source_note_id, metadata_json]
+    )
+
+
 def _create_all_edges(note_id: int, content: str, session_id: Optional[int], conn: duckdb.DuckDBPyConnection):
     """Create all edge types efficiently"""
     now = datetime.now(timezone.utc)
-    edges_to_add = []
-    
+
+    def link_edge(
+        from_id: int,
+        to_id: int,
+        edge_type: str,
+        weight: float,
+        reason: str,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        payload = {"reason": reason}
+        if extra:
+            payload.update(extra)
+        _upsert_edge(conn, from_id, to_id, edge_type, weight, now, note_id, payload)
+
     # Temporal edges
     prev_notes = conn.execute(
         'SELECT id FROM notes WHERE id < ? ORDER BY id DESC LIMIT ?',
         [note_id, TEMPORAL_EDGES]
     ).fetchall()
-    
+
     for prev in prev_notes:
-        edges_to_add.extend([
-            (note_id, prev[0], 'temporal', 1.0, now),
-            (prev[0], note_id, 'temporal', 1.0, now)
-        ])
+        link_edge(note_id, prev[0], 'temporal', 1.0, 'temporal_neighbor')
+        link_edge(prev[0], note_id, 'temporal', 1.0, 'temporal_neighbor')
     
     # Reference edges
     refs = extract_references(content)
@@ -695,10 +916,8 @@ def _create_all_edges(note_id: int, content: str, session_id: Optional[int], con
         ).fetchall()
         
         for ref_id in valid_refs:
-            edges_to_add.extend([
-                (note_id, ref_id[0], 'reference', 2.0, now),
-                (ref_id[0], note_id, 'referenced_by', 2.0, now)
-            ])
+            link_edge(note_id, ref_id[0], 'reference', 2.0, 'note_reference')
+            link_edge(ref_id[0], note_id, 'referenced_by', 2.0, 'note_reference')
     
     # Session edges
     if session_id:
@@ -708,13 +927,12 @@ def _create_all_edges(note_id: int, content: str, session_id: Optional[int], con
         ).fetchall()
         
         for other in session_notes:
-            edges_to_add.extend([
-                (note_id, other[0], 'session', 1.5, now),
-                (other[0], note_id, 'session', 1.5, now)
-            ])
+            link_edge(note_id, other[0], 'session', 1.5, 'session_peer', {"session_id": session_id})
+            link_edge(other[0], note_id, 'session', 1.5, 'session_peer', {"session_id": session_id})
     
     # Entity edges (optimized - batch lookups first, then batch operations)
     entities = extract_entities(content)
+    entity_map: Dict[str, int] = {}
     if entities:
         # Batch 1: Lookup all entities at once
         entity_names = [name for name, _ in entities]
@@ -748,6 +966,7 @@ def _create_all_edges(note_id: int, content: str, session_id: Optional[int], con
 
             # Prepare entity_notes link
             entity_notes_to_insert.append((entity_id, note_id))
+            entity_map[entity_name.lower()] = entity_id
 
         # Batch 3: Execute all updates at once
         if entities_to_update:
@@ -782,17 +1001,289 @@ def _create_all_edges(note_id: int, content: str, session_id: Optional[int], con
 
             # Group by entity_id and create edges
             for entity_id, other_note_id in all_related_notes:
-                edges_to_add.extend([
-                    (note_id, other_note_id, 'entity', 1.2, now),
-                    (other_note_id, note_id, 'entity', 1.2, now)
-                ])
-    
-    # Batch insert edges (optimized - single executemany instead of loop)
-    if edges_to_add:
-        conn.executemany(
-            'INSERT INTO edges (from_id, to_id, type, weight, created) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING',
-            edges_to_add
+                link_edge(note_id, other_note_id, 'entity', 1.2, 'shared_entity', {"entity_id": entity_id})
+                link_edge(other_note_id, note_id, 'entity', 1.2, 'shared_entity', {"entity_id": entity_id})
+
+    if entity_map:
+        _record_entity_facts(conn, note_id, now, content, entity_map)
+
+
+def _normalize_entity_key(name: str) -> str:
+    return re.sub(r"\s+", " ", str(name or "").strip()).lower()
+
+
+def _resolve_entity_id(entity_map: Dict[str, int], candidate: str) -> Optional[int]:
+    normalized = _normalize_entity_key(candidate)
+    if not normalized:
+        return None
+
+    if normalized in entity_map:
+        return entity_map[normalized]
+
+    for key, value in entity_map.items():
+        if normalized in key or key in normalized:
+            return value
+    return None
+
+
+def _extract_structured_facts(content: str, entity_map: Dict[str, int]) -> List[Dict[str, Any]]:
+    facts: List[Dict[str, Any]] = []
+    if not content or not entity_map:
+        return facts
+
+    for definition in FACT_PATTERNS:
+        relation = definition.get("relation")
+        patterns = definition.get("patterns", [])
+        invalidate = bool(definition.get("invalidate"))
+        confidence = float(definition.get("confidence", 0.7))
+
+        for pattern in patterns:
+            try:
+                regex = re.compile(pattern, re.IGNORECASE)
+            except re.error:
+                continue
+
+            for match in regex.finditer(content):
+                subject = match.groupdict().get("subject") or ""
+                obj = match.groupdict().get("object") or ""
+                subject_id = _resolve_entity_id(entity_map, subject)
+                if not subject_id:
+                    continue
+
+                target_entity_id = _resolve_entity_id(entity_map, obj)
+                facts.append(
+                    {
+                        "entity_id": subject_id,
+                        "relation": relation,
+                        "value": obj.strip(),
+                        "target_entity_id": target_entity_id,
+                        "confidence": confidence,
+                        "invalidate": invalidate,
+                        "metadata": {
+                            "pattern": pattern,
+                            "excerpt": match.group(0)[:160],
+                            "subject": subject.strip(),
+                            "object": obj.strip(),
+                        }
+                    }
+                )
+
+    return facts
+
+
+def _upsert_entity_fact(
+    conn: duckdb.DuckDBPyConnection,
+    note_id: int,
+    timestamp: datetime,
+    fact: Dict[str, Any]
+) -> None:
+    entity_id = fact.get("entity_id")
+    relation = fact.get("relation")
+    value = fact.get("value")
+
+    if not entity_id or not relation or not value:
+        return
+
+    metadata = fact.get("metadata") or {}
+    metadata.setdefault("source_note_id", note_id)
+    metadata_json = json.dumps(metadata)
+
+    existing = conn.execute(
+        '''
+        SELECT id, valid_from, confidence
+        FROM entity_facts
+        WHERE entity_id = ? AND relation = ? AND value = ? AND valid_to IS NULL
+        ''',
+        [entity_id, relation, value]
+    ).fetchone()
+
+    if existing:
+        existing_id, existing_valid_from, existing_confidence = existing
+        existing_start = existing_valid_from if isinstance(existing_valid_from, datetime) else datetime.fromisoformat(str(existing_valid_from))
+        if timestamp < existing_start:
+            existing_start = timestamp
+
+        merged_confidence = min(1.0, (float(existing_confidence or 0.7) + float(fact.get("confidence", 0.7))) / 2.0 + 0.05)
+
+        conn.execute(
+            '''
+            UPDATE entity_facts
+            SET valid_from = ?, source_note_id = ?, confidence = ?, metadata = COALESCE(?, metadata)
+            WHERE id = ?
+            ''',
+            [existing_start, note_id, merged_confidence, metadata_json, existing_id]
         )
+        return
+
+    if fact.get("invalidate"):
+        conn.execute(
+            '''
+            UPDATE entity_facts
+            SET valid_to = ?
+            WHERE entity_id = ? AND relation = ? AND valid_to IS NULL AND value != ?
+            ''',
+            [timestamp, entity_id, relation, value]
+        )
+
+    fact_id = conn.execute("SELECT nextval('entity_facts_id_seq')").fetchone()[0]
+    conn.execute(
+        '''
+        INSERT INTO entity_facts (
+            id, entity_id, relation, value, target_entity_id,
+            valid_from, valid_to, source_note_id, confidence, metadata
+        ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?)
+        ''',
+        [
+            fact_id,
+            entity_id,
+            relation,
+            value,
+            fact.get("target_entity_id"),
+            timestamp,
+            note_id,
+            fact.get("confidence", 0.7),
+            metadata_json,
+        ]
+    )
+
+
+def _record_entity_facts(
+    conn: duckdb.DuckDBPyConnection,
+    note_id: int,
+    timestamp: datetime,
+    content: str,
+    entity_map: Dict[str, int]
+) -> None:
+    facts = _extract_structured_facts(content, entity_map)
+    for fact in facts:
+        _upsert_entity_fact(conn, note_id, timestamp, fact)
+
+
+def _fact_query_candidates(
+    conn: duckdb.DuckDBPyConnection,
+    query: str,
+    limit: int
+) -> List[Dict[str, Any]]:
+    tokens = [tok for tok in re.split(r"\W+", query or "") if len(tok) >= 3]
+    if not tokens:
+        return []
+
+    like_term = f"%{tokens[0]}%"
+    rows = conn.execute(
+        '''
+        SELECT source_note_id, entity_id, relation, value, confidence
+        FROM entity_facts
+        WHERE valid_to IS NULL AND (value ILIKE ? OR relation ILIKE ?)
+        ORDER BY confidence DESC, valid_from DESC
+        LIMIT ?
+        ''',
+        [like_term, like_term, limit]
+    ).fetchall()
+
+    results: List[Dict[str, Any]] = []
+    for row in rows:
+        if not row or row[0] is None:
+            continue
+        results.append(
+            {
+                "note_id": int(row[0]),
+                "entity_id": row[1],
+                "relation": row[2],
+                "value": row[3],
+                "confidence": float(row[4] or 0.0),
+            }
+        )
+    return results
+
+
+def graph_reasoning_candidates(
+    conn: duckdb.DuckDBPyConnection,
+    query: str,
+    seed_ids: List[int],
+    limit: int = 20,
+    max_hops: int = 2
+) -> Dict[str, Any]:
+    start = time.time()
+    debug: Dict[str, Any] = {
+        "status": "started",
+        "seeds": list(dict.fromkeys(seed_ids)),
+        "limit": limit,
+        "max_hops": max_hops,
+        "candidates": [],
+    }
+
+    if not seed_ids and not query:
+        debug.update({"status": "skipped", "reason": "no_seeds"})
+        debug["elapsed_ms"] = int((time.time() - start) * 1000)
+        return debug
+
+    now = datetime.now(timezone.utc)
+    queue: deque = deque((seed, 0) for seed in dict.fromkeys(seed_ids))
+    visited: Dict[int, int] = {seed: 0 for seed in seed_ids}
+    scores: Dict[int, float] = {}
+    expansions = 0
+
+    while queue:
+        current, depth = queue.popleft()
+        if depth >= max_hops:
+            continue
+
+        neighbors = conn.execute(
+            '''
+            SELECT to_id, weight, type, valid_from, valid_to
+            FROM edges
+            WHERE from_id = ? AND (valid_to IS NULL OR valid_to > ?)
+            ''',
+            [current, now]
+        ).fetchall()
+
+        for to_id, weight, edge_type, valid_from, valid_to in neighbors:
+            if to_id == current:
+                continue
+            hop = depth + 1
+            base = float(weight or 1.0)
+            decay = 1.0 / (hop + 0.5)
+            score = base * decay
+
+            if to_id in scores:
+                scores[to_id] = max(scores[to_id], score)
+            else:
+                scores[to_id] = score
+
+            expansions += 1
+
+            if hop < max_hops and visited.get(to_id, 999) > hop:
+                visited[to_id] = hop
+                queue.append((to_id, hop))
+
+    fact_matches = _fact_query_candidates(conn, query, limit)
+    for match in fact_matches:
+        base = 0.6 + 0.4 * match.get("confidence", 0.0)
+        scores[match["note_id"]] = max(scores.get(match["note_id"], 0.0), base)
+
+    sorted_candidates = sorted(
+        (
+            {
+                "id": note_id,
+                "score": round(score, 6),
+            }
+            for note_id, score in scores.items()
+            if note_id not in seed_ids
+        ),
+        key=lambda item: item["score"],
+        reverse=True,
+    )[:limit]
+
+    debug.update(
+        {
+            "status": "ok" if sorted_candidates else "empty",
+            "candidates": sorted_candidates,
+            "expansions": expansions,
+            "fact_matches": fact_matches[:5],
+        }
+    )
+    debug["elapsed_ms"] = int((time.time() - start) * 1000)
+    return debug
 
 # ============= PAGERANK CALCULATION =============
 def calculate_pagerank_duckdb(conn: duckdb.DuckDBPyConnection):
@@ -934,6 +1425,9 @@ def store_embedding_vector(
         return {"stored": False, "error": "collection_not_initialized"}
 
     vector_id = str(note_id)
+    embedding = _project_embedding(embedding)
+    tags_str = ", ".join(tags) if isinstance(tags, list) else (tags or "")
+    document = build_embedding_document(content, summary, tags_str)
     metadata = {
         "summary": summary[:200] if summary else "",
         "tags": json.dumps(tags or [])
@@ -941,7 +1435,7 @@ def store_embedding_vector(
     payload = {
         "ids": [vector_id],
         "embeddings": [embedding.tolist()],
-        "documents": [content[:1000]],
+        "documents": [document],
         "metadatas": [metadata]
     }
 
@@ -977,7 +1471,11 @@ def _add_to_vector_store(note_id: int, content: str, summary: str, tags: List[st
         return False
 
     try:
-        embedding = encoder.encode(content[:1000], convert_to_numpy=True)
+        tags_str = ' '.join(tags) if isinstance(tags, list) else (tags or '')
+        document_payload = build_embedding_document(content, summary, tags_str)
+        embedding = generate_embedding(document_payload)
+        if embedding is None:
+            return False
         result = store_embedding_vector(
             note_id,
             embedding,
@@ -1016,7 +1514,14 @@ def semantic_search(query: str, limit: int = 50) -> Dict[str, Any]:
         return diagnostics
 
     try:
-        query_embedding = encoder.encode(diagnostics["query"], convert_to_numpy=True)
+        query_embedding = generate_embedding(diagnostics["query"])
+        if query_embedding is None:
+            diagnostics.update({
+                "status": "skipped",
+                "reason": "empty_query_vector"
+            })
+            diagnostics["elapsed_ms"] = int((time.time() - start) * 1000)
+            return diagnostics
         raw_limit = max(1, min(int(limit or 10), 100))
         results = collection.query(
             query_embeddings=[query_embedding.tolist()],
@@ -1059,7 +1564,8 @@ def semantic_search(query: str, limit: int = 50) -> Dict[str, Any]:
             "ids": ids[:raw_limit],
             "results": enriched[:raw_limit],
             "vector_count": collection.count() if collection else 0,
-            "embedding_model": EMBEDDING_MODEL
+            "embedding_model": EMBEDDING_MODEL,
+            "embedding_dim": ACTIVE_EMBED_DIM,
         })
     except Exception as exc:
         diagnostics.update({
@@ -1083,6 +1589,8 @@ def get_search_health(teambook_name: Optional[str] = None, sample_limit: int = 5
 
     snapshot: Dict[str, Any] = {
         "embedding_model": EMBEDDING_MODEL,
+        "active_embedding_dim": ACTIVE_EMBED_DIM,
+        "target_embedding_dim": TARGET_EMBED_DIMS.get(EMBEDDING_MODEL or ""),
         "vector_index_ready": bool(collection is not None)
     }
 

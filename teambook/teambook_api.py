@@ -1450,6 +1450,7 @@ def read(query: str = None, tag: str = None, when: str = None,
 
             if query_text:
                 semantic_ids: List[int] = []
+                semantic_debug: Dict[str, Any] = {}
                 if mode in ["semantic", "hybrid"]:
                     semantic_debug = semantic_search(query_text, limit)
                     semantic_ids = semantic_debug.get("ids", []) or []
@@ -1525,37 +1526,100 @@ def read(query: str = None, tag: str = None, when: str = None,
 
                 debug_info["keyword"] = keyword_debug
 
-                # Combine results
-                all_ids, seen = [], set()
-                for i in range(max(len(semantic_ids), len(keyword_ids))):
-                    if i < len(semantic_ids) and semantic_ids[i] not in seen:
-                        all_ids.append(semantic_ids[i])
-                        seen.add(semantic_ids[i])
-                    if i < len(keyword_ids) and keyword_ids[i] not in seen:
-                        all_ids.append(keyword_ids[i])
-                        seen.add(keyword_ids[i])
+                seed_ids = list(dict.fromkeys(semantic_ids + keyword_ids))
+                graph_debug = teambook_storage.graph_reasoning_candidates(
+                    conn,
+                    query_text,
+                    seed_ids,
+                    limit=max(10, int(limit or 10)),
+                    max_hops=2
+                )
+                debug_info["graph"] = graph_debug
 
-                debug_info["merge"] = {
-                    "semantic_candidates": len(semantic_ids),
-                    "keyword_candidates": len(keyword_ids),
-                    "combined": len(all_ids)
+                def _normalize_scores(raw_scores: Dict[int, float], weight: float) -> Dict[int, float]:
+                    normalized: Dict[int, float] = {}
+                    for note_id, score in raw_scores.items():
+                        try:
+                            value = max(0.0, min(1.0, float(score)))
+                        except Exception:
+                            value = 0.0
+                        if value <= 0:
+                            continue
+                        normalized[int(note_id)] = value * weight
+                    return normalized
+
+                semantic_scores: Dict[int, float] = {}
+                for entry in (semantic_debug.get("results", []) if isinstance(debug_info.get("semantic"), dict) else []):
+                    note_id = entry.get("id")
+                    if not note_id:
+                        continue
+                    if "score" in entry:
+                        base_score = float(entry.get("score") or 0.0)
+                    elif entry.get("distance") is not None:
+                        base_score = max(0.0, 1.0 - float(entry.get("distance")))
+                    else:
+                        rank = entry.get("rank") or 1
+                        base_score = max(0.0, 1.0 - ((rank - 1) / max(1, len(semantic_ids))))
+                    semantic_scores[int(note_id)] = max(semantic_scores.get(int(note_id), 0.0), base_score)
+
+                keyword_scores: Dict[int, float] = {}
+                if keyword_ids:
+                    denom = max(1, len(keyword_ids) - 1)
+                    for idx, note_id in enumerate(keyword_ids):
+                        decay = 1.0 if denom == 0 else max(0.0, 1.0 - (idx / (denom + 1)))
+                        keyword_scores[int(note_id)] = max(keyword_scores.get(int(note_id), 0.0), decay)
+
+                graph_scores: Dict[int, float] = {
+                    int(item["id"]): float(item.get("score", 0.0))
+                    for item in graph_debug.get("candidates", [])
+                    if item.get("id") is not None
                 }
 
-                if all_ids:
-                    note_ids = all_ids[:limit]
+                weighted_scores: Dict[int, float] = {}
+
+                for bucket in (
+                    _normalize_scores(semantic_scores, 0.4),
+                    _normalize_scores(keyword_scores, 0.4),
+                    _normalize_scores(graph_scores, 0.2),
+                ):
+                    for note_id, value in bucket.items():
+                        weighted_scores[note_id] = weighted_scores.get(note_id, 0.0) + value
+
+                if not weighted_scores and seed_ids:
+                    weighted_scores = {int(note_id): 0.2 for note_id in seed_ids[:limit]}
+
+                sorted_candidates = sorted(
+                    weighted_scores.items(),
+                    key=lambda item: item[1],
+                    reverse=True
+                )
+
+                note_ids = [note_id for note_id, _ in sorted_candidates[:limit]]
+
+                debug_info["merge"] = {
+                    "semantic_candidates": len(semantic_scores),
+                    "keyword_candidates": len(keyword_scores),
+                    "graph_candidates": len(graph_scores),
+                    "final_candidates": len(note_ids),
+                    "weights": {"semantic": 0.4, "keyword": 0.4, "graph": 0.2}
+                }
+
+                if note_ids:
                     placeholders = ','.join(['?'] * len(note_ids))
-
-                    where_clause = " AND ".join(conditions) if conditions else "1=1"
-                    final_params = note_ids + params + ([note_ids[0]] if note_ids else [])
-
-                    notes = conn.execute(f'''
+                    where_clause = " AND ".join(conditions) if conditions else ""
+                    base_query = f'''
                         SELECT id, content, summary, tags, pinned, author, owner, created, pagerank
                         FROM notes
-                        WHERE id IN ({placeholders}) AND {where_clause} AND type IS NULL
-                        ORDER BY
-                            CASE WHEN id = ? THEN 0 ELSE 1 END,
-                            pinned DESC, pagerank DESC, created DESC
-                    ''', final_params).fetchall()
+                        WHERE id IN ({placeholders}) AND type IS NULL
+                    '''
+                    if where_clause:
+                        base_query += f" AND {where_clause}"
+
+                    rows = conn.execute(base_query, note_ids + params).fetchall()
+                    row_map = {row[0]: row for row in rows}
+                    notes = [row_map[note_id] for note_id in note_ids if note_id in row_map]
+                else:
+                    notes = []
             else:
                 debug_info["semantic"] = {"status": "skipped", "reason": "empty_query"}
                 debug_info["keyword"] = {"status": "skipped", "reason": "empty_query"}
@@ -1762,16 +1826,23 @@ def reindex_embeddings(limit: int = None, dry_run: bool = False,
                     else:
                         tag_list = []
 
-                    text = f"{raw_content or ''} {raw_summary or ''} {' '.join(tag_list)}".strip()
+                    text = teambook_storage.build_embedding_document(
+                        raw_content or '',
+                        raw_summary or '',
+                        ' '.join(tag_list)
+                    )
                     if not text:
                         details.append({"id": note_id, "status": "skipped", "reason": "empty_content"})
                         continue
 
-                    embedding = encoder.encode(text[:1000], convert_to_numpy=True)
+                    embedding = teambook_storage.generate_embedding(text)
+                    if embedding is None:
+                        details.append({"id": note_id, "status": "skipped", "reason": "encoder_unavailable"})
+                        continue
                     store_result = store_embedding_vector(
                         note_id,
                         embedding,
-                        content=raw_content or raw_summary or '',
+                        content=raw_content or '',
                         summary=raw_summary or '',
                         tags=tag_list,
                         force=force
