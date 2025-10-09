@@ -16,6 +16,7 @@ v1.0.0 - First Public Release:
 import json
 import sys
 import re
+import time
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 import logging
@@ -28,12 +29,50 @@ sys.path.insert(0, str(Path(__file__).parent))
 from notebook_shared import *
 # Import notebook_storage as module to preserve global state
 import notebook_storage
+from mcp_shared import audit_tool_registry, validate_tool_schemas, validate_tool_name
 from notebook_storage import (
     _get_db_conn, _ensure_embeddings_loaded, _init_embedding_model,
     _init_vector_db, vault_manager, _calculate_pagerank_if_needed,
     _create_all_edges, _detect_or_create_session, _log_operation,
-    _log_directory_access, _vacuum_database
+    _log_directory_access, _vacuum_database, semantic_search,
+    get_search_health, store_embedding_vector
 )
+
+_LAST_SEARCH_DEBUG: Dict[str, Any] = {}
+
+
+def _record_search_debug(snapshot: Dict[str, Any]) -> None:
+    """Persist the latest search diagnostics for self-healing access."""
+
+    global _LAST_SEARCH_DEBUG
+    payload = dict(snapshot or {})
+    payload.setdefault("captured_at", datetime.utcnow().isoformat())
+    _LAST_SEARCH_DEBUG = payload
+
+
+def _normalize_id_list(raw_ids: Any) -> List[int]:
+    """Convert CLI/MCP friendly inputs into a list of integer IDs."""
+
+    if raw_ids is None:
+        return []
+
+    if isinstance(raw_ids, int):
+        return [raw_ids]
+
+    if isinstance(raw_ids, (list, tuple, set)):
+        items = raw_ids
+    else:
+        items = re.split(r"[\s,]+", str(raw_ids))
+
+    normalized: List[int] = []
+    for item in items:
+        if not item:
+            continue
+        try:
+            normalized.append(int(str(item).strip()))
+        except ValueError:
+            continue
+    return normalized
 
 def remember(content: str = None, summary: str = None, tags: List[str] = None,
              linked_items: List[str] = None, **kwargs) -> Dict:
@@ -178,15 +217,32 @@ def recall(query: str = None, tag: str = None, when: str = None,
     """Search notes - always with rich summaries, all pinned shown (with bug fix)"""
     try:
         start_time = datetime.now()
-        
+
         if isinstance(limit, str):
             try:
                 limit = int(limit)
-            except:
+            except Exception:
                 limit = 50
-        
+
         if not any([show_all, query, tag, when, pinned_only]):
             limit = DEFAULT_RECENT
+
+        mode = str(kwargs.get('mode', mode or 'hybrid')).lower()
+        query_text = str(query or '').strip()
+
+        debug_info: Dict[str, Any] = {
+            "status": "started",
+            "query": query_text,
+            "mode": mode,
+            "limit": int(limit),
+            "filters": {
+                "tag": str(tag).strip() if tag else None,
+                "when": str(when).strip() if when else None,
+                "pinned_only": bool(pinned_only)
+            },
+            "embedding_model": notebook_storage.EMBEDDING_MODEL,
+            "fts_enabled": bool(notebook_storage.FTS_ENABLED)
+        }
         
         with _get_db_conn() as conn:
             _calculate_pagerank_if_needed(conn)
@@ -211,7 +267,7 @@ def recall(query: str = None, tag: str = None, when: str = None,
             notes = []
             
             # First, always get ALL pinned notes (unless specifically filtering)
-            if not pinned_only and not query and not tag and not when:
+            if not pinned_only and not query_text and not tag and not when:
                 pinned_notes = conn.execute('''
                     SELECT id, content, summary, tags, pinned, author, created, pagerank
                     FROM notes WHERE pinned = TRUE
@@ -219,74 +275,122 @@ def recall(query: str = None, tag: str = None, when: str = None,
                 ''').fetchall()
             else:
                 pinned_notes = []
-            
-            if query:
-                # Semantic search (lazy-load embeddings on first use)
-                semantic_ids = []
-                if mode in ["semantic", "hybrid"] and _ensure_embeddings_loaded():
-                    try:
-                        query_embedding = notebook_storage.encoder.encode(str(query).strip(), convert_to_numpy=True)
-                        results = notebook_storage.collection.query(
-                            query_embeddings=[query_embedding.tolist()],
-                            n_results=min(limit, 100)
-                        )
-                        if results['ids'] and results['ids'][0]:
-                            semantic_ids = [int(id_str) for id_str in results['ids'][0]]
-                    except Exception as e:
-                        logging.debug(f"Semantic search failed: {e}")
-                
-                # Keyword search
-                keyword_ids = []
+
+            debug_info["pinned_prefetch"] = len(pinned_notes)
+
+            if query_text:
+                semantic_ids: List[int] = []
+                if mode in ["semantic", "hybrid"]:
+                    semantic_debug = semantic_search(query_text, limit)
+                    semantic_ids = semantic_debug.get("ids", []) or []
+                    debug_info["semantic"] = semantic_debug
+                else:
+                    debug_info["semantic"] = {
+                        "status": "skipped",
+                        "reason": "mode_disabled",
+                        "mode": mode
+                    }
+
+                keyword_ids: List[int] = []
+                keyword_debug: Dict[str, Any] = {
+                    "status": "skipped",
+                    "mode": mode
+                }
+
                 if mode in ["keyword", "hybrid"]:
+                    keyword_debug = {
+                        "status": "started",
+                        "fts_enabled": bool(notebook_storage.FTS_ENABLED)
+                    }
+
                     if notebook_storage.FTS_ENABLED:
                         try:
+                            start_fts = time.perf_counter()
                             fts_results = conn.execute('''
-                                SELECT fts_main_notes.id 
-                                FROM fts_main_notes 
+                                SELECT fts_main_notes.id
+                                FROM fts_main_notes
                                 WHERE fts_main_notes MATCH ?
                                 LIMIT ?
-                            ''', [str(query).strip(), limit]).fetchall()
+                            ''', [query_text, limit]).fetchall()
                             keyword_ids = [row[0] for row in fts_results]
-                        except:
+                            keyword_debug.update({
+                                "status": "ok",
+                                "engine": "fts",
+                                "count": len(keyword_ids),
+                                "elapsed_ms": int((time.perf_counter() - start_fts) * 1000)
+                            })
+                        except Exception as exc:
                             notebook_storage.FTS_ENABLED = False
+                            keyword_debug.update({
+                                "status": "error",
+                                "engine": "fts",
+                                "error": str(exc)[:160]
+                            })
 
-                    if not notebook_storage.FTS_ENABLED:
-                        like_query = f"%{str(query).strip()}%"
-                        like_results = conn.execute('''
-                            SELECT id FROM notes 
-                            WHERE content ILIKE ? OR summary ILIKE ?
-                            ORDER BY pagerank DESC, created DESC
-                            LIMIT ?
-                        ''', [like_query, like_query, limit]).fetchall()
-                        keyword_ids = [row[0] for row in like_results]
-                
-                # Combine results
-                all_ids, seen = [], set()
+                    if not keyword_ids:
+                        like_query = f"%{query_text}%"
+                        try:
+                            start_like = time.perf_counter()
+                            like_results = conn.execute('''
+                                SELECT id FROM notes
+                                WHERE content ILIKE ? OR summary ILIKE ?
+                                ORDER BY pagerank DESC, created DESC
+                                LIMIT ?
+                            ''', [like_query, like_query, limit]).fetchall()
+                            keyword_ids = [row[0] for row in like_results]
+                            keyword_debug.update({
+                                "status": "ok" if keyword_ids else keyword_debug.get("status", "ok"),
+                                "fallback": "like",
+                                "count": len(keyword_ids),
+                                "elapsed_ms": keyword_debug.get("elapsed_ms", 0) + int((time.perf_counter() - start_like) * 1000)
+                            })
+                        except Exception as exc:
+                            keyword_debug.update({
+                                "status": "error",
+                                "fallback": "like",
+                                "error": str(exc)[:160]
+                            })
+
+                debug_info["keyword"] = keyword_debug
+
+                all_ids: List[int] = []
+                seen: set = set()
                 for i in range(max(len(semantic_ids), len(keyword_ids))):
                     if i < len(semantic_ids) and semantic_ids[i] not in seen:
-                        all_ids.append(semantic_ids[i]); seen.add(semantic_ids[i])
+                        all_ids.append(semantic_ids[i])
+                        seen.add(semantic_ids[i])
                     if i < len(keyword_ids) and keyword_ids[i] not in seen:
-                        all_ids.append(keyword_ids[i]); seen.add(keyword_ids[i])
-                
+                        all_ids.append(keyword_ids[i])
+                        seen.add(keyword_ids[i])
+
+                debug_info["merge"] = {
+                    "semantic_candidates": len(semantic_ids),
+                    "keyword_candidates": len(keyword_ids),
+                    "combined": len(all_ids)
+                }
+
                 if all_ids:
                     note_ids = all_ids[:limit]
                     placeholders = ','.join(['?'] * len(note_ids))
-                    
+
                     where_clause = " AND ".join(conditions) if conditions else "1=1"
                     final_params = note_ids + params + ([note_ids[0]] if note_ids else [])
-                    
+
                     notes = conn.execute(f'''
                         SELECT id, content, summary, tags, pinned, author, created, pagerank
                         FROM notes
                         WHERE id IN ({placeholders}) AND {where_clause}
-                        ORDER BY 
+                        ORDER BY
                             CASE WHEN id = ? THEN 0 ELSE 1 END,
                             pinned DESC, pagerank DESC, created DESC
                     ''', final_params).fetchall()
                 else:
                     notes = []
             else:
-                # Regular query without search
+                debug_info["semantic"] = {"status": "skipped", "reason": "empty_query"}
+                debug_info["keyword"] = {"status": "skipped", "reason": "empty_query"}
+                debug_info["merge"] = {"combined": 0, "semantic_candidates": 0, "keyword_candidates": 0}
+
                 where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
                 notes = conn.execute(f'''
                     SELECT id, content, summary, tags, pinned, author, created, pagerank
@@ -314,9 +418,23 @@ def recall(query: str = None, tag: str = None, when: str = None,
         except (ImportError, Exception):
             pass  # Data is already uncompressed
 
+        debug_info["duration_ms"] = int((datetime.now() - start_time).total_seconds() * 1000)
+        debug_info["returned"] = {
+            "notes": len(all_notes),
+            "pinned_included": len(pinned_notes),
+            "note_ids": [note[0] for note in all_notes[:min(len(all_notes), 25)]]
+        }
+
         if not all_notes:
+            debug_info["status"] = "empty"
+            debug_info.setdefault('source', 'recall')
+            _record_search_debug(debug_info)
             return {"msg": "No notes found"}
-        
+
+        debug_info["status"] = "ok"
+        debug_info.setdefault('source', 'recall')
+        _record_search_debug(debug_info)
+
         if OUTPUT_FORMAT == 'pipe':
             lines = []
             for note in all_notes:
@@ -350,10 +468,19 @@ def recall(query: str = None, tag: str = None, when: str = None,
             return {"notes": formatted_notes}
 
         _save_last_operation('recall', {"notes": all_notes})
-        _log_operation('recall', int((datetime.now() - start_time).total_seconds() * 1000))
-        
+        _log_operation('recall', debug_info["duration_ms"])
+
     except Exception as e:
         logging.error(f"Error in recall: {e}", exc_info=True)
+        debug_snapshot = {
+            "status": "error",
+            "error": str(e),
+            "query": str(query or ''),
+            "mode": mode,
+            "limit": limit,
+            "source": "recall"
+        }
+        _record_search_debug(debug_snapshot)
         return {"error": f"Recall failed: {str(e)}"}
 
 def notebook_state(verbose: bool = False, **kwargs) -> Dict:
@@ -672,12 +799,16 @@ def compact(**kwargs) -> Dict:
         logging.error(f"Error in compact: {e}")
         return {"error": f"Compact failed: {str(e)}"}
 
-def reindex_embeddings(limit: int = None, dry_run: bool = False, **kwargs) -> Dict:
+def reindex_embeddings(limit: int = None, dry_run: bool = False,
+                       force: bool = False, note_ids: Optional[Any] = None, **kwargs) -> Dict:
     """Backfill embeddings for notes that don't have them (self-healing function)"""
     try:
         start_time = datetime.now()
         limit = kwargs.get('limit', limit)
         dry_run = kwargs.get('dry_run', dry_run)
+        force = bool(kwargs.get('force', force))
+        note_ids = kwargs.get('note_ids', note_ids)
+        note_ids_list = _normalize_id_list(note_ids)
 
         # Check if embeddings are available
         if not _ensure_embeddings_loaded():
@@ -687,14 +818,29 @@ def reindex_embeddings(limit: int = None, dry_run: bool = False, **kwargs) -> Di
             return {"error": "Embedding system failed to initialize"}
 
         with _get_db_conn() as conn:
-            # Find notes without embeddings
-            query = "SELECT id, content, summary, tags, created FROM notes WHERE has_vector = FALSE ORDER BY id"
-            if limit:
-                query += f" LIMIT {int(limit)}"
+            clauses = []
+            params: List[Any] = []
 
-            missing = conn.execute(query).fetchall()
+            if note_ids_list:
+                placeholders = ','.join(['?'] * len(note_ids_list))
+                clauses.append(f"id IN ({placeholders})")
+                params.extend(note_ids_list)
+
+            if not force:
+                clauses.append("has_vector = FALSE")
+
+            where_clause = " WHERE " + " AND ".join(clauses) if clauses else ""
+            query = f"SELECT id, content, summary, tags, created FROM notes{where_clause} ORDER BY id"
+
+            if limit:
+                params.append(int(limit))
+                query += " LIMIT ?"
+
+            missing = conn.execute(query, params).fetchall()
 
             if not missing:
+                if note_ids_list:
+                    return {"reindex": "complete|no_matching_notes"}
                 return {"reindex": "complete|all_notes_have_embeddings"}
 
             if dry_run:
@@ -705,35 +851,63 @@ def reindex_embeddings(limit: int = None, dry_run: bool = False, **kwargs) -> Di
             # Backfill embeddings
             success_count = 0
             error_count = 0
+            report: List[Dict[str, Any]] = []
 
             for note_id, content, summary, tags, created in missing:
                 try:
+                    raw_content, raw_summary = content, summary
+                    try:
+                        from notebook_storage import decompress_content, COMPRESSION_AVAILABLE
+                        if COMPRESSION_AVAILABLE:
+                            raw_content = decompress_content(content) if content else content
+                            raw_summary = decompress_content(summary) if summary else summary
+                    except Exception:
+                        raw_content, raw_summary = content, summary
+
                     # Generate embedding
-                    text = f"{content or ''} {summary or ''} {tags or ''}".strip()
+                    text = f"{raw_content or ''} {raw_summary or ''} {tags or ''}".strip()
                     if not text:
+                        report.append({"id": note_id, "status": "skipped", "reason": "empty_content"})
                         continue
 
                     embedding = notebook_storage.encoder.encode(text[:1000], convert_to_numpy=True)
 
-                    # Add to ChromaDB (convert tags list to string)
                     tags_str = tags if isinstance(tags, str) else (', '.join(tags) if tags else '')
-                    notebook_storage.collection.add(
-                        embeddings=[embedding.tolist()],
-                        documents=[content or summary or ''],
-                        metadatas=[{
-                            "created": str(created) if created else '',
-                            "tags": tags_str
-                        }],
-                        ids=[f"note_{note_id}"]
+                    store_result = store_embedding_vector(
+                        note_id,
+                        embedding,
+                        content=raw_content or raw_summary or '',
+                        summary=raw_summary or '',
+                        tags=tags_str,
+                        force=force
                     )
 
-                    # Update database flag
+                    if not store_result.get("stored"):
+                        error_count += 1
+                        report.append({
+                            "id": note_id,
+                            "status": "vector_error",
+                            "error": store_result.get("error")
+                        })
+                        continue
+
                     conn.execute("UPDATE notes SET has_vector = TRUE WHERE id = ?", [note_id])
                     success_count += 1
+                    report.append({
+                        "id": note_id,
+                        "status": "indexed",
+                        "operation": store_result.get("operation"),
+                        "warning": store_result.get("warning")
+                    })
 
                 except Exception as e:
                     logging.warning(f"Failed to reindex note {note_id}: {e}")
                     error_count += 1
+                    report.append({
+                        "id": note_id,
+                        "status": "exception",
+                        "error": str(e)
+                    })
 
             duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
 
@@ -746,12 +920,64 @@ def reindex_embeddings(limit: int = None, dry_run: bool = False, **kwargs) -> Di
                     "indexed": success_count,
                     "errors": error_count,
                     "duration_ms": duration_ms,
-                    "collection_size": notebook_storage.collection.count()
+                    "collection_size": notebook_storage.collection.count(),
+                    "force": force,
+                    "processed": len(missing),
+                    "details": report[:50]
                 }
 
     except Exception as e:
         logging.error(f"Error in reindex_embeddings: {e}")
         return {"error": f"Reindex failed: {str(e)}"}
+
+
+def reembed(limit: int = None, note_ids: Optional[Any] = None, **kwargs) -> Dict:
+    """Force refresh embeddings for the selected notes."""
+
+    options = dict(kwargs)
+    options['force'] = True
+    return reindex_embeddings(limit=limit, note_ids=note_ids, **options)
+
+
+def search_diagnostics(limit: int = 25, **kwargs) -> Dict:
+    """Return the most recent search debug snapshot for self-healing."""
+
+    if not _LAST_SEARCH_DEBUG:
+        return {"error": "no_search_history"}
+
+    try:
+        limit_value = int(kwargs.get('limit', limit)) if kwargs.get('limit', limit) is not None else None
+    except Exception:
+        limit_value = limit
+
+    snapshot = json.loads(json.dumps(_LAST_SEARCH_DEBUG)) if _LAST_SEARCH_DEBUG else {}
+
+    semantic_section = snapshot.get('semantic')
+    if isinstance(semantic_section, dict) and 'results' in semantic_section and isinstance(semantic_section['results'], list):
+        if limit_value is not None and limit_value >= 0:
+            semantic_section['results'] = semantic_section['results'][:limit_value]
+
+    returned_section = snapshot.get('returned')
+    if isinstance(returned_section, dict) and 'note_ids' in returned_section and isinstance(returned_section['note_ids'], list):
+        if limit_value is not None and limit_value >= 0:
+            returned_section['note_ids'] = returned_section['note_ids'][:limit_value]
+
+    snapshot['source'] = snapshot.get('source', 'recall')
+    return snapshot
+
+
+def search_health(sample_limit: int = 5, **kwargs) -> Dict:
+    """Provide a health snapshot of notebook search infrastructure."""
+
+    try:
+        sample_limit = int(kwargs.get('sample_limit', kwargs.get('limit', sample_limit)))
+    except Exception:
+        sample_limit = sample_limit or 5
+
+    snapshot = get_search_health(sample_limit)
+    snapshot['status'] = 'ok'
+    snapshot['captured_at'] = datetime.utcnow().isoformat()
+    return snapshot
 
 def batch(operations: List[Dict] = None, **kwargs) -> Dict:
     """Execute multiple operations efficiently"""
@@ -770,7 +996,10 @@ def batch(operations: List[Dict] = None, **kwargs) -> Dict:
             'get_full_note': get_full_note, 'get': get_full_note,
             'status': get_status, 'vault_list': vault_list,
             'recent_dirs': recent_dirs, 'compact': compact,
-            'reindex_embeddings': reindex_embeddings, 'reindex': reindex_embeddings
+            'reindex_embeddings': reindex_embeddings, 'reindex': reindex_embeddings,
+            'reembed': reembed,
+            'search_diagnostics': search_diagnostics,
+            'search_health': search_health
         }
         
         results = []
@@ -1106,31 +1335,50 @@ def start_session(*args, **kwargs) -> Dict:
         )
         return {"session": fallback_text, "error": str(e)}
 
+NOTEBOOK_TOOL_HANDLERS = audit_tool_registry({
+    "notebook_state": notebook_state,
+    "status": notebook_state,
+    "get_status": notebook_state,
+    "remember": remember,
+    "recall": recall,
+    "get_full_note": get_full_note,
+    "get": get_full_note,
+    "pin_note": pin_note,
+    "pin": pin_note,
+    "unpin_note": unpin_note,
+    "unpin": unpin_note,
+    "vault_store": vault_store,
+    "vault_retrieve": vault_retrieve,
+    "vault_list": vault_list,
+    "batch": batch,
+    "recent_dirs": recent_dirs,
+    "compact": compact,
+    "reindex_embeddings": reindex_embeddings,
+    "reindex": reindex_embeddings,
+    "reembed": reembed,
+    "search_diagnostics": search_diagnostics,
+    "search_health": search_health,
+    "start_session": start_session,
+})
+
+
 def _handle_tools_call(params: Dict) -> Dict:
     """Route tool calls with clean formatting"""
     tool_name = params.get("name", "").lower().strip()
     tool_args = params.get("arguments", {})
-    
-    tools = {
-        "notebook_state": notebook_state, "status": notebook_state, "get_status": notebook_state,
-        "remember": remember, "recall": recall,
-        "get_full_note": get_full_note, "get": get_full_note,
-        "pin_note": pin_note, "pin": pin_note,
-        "unpin_note": unpin_note, "unpin": unpin_note,
-        "vault_store": vault_store, "vault_retrieve": vault_retrieve,
-        "vault_list": vault_list, "batch": batch,
-        "recent_dirs": recent_dirs, "compact": compact,
-        "reindex_embeddings": reindex_embeddings, "reindex": reindex_embeddings,
-        "start_session": start_session
-    }
-    
-    if tool_name not in tools:
+
+    try:
+        validate_tool_name(tool_name)
+    except ValueError as exc:
+        return {"content": [{"type": "text", "text": f"Error: {exc}"}]}
+
+    if tool_name not in NOTEBOOK_TOOL_HANDLERS:
         # Helpful error for common confusion
         if tool_name in ["standby", "standby_mode"]:
             return {"content": [{"type": "text", "text": "Error: 'standby' is a Teambook function, not Notebook.\nUse: python -m tools.teambook standby\nOr: TEAMBOOK_NAME=town-hall-YourComputerName python -m tools.teambook standby"}]}
         return {"content": [{"type": "text", "text": f"Error: Unknown tool: {tool_name}"}]}
-    
-    result = tools[tool_name](**tool_args)
+
+    result = NOTEBOOK_TOOL_HANDLERS[tool_name](**tool_args)
     text_parts = []
     
     # Format response based on tool and result
@@ -1237,7 +1485,7 @@ def main():
             elif method == "notifications/initialized":
                 continue
             elif method == "tools/list":
-                tool_schemas = {
+                tool_schemas = validate_tool_schemas({
                     "notebook_state": {
                         "desc": "Notebook state (n:X|p:Y|last) - PRIMARY",
                         "props": {"verbose": {"type": "boolean", "description": "Include backend metrics"}}
@@ -1326,6 +1574,34 @@ def main():
                         "desc": "VACUUM database to reclaim space",
                         "props": {}
                     },
+                    "reindex_embeddings": {
+                        "desc": "Backfill embeddings for notes missing vectors",
+                        "props": {
+                            "limit": {"type": "number"},
+                            "dry_run": {"type": "boolean"},
+                            "note_ids": {"type": "string", "description": "Specific IDs (space/comma separated)"}
+                        }
+                    },
+                    "reembed": {
+                        "desc": "Force refresh embeddings for selected notes",
+                        "props": {
+                            "note_ids": {"type": "string", "description": "IDs to re-embed"},
+                            "limit": {"type": "number"},
+                            "dry_run": {"type": "boolean"}
+                        }
+                    },
+                    "search_diagnostics": {
+                        "desc": "Inspect last recall search diagnostics",
+                        "props": {
+                            "limit": {"type": "number", "description": "Trim debug arrays"}
+                        }
+                    },
+                    "search_health": {
+                        "desc": "Check embedding + keyword index readiness",
+                        "props": {
+                            "sample_limit": {"type": "number", "default": 5}
+                        }
+                    },
                     "batch": {
                         "desc": "Execute multiple operations",
                         "props": {"operations": {"type": "array"}},
@@ -1335,7 +1611,7 @@ def main():
                         "desc": "Pull context from all available tools for session startup (ignores all parameters)",
                         "props": {}
                     },
-                }
+                })
                 
                 response["result"] = {
                     "tools": [{

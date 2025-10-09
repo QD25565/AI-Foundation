@@ -22,7 +22,15 @@ from dataclasses import dataclass
 from enum import Enum
 
 from teambook_storage import get_db_conn
-from teambook_shared import CURRENT_AI_ID, CURRENT_TEAMBOOK, get_federation_secret
+from teambook_shared import (
+    CURRENT_AI_ID,
+    CURRENT_TEAMBOOK,
+    get_federation_secret,
+    build_security_envelope,
+    get_registered_human_identity,
+    evaluate_security_envelope,
+    get_status_symbol,
+)
 
 
 class PresenceStatus(Enum):
@@ -51,11 +59,7 @@ class AIPresence:
 
     def status_indicator(self) -> str:
         """Get emoji/symbol for status"""
-        return {
-            PresenceStatus.ONLINE: "🟢",
-            PresenceStatus.AWAY: "🟡",
-            PresenceStatus.OFFLINE: "🔴"
-        }[self.status]
+        return get_status_symbol(self.status)
 
 
 # ============= DATABASE SCHEMA =============

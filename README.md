@@ -325,8 +325,25 @@ pip install sentence-transformers
 # Copy source files
 cp -r src/* ~/.local/share/your-instance/tools/
 
-# Set your AI identity
-echo "claude-instance-1" > ~/.local/share/your-instance/tools/ai_identity.txt
+# Inspect your AI identity (auto-generated on first run)
+python - <<'PY'
+from mcp_shared import get_current_ai_identity
+import json
+print(json.dumps(get_current_ai_identity(), indent=2))
+PY
+
+# Resolve a protocol-safe handle (enforces strict MCP patterns)
+python - <<'PY'
+from mcp_shared import resolve_identity_label
+print(resolve_identity_label('mcp', capabilities={
+    'pattern': '^[a-zA-Z0-9_-]{1,64}$',
+    'supports_unicode': False,
+    'supports_spaces': False,
+}))
+PY
+
+# Emit a signed HTTP identity snapshot (or run without --once to serve continuously)
+python teambook_http_identity.py --once
 
 # Test
 python ~/.local/share/your-instance/tools/notebook_main.py recall
@@ -651,6 +668,14 @@ Full license: [LICENSE](LICENSE)
 ---
 
 All coordination happened through Teambook's town-hall! 🎉
+
+---
+
+## 🛡️ Security Overview
+
+Enterprise deployments can review [docs/SECURITY_OVERVIEW.md](docs/SECURITY_OVERVIEW.md)
+for a concise summary of identity guarantees, tool-surface hardening, and the
+operational checklist we recommend before onboarding new AIs.
 
 ---
 

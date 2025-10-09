@@ -919,45 +919,222 @@ def _resolve_note_id(id_param: Any) -> Optional[int]:
     return get_note_id(id_param)
 
 # ============= VECTOR OPERATIONS =============
+def store_embedding_vector(
+    note_id: int,
+    embedding: np.ndarray,
+    *,
+    content: str = "",
+    summary: str = "",
+    tags: Optional[List[str]] = None,
+    force: bool = False
+) -> Dict[str, Any]:
+    """Persist a vector embedding for a teambook note."""
+
+    if collection is None:
+        return {"stored": False, "error": "collection_not_initialized"}
+
+    vector_id = str(note_id)
+    metadata = {
+        "summary": summary[:200] if summary else "",
+        "tags": json.dumps(tags or [])
+    }
+    payload = {
+        "ids": [vector_id],
+        "embeddings": [embedding.tolist()],
+        "documents": [content[:1000]],
+        "metadatas": [metadata]
+    }
+
+    try:
+        if force and hasattr(collection, "update"):
+            collection.update(**payload)
+        else:
+            collection.add(**payload)
+        return {"stored": True, "vector_id": vector_id, "operation": "update" if force else "add"}
+    except Exception as primary_error:
+        if not force:
+            return {"stored": False, "error": str(primary_error)}
+
+        try:
+            collection.delete(ids=[vector_id])
+            collection.add(**payload)
+            return {
+                "stored": True,
+                "vector_id": vector_id,
+                "operation": "replace",
+                "warning": str(primary_error)
+            }
+        except Exception as secondary_error:
+            return {
+                "stored": False,
+                "error": f"{primary_error}; fallback_failed:{secondary_error}"
+            }
+
+
 def _add_to_vector_store(note_id: int, content: str, summary: str, tags: List[str]):
     """Add a note to the vector store"""
     if not encoder or not collection:
         return False
-    
+
     try:
         embedding = encoder.encode(content[:1000], convert_to_numpy=True)
-        collection.add(
-            embeddings=[embedding.tolist()],
-            documents=[content],
-            metadatas={
-                "created": datetime.now(timezone.utc).isoformat(),
-                "summary": summary,
-                "tags": json.dumps(tags)
-            },
-            ids=[str(note_id)]
+        result = store_embedding_vector(
+            note_id,
+            embedding,
+            content=content,
+            summary=summary,
+            tags=tags,
+            force=False
         )
-        return True
+        return result.get("stored", False)
     except Exception as e:
         logging.warning(f"Vector storage failed: {e}")
         return False
 
-def _search_vectors(query: str, limit: int = 100) -> List[int]:
-    """Search vector store for similar content"""
-    if not encoder or not collection:
-        return []
+
+def semantic_search(query: str, limit: int = 50) -> Dict[str, Any]:
+    """Run a semantic search with diagnostics."""
+
+    start = time.time()
+    diagnostics: Dict[str, Any] = {
+        "query": (query or "").strip(),
+        "limit": int(limit or 0) if limit else 0,
+        "status": "skipped",
+        "ids": [],
+        "results": []
+    }
+
+    if not diagnostics["query"]:
+        diagnostics["reason"] = "empty_query"
+        diagnostics["elapsed_ms"] = int((time.time() - start) * 1000)
+        return diagnostics
+
+    if encoder is None or collection is None:
+        diagnostics["status"] = "unavailable"
+        diagnostics["reason"] = "encoder_missing"
+        diagnostics["elapsed_ms"] = int((time.time() - start) * 1000)
+        return diagnostics
 
     try:
-        query_embedding = encoder.encode(query, convert_to_numpy=True)
+        query_embedding = encoder.encode(diagnostics["query"], convert_to_numpy=True)
+        raw_limit = max(1, min(int(limit or 10), 100))
         results = collection.query(
             query_embeddings=[query_embedding.tolist()],
-            n_results=min(limit, 100)
+            n_results=raw_limit
         )
-        if results['ids'] and results['ids'][0]:
-            return [int(id_str) for id_str in results['ids'][0]]
-    except Exception as e:
-        logging.debug(f"Vector search failed: {e}")
 
-    return []
+        ids: List[int] = []
+        enriched: List[Dict[str, Any]] = []
+        raw_ids = results.get("ids") or []
+        raw_distances = results.get("distances") or []
+
+        if raw_ids:
+            for rank, raw_id in enumerate(raw_ids[0]):
+                try:
+                    numeric_id = int(str(raw_id).replace("note_", ""))
+                except ValueError:
+                    try:
+                        numeric_id = int(raw_id)
+                    except Exception:
+                        continue
+
+                item: Dict[str, Any] = {
+                    "id": numeric_id,
+                    "rank": rank + 1
+                }
+
+                if raw_distances and raw_distances[0] and len(raw_distances[0]) > rank:
+                    try:
+                        distance = float(raw_distances[0][rank])
+                        item["distance"] = distance
+                        item["score"] = round(max(0.0, 1.0 - distance), 6)
+                    except Exception:
+                        pass
+
+                ids.append(numeric_id)
+                enriched.append(item)
+
+        diagnostics.update({
+            "status": "ok",
+            "ids": ids[:raw_limit],
+            "results": enriched[:raw_limit],
+            "vector_count": collection.count() if collection else 0,
+            "embedding_model": EMBEDDING_MODEL
+        })
+    except Exception as exc:
+        diagnostics.update({
+            "status": "error",
+            "error": str(exc)
+        })
+
+    diagnostics["elapsed_ms"] = int((time.time() - start) * 1000)
+    return diagnostics
+
+
+def _search_vectors(query: str, limit: int = 100) -> List[int]:
+    """Search vector store for similar content"""
+
+    diagnostics = semantic_search(query, limit)
+    return diagnostics.get("ids", [])
+
+
+def get_search_health(teambook_name: Optional[str] = None, sample_limit: int = 5) -> Dict[str, Any]:
+    """Return aggregated health metrics for teambook search."""
+
+    snapshot: Dict[str, Any] = {
+        "embedding_model": EMBEDDING_MODEL,
+        "vector_index_ready": bool(collection is not None)
+    }
+
+    try:
+        snapshot["vector_index_size"] = collection.count() if collection else 0
+    except Exception as exc:
+        snapshot["vector_index_error"] = str(exc)
+
+    filters = []
+    params: List[Any] = []
+    if teambook_name:
+        filters.append("teambook_name = ?")
+        params.append(teambook_name)
+
+    where_clause = " WHERE " + " AND ".join(filters) if filters else ""
+
+    try:
+        with _get_db_conn() as conn:
+            total_notes = conn.execute(
+                f"SELECT COUNT(*) FROM notes{where_clause}"
+            ).fetchone()[0]
+
+            missing_vectors = conn.execute(
+                f"SELECT COUNT(*) FROM notes{where_clause + (' AND ' if filters else ' WHERE ') }has_vector = FALSE"
+                if filters else "SELECT COUNT(*) FROM notes WHERE has_vector = FALSE"
+            , params if filters else []).fetchone()[0]
+
+            pinned_notes = conn.execute(
+                f"SELECT COUNT(*) FROM notes{where_clause + (' AND ' if filters else ' WHERE ')}pinned = TRUE"
+                if filters else "SELECT COUNT(*) FROM notes WHERE pinned = TRUE"
+            , params if filters else []).fetchone()[0]
+
+            sample_query = (
+                f"SELECT id, created FROM notes{where_clause + (' AND ' if filters else ' WHERE ')}has_vector = FALSE ORDER BY created DESC LIMIT ?"
+                if filters else "SELECT id, created FROM notes WHERE has_vector = FALSE ORDER BY created DESC LIMIT ?"
+            )
+            sample_rows = conn.execute(sample_query, params + [max(0, int(sample_limit or 0))]).fetchall()
+
+        snapshot.update({
+            "teambook": teambook_name or CURRENT_TEAMBOOK or 'shared',
+            "total_notes": total_notes,
+            "missing_vectors": missing_vectors,
+            "pinned_notes": pinned_notes,
+            "missing_vector_samples": [
+                {"id": row[0], "created": row[1].isoformat() if hasattr(row[1], 'isoformat') else str(row[1])}
+                for row in sample_rows
+            ]
+        })
+    except Exception as exc:
+        snapshot["database_error"] = str(exc)
+
+    return snapshot
 
 
 # Wrapper class for storage adapter compatibility

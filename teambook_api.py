@@ -28,6 +28,7 @@ from teambook_shared import (
     pipe_escape, clean_text, simple_summary, format_time_compact,
     parse_time_query, save_last_operation, get_last_operation,
     get_note_id, get_outputs_dir, logging, IS_CLI,
+    get_status_symbol,
     attach_security_envelope, ensure_directory,
     # Linear Memory Bridge
     CACHE_AVAILABLE, _save_note_to_cache, load_my_notes_cache
@@ -2015,7 +2016,10 @@ def who_is_here(minutes: int = 5, **kwargs) -> Dict:
             lines = []
             for ai_id, last_seen in sorted_ais:
                 # Add emoji only for CLI (not MCP)
-                active_marker = "🟢" if (ai_id == CURRENT_AI_ID and IS_CLI) else ""
+                if ai_id == CURRENT_AI_ID and IS_CLI:
+                    active_marker = get_status_symbol('online')
+                else:
+                    active_marker = ""
                 parts = [
                     ai_id,
                     format_time_compact(last_seen),

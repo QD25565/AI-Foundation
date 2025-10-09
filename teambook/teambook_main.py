@@ -19,6 +19,7 @@ from teambook_shared import (
     VERSION, OUTPUT_FORMAT, CURRENT_AI_ID,
     pipe_escape
 )
+from mcp_shared import audit_tool_registry, validate_tool_schemas, validate_tool_name
 
 # Import storage module and initialization functions
 import teambook_storage
@@ -40,7 +41,7 @@ from teambook_api import (
     # Vault
     vault_store, vault_retrieve, vault_list,
     # Batch
-    batch,
+    batch, search_diagnostics, search_health, reindex_embeddings, reembed,
     # Aliases
     remember, get, pin, unpin,
     # Project Coordination (Phase 2)
@@ -110,6 +111,10 @@ def handle_cli_mode():
         'observability': lambda: teambook_observability_snapshot(),
         'collective_progress': lambda: ai_collective_progress_report(),
         'vector_graph': lambda: teambook_vector_graph_diagnostics(),
+        'search_diagnostics': lambda: search_diagnostics(),
+        'search_health': lambda: search_health(),
+        'reindex_embeddings': lambda: reindex_embeddings(note_ids=args.id),
+        'reembed': lambda: reembed(note_ids=args.id),
     }
     
     if args.command in commands:
@@ -135,92 +140,105 @@ def handle_cli_mode():
 
 # ============= TOOL HANDLER =============
 
+TEAMBOOK_BASE_TOOL_HANDLERS = audit_tool_registry({
+    "get_status": get_status,
+    "write": write,
+    "read": read,
+    "get_full_note": get_full_note,
+    "pin_note": pin_note,
+    "unpin_note": unpin_note,
+    "vault_store": vault_store,
+    "vault_retrieve": vault_retrieve,
+    "vault_list": vault_list,
+    "batch": batch,
+    "search_diagnostics": search_diagnostics,
+    "search_health": search_health,
+    "reindex_embeddings": reindex_embeddings,
+    "reembed": reembed,
+    "create_teambook": create_teambook,
+    "join_teambook": join_teambook,
+    "use_teambook": use_teambook,
+    "list_teambooks": list_teambooks,
+    "claim": claim,
+    "release": release,
+    "assign": assign,
+    "evolve": evolve,
+    "attempt": attempt,
+    "attempts": attempts,
+    "combine": combine,
+    "remember": remember,
+    "get": get,
+    "pin": pin,
+    "unpin": unpin,
+    "teambook_observability_snapshot": teambook_observability_snapshot,
+    "observability_snapshot": teambook_observability_snapshot,
+    "ai_collective_progress_report": ai_collective_progress_report,
+    "collective_progress_report": ai_collective_progress_report,
+    "teambook_vector_graph_diagnostics": teambook_vector_graph_diagnostics,
+    "vector_graph_diagnostics": teambook_vector_graph_diagnostics,
+    "teambook_federation_bridge": teambook_federation_bridge,
+    "federation_bridge": teambook_federation_bridge,
+})
+
+TEAMBOOK_TOOL_HANDLERS = dict(TEAMBOOK_BASE_TOOL_HANDLERS)
+
+if EVENTS_AVAILABLE:
+    TEAMBOOK_TOOL_HANDLERS.update(
+        audit_tool_registry(
+            {
+                "watch": watch,
+                "unwatch": unwatch,
+                "get_events": get_events,
+                "list_watches": list_watches,
+                "watch_stats": watch_stats,
+            }
+        )
+    )
+
+if EVOLUTION_V2_AVAILABLE:
+    TEAMBOOK_TOOL_HANDLERS.update(
+        audit_tool_registry(
+            {
+                "contribute": contribute,
+                "rank_contribution": rank_contribution,
+                "rank": rank_contribution,
+                "contributions": contributions,
+                "synthesize": synthesize,
+                "conflicts": conflicts,
+                "vote": vote,
+            }
+        )
+    )
+
+if AUTO_TRIGGERS_AVAILABLE:
+    TEAMBOOK_TOOL_HANDLERS.update(
+        audit_tool_registry(
+            {
+                "add_hook": add_hook,
+                "remove_hook": remove_hook,
+                "list_hooks": list_hooks,
+                "toggle_hook": toggle_hook,
+                "hook_stats": hook_stats,
+                "get_hook_types": get_hook_types,
+            }
+        )
+    )
+
+
 def handle_tools_call(params: Dict) -> Dict:
     """Route tool calls to appropriate functions"""
     tool_name = params.get("name", "").lower().strip()
     tool_args = params.get("arguments", {})
-    
-    # Map tool names to functions
-    tools = {
-        # Core functions
-        "get_status": get_status,
-        "write": write,
-        "read": read,
-        "get_full_note": get_full_note,
-        "pin_note": pin_note,
-        "unpin_note": unpin_note,
-        "vault_store": vault_store,
-        "vault_retrieve": vault_retrieve,
-        "vault_list": vault_list,
-        "batch": batch,
-        # Team commands
-        "create_teambook": create_teambook,
-        "join_teambook": join_teambook,
-        "use_teambook": use_teambook,
-        "list_teambooks": list_teambooks,
-        # Ownership
-        "claim": claim,
-        "release": release,
-        "assign": assign,
-        # Evolution
-        "evolve": evolve,
-        "attempt": attempt,
-        "attempts": attempts,
-        "combine": combine,
-        # Aliases
-        "remember": remember,
-        "get": get,
-        "pin": pin,
-        "unpin": unpin,
-        # Observability & federation utilities
-        "teambook_observability_snapshot": teambook_observability_snapshot,
-        "observability_snapshot": teambook_observability_snapshot,
-        "ai_collective_progress_report": ai_collective_progress_report,
-        "collective_progress_report": ai_collective_progress_report,
-        "teambook_vector_graph_diagnostics": teambook_vector_graph_diagnostics,
-        "vector_graph_diagnostics": teambook_vector_graph_diagnostics,
-        "teambook_federation_bridge": teambook_federation_bridge,
-        "federation_bridge": teambook_federation_bridge,
-    }
 
-    # Add Phase 2 event functions if available
-    if EVENTS_AVAILABLE:
-        tools.update({
-            "watch": watch,
-            "unwatch": unwatch,
-            "get_events": get_events,
-            "list_watches": list_watches,
-            "watch_stats": watch_stats
-        })
+    try:
+        validate_tool_name(tool_name)
+    except ValueError as exc:
+        return {"content": [{"type": "text", "text": f"Error: {exc}"}]}
 
-    # Add Phase 2 enhanced evolution if available
-    if EVOLUTION_V2_AVAILABLE:
-        tools.update({
-            "contribute": contribute,
-            "rank_contribution": rank_contribution,
-            "rank": rank_contribution,
-            "contributions": contributions,
-            "synthesize": synthesize,
-            "conflicts": conflicts,
-            "vote": vote
-        })
-
-    # Add auto-trigger functions if available
-    if AUTO_TRIGGERS_AVAILABLE:
-        tools.update({
-            "add_hook": add_hook,
-            "remove_hook": remove_hook,
-            "list_hooks": list_hooks,
-            "toggle_hook": toggle_hook,
-            "hook_stats": hook_stats,
-            "get_hook_types": get_hook_types
-        })
-
-    if tool_name not in tools:
+    if tool_name not in TEAMBOOK_TOOL_HANDLERS:
         return {"content": [{"type": "text", "text": f"Error: Unknown tool: {tool_name}"}]}
-    
-    # Execute the tool
-    result = tools[tool_name](**tool_args)
+
+    result = TEAMBOOK_TOOL_HANDLERS[tool_name](**tool_args)
 
     # Handle string results (some tools like get_status return strings directly)
     if isinstance(result, str):
@@ -452,7 +470,7 @@ def main():
             
             elif method == "tools/list":
                 # Define all tool schemas
-                tool_schemas = {
+                tool_schemas = validate_tool_schemas({
                     # Team management
                     "create_teambook": {
                         "desc": "Create a new teambook",
@@ -619,16 +637,40 @@ def main():
                             "verbose": {"type": "boolean"}
                         }
                     },
+                    "search_diagnostics": {
+                        "desc": "Inspect the most recent search diagnostics",
+                        "props": {"limit": {"type": "integer", "description": "Trim debug arrays"}}
+                    },
+                    "search_health": {
+                        "desc": "Check embedding/keyword readiness",
+                        "props": {"sample_limit": {"type": "integer", "default": 5}}
+                    },
+                    "reindex_embeddings": {
+                        "desc": "Backfill embeddings for notes missing vectors",
+                        "props": {
+                            "limit": {"type": "integer"},
+                            "dry_run": {"type": "boolean"},
+                            "note_ids": {"type": "string", "description": "IDs to target (space/comma separated)"}
+                        }
+                    },
+                    "reembed": {
+                        "desc": "Force refresh embeddings for selected notes",
+                        "props": {
+                            "note_ids": {"type": "string", "description": "IDs to re-embed"},
+                            "limit": {"type": "integer"},
+                            "dry_run": {"type": "boolean"}
+                        }
+                    },
                     "batch": {
                         "desc": "Execute multiple operations",
                         "props": {"operations": {"type": "array"}},
                         "req": ["operations"]
                     }
-                }
+                })
 
                 # Add Phase 2 event system schemas if available
                 if EVENTS_AVAILABLE:
-                    tool_schemas.update({
+                    tool_schemas.update(validate_tool_schemas({
                         "watch": {
                             "desc": "Watch an item for changes",
                             "props": {
@@ -663,11 +705,11 @@ def main():
                             "desc": "Activity overview for watches",
                             "props": {}
                         }
-                    })
+                    }))
 
                 # Add Phase 2 enhanced evolution schemas if available
                 if EVOLUTION_V2_AVAILABLE:
-                    tool_schemas.update({
+                    tool_schemas.update(validate_tool_schemas({
                         "contribute": {
                             "desc": "Share your approach to a problem",
                             "props": {
@@ -725,7 +767,7 @@ def main():
                             },
                             "req": ["evo_id", "preferred"]
                         }
-                    })
+                    }))
 
                 response["result"] = {
                     "tools": [{

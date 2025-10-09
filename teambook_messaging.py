@@ -14,17 +14,20 @@ Security Features:
 - Input sanitization (forgiving but secure)
 """
 
+import json
+import hashlib
 import re
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Tuple, Set
+from typing import Any, Dict, List, Optional, Tuple, Set
 from collections import defaultdict
 import logging
 
 from teambook_shared import (
     CURRENT_AI_ID, CURRENT_TEAMBOOK, OUTPUT_FORMAT,
     pipe_escape, format_time_compact, clean_text,
-    build_security_envelope, get_registered_human_identity
+    build_security_envelope, get_registered_human_identity,
+    evaluate_security_envelope,
 )
 
 from teambook_storage import get_db_conn, log_operation_to_db
@@ -202,23 +205,47 @@ def cleanup_expired_messages(conn):
         logging.error(f"Message cleanup error: {e}")
 
 
-def _prepare_message_security(channel: str, content: str, to_ai: Optional[str], expires_at: datetime) -> Tuple[Optional[str], Optional[str], Optional[str]]:
-    """Generate signature, envelope, and identity hint for a message payload."""
+def _message_security_payload(
+    channel: str,
+    from_ai: str,
+    to_ai: Optional[str],
+    content: Optional[str],
+    expires_at: datetime,
+    teambook_name: Optional[str],
+) -> Dict[str, Any]:
+    expires_value: str
+    if isinstance(expires_at, datetime):
+        expires_value = expires_at.isoformat()
+    else:
+        expires_value = str(expires_at)
 
-    payload = {
-        'ai_id': CURRENT_AI_ID,
+    return {
+        'ai_id': from_ai,
         'channel': channel,
         'recipient': to_ai,
         'content_hash': hashlib.sha3_256((content or '').encode('utf-8')).hexdigest(),
-        'expires_at': expires_at.isoformat(),
-        'teambook': CURRENT_TEAMBOOK,
+        'expires_at': expires_value,
+        'teambook': teambook_name,
     }
+
+
+def _prepare_message_security(channel: str, content: str, to_ai: Optional[str], expires_at: datetime) -> Tuple[Optional[str], Optional[str], Optional[str], Dict[str, Any]]:
+    """Generate signature, envelope, and identity hint for a message payload."""
+
+    payload = _message_security_payload(
+        channel=channel,
+        from_ai=CURRENT_AI_ID,
+        to_ai=to_ai,
+        content=content,
+        expires_at=expires_at,
+        teambook_name=CURRENT_TEAMBOOK,
+    )
     envelope = build_security_envelope(payload, 'teambook.messaging.dispatch')
     signature = envelope.get('signature') if envelope else None
     envelope_json = json.dumps(envelope, sort_keys=True) if envelope else None
     identity_hint = get_registered_human_identity(CURRENT_AI_ID)
     identity_json = json.dumps(identity_hint, sort_keys=True) if identity_hint else None
-    return signature, envelope_json, identity_json
+    return signature, envelope_json, identity_json, payload
 
 # ============= CORE MESSAGING FUNCTIONS =============
 
@@ -250,7 +277,7 @@ def broadcast(content: str = None, channel: str = "general", ttl_hours: int = 24
             ttl_hours = 24
 
         expires_at = datetime.now(timezone.utc) + timedelta(hours=ttl_hours)
-        signature_value, envelope_json, identity_json = _prepare_message_security(channel, content, None, expires_at)
+        signature_value, envelope_json, identity_json, _security_payload = _prepare_message_security(channel, content, None, expires_at)
 
         with get_db_conn() as conn:
             init_messaging_tables(conn)
@@ -354,7 +381,7 @@ def direct_message(to_ai: str = None, content: str = None, ttl_hours: int = 24, 
             ttl_hours = 24
 
         expires_at = datetime.now(timezone.utc) + timedelta(hours=ttl_hours)
-        signature_value, envelope_json, identity_json = _prepare_message_security('_dm', content, to_ai, expires_at)
+        signature_value, envelope_json, identity_json, _security_payload = _prepare_message_security('_dm', content, to_ai, expires_at)
 
         with get_db_conn() as conn:
             init_messaging_tables(conn)
@@ -478,22 +505,28 @@ def read_channel(channel: str = None, limit: int = 20, unread_only: bool = False
             init_messaging_tables(conn)
 
             # Query with security filters
-            if unread_only:
-                query = '''
-                    SELECT id, from_ai, content, created
+            select_clause = '''
+                    SELECT id, from_ai, content, created, expires_at, teambook_name, security_envelope
                     FROM messages
+                '''
+            if unread_only:
+                query = (
+                    select_clause
+                    + '''
                     WHERE channel = ? AND expires_at > ? AND read = FALSE
                     ORDER BY created DESC
                     LIMIT ?
-                '''
+                    '''
+                )
             else:
-                query = '''
-                    SELECT id, from_ai, content, created
-                    FROM messages
+                query = (
+                    select_clause
+                    + '''
                     WHERE channel = ? AND expires_at > ?
                     ORDER BY created DESC
                     LIMIT ?
-                '''
+                    '''
+                )
 
             messages = conn.execute(query, [
                 channel,
@@ -517,7 +550,17 @@ def read_channel(channel: str = None, limit: int = 20, unread_only: bool = False
 
         # Pure pipe format (token optimized!) - newline separated
         lines = []
-        for msg_id, from_ai, content, created in messages:
+        for msg_id, from_ai, content, created, expires_at, teambook_name, envelope_json in messages:
+            envelope_dict = json.loads(envelope_json) if envelope_json else None
+            payload = _message_security_payload(
+                channel=channel,
+                from_ai=from_ai,
+                to_ai=None,
+                content=content,
+                expires_at=expires_at,
+                teambook_name=teambook_name,
+            )
+            verification = evaluate_security_envelope(payload, envelope_dict)
             # Format: id|from|time|content
             parts = [
                 str(msg_id),
@@ -525,6 +568,9 @@ def read_channel(channel: str = None, limit: int = 20, unread_only: bool = False
                 format_time_compact(created),
                 content[:5000]  # Full content (5000 chars - matches DM limit)
             ]
+            if not verification['verified']:
+                flag = '!unsigned' if verification['status'] == 'missing' else '!invalid_signature'
+                parts.append(flag)
             lines.append('|'.join(pipe_escape(p) for p in parts))
         return '\n'.join(lines)  # Direct string, newline separated!
 
@@ -553,22 +599,28 @@ def read_dms(limit: int = 20, unread_only: bool = True, **kwargs) -> Dict:
         with get_db_conn() as conn:
             init_messaging_tables(conn)
 
-            if unread_only:
-                query = '''
-                    SELECT id, from_ai, content, created
+            select_clause = '''
+                    SELECT id, from_ai, content, created, expires_at, teambook_name, security_envelope
                     FROM messages
+                '''
+            if unread_only:
+                query = (
+                    select_clause
+                    + '''
                     WHERE to_ai = ? AND expires_at > ? AND read = FALSE
                     ORDER BY created DESC
                     LIMIT ?
-                '''
+                    '''
+                )
             else:
-                query = '''
-                    SELECT id, from_ai, content, created
-                    FROM messages
+                query = (
+                    select_clause
+                    + '''
                     WHERE to_ai = ? AND expires_at > ?
                     ORDER BY created DESC
                     LIMIT ?
-                '''
+                    '''
+                )
 
             messages = conn.execute(query, [
                 CURRENT_AI_ID,
@@ -593,13 +645,26 @@ def read_dms(limit: int = 20, unread_only: bool = True, **kwargs) -> Dict:
         # Pure pipe format - newline separated
         # DMs show FULL content (no truncation) for complete context
         lines = []
-        for msg_id, from_ai, content, created in messages:
+        for msg_id, from_ai, content, created, expires_at, teambook_name, envelope_json in messages:
+            envelope_dict = json.loads(envelope_json) if envelope_json else None
+            payload = _message_security_payload(
+                channel='_dm',
+                from_ai=from_ai,
+                to_ai=CURRENT_AI_ID,
+                content=content,
+                expires_at=expires_at,
+                teambook_name=teambook_name,
+            )
+            verification = evaluate_security_envelope(payload, envelope_dict)
             parts = [
                 f"dm:{msg_id}",
                 from_ai,
                 format_time_compact(created),
                 content  # Full content - no [:100] truncation
             ]
+            if not verification['verified']:
+                flag = '!unsigned' if verification['status'] == 'missing' else '!invalid_signature'
+                parts.append(flag)
             lines.append('|'.join(pipe_escape(p) for p in parts))
         return '\n'.join(lines)  # Direct string, newline separated!
 
@@ -807,7 +872,7 @@ def send_message(
         with get_db_conn() as conn:
             init_messaging_tables(conn)
 
-            signature_value, envelope_json, identity_json = _prepare_message_security(
+            signature_value, envelope_json, identity_json, security_payload = _prepare_message_security(
                 '_dm' if is_dm else channel,
                 content,
                 to if is_dm else None,
@@ -870,6 +935,18 @@ def send_message(
             "summary": summary,
             "recipients_count": recipients_count
         }
+
+        envelope_dict = json.loads(envelope_json) if envelope_json else None
+        security_info = evaluate_security_envelope(security_payload, envelope_dict)
+        result["security"] = security_info
+        if signature_value:
+            result["signature"] = signature_value
+
+        if identity_json:
+            try:
+                result["identity_hint"] = json.loads(identity_json)
+            except json.JSONDecodeError:
+                pass
 
         # Add warnings
         if truncated:
@@ -981,7 +1058,8 @@ def get_messages(
 
             # Get messages
             query = f'''
-                SELECT id, from_ai, to_ai, content, summary, reply_to, created
+                SELECT id, from_ai, to_ai, content, summary, reply_to, created,
+                       expires_at, teambook_name, signature, security_envelope, identity_hint
                 FROM messages
                 WHERE {where_clause}
                 ORDER BY created DESC
@@ -1015,11 +1093,36 @@ def get_messages(
 
         # Format messages
         messages = []
-        for msg_id, from_ai, to_ai, content, summary, reply_to, created in messages_raw:
+        messages = []
+        for (
+            msg_id,
+            from_ai,
+            to_ai,
+            content,
+            summary,
+            reply_to,
+            created,
+            expires_at,
+            teambook_name,
+            signature_value,
+            security_json,
+            identity_json,
+        ) in messages_raw:
             read_by = read_by_map.get(msg_id, [])
             unread = CURRENT_AI_ID not in read_by
 
-            messages.append({
+            envelope_dict = json.loads(security_json) if security_json else None
+            payload = _message_security_payload(
+                channel=channel,
+                from_ai=from_ai,
+                to_ai=to_ai,
+                content=content,
+                expires_at=expires_at,
+                teambook_name=teambook_name,
+            )
+            security_info = evaluate_security_envelope(payload, envelope_dict)
+
+            message_entry = {
                 "id": msg_id,
                 "from": from_ai,
                 "to": to_ai or "all",
@@ -1028,8 +1131,23 @@ def get_messages(
                 "timestamp": created.isoformat() if hasattr(created, 'isoformat') else created,
                 "reply_to": reply_to,
                 "read_by": read_by,
-                "unread": unread
-            })
+                "unread": unread,
+                "security": security_info,
+            }
+
+            if envelope_dict is not None:
+                message_entry["security_envelope"] = envelope_dict
+
+            if signature_value:
+                message_entry["signature"] = signature_value
+
+            if identity_json:
+                try:
+                    message_entry["identity_hint"] = json.loads(identity_json)
+                except json.JSONDecodeError:
+                    pass
+
+            messages.append(message_entry)
 
         log_operation_to_db('get_messages_v3')
 

@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>AI Foundation Identity &amp; Collaboration Overview</title>
+  <style>
+    body {
+      font-family: "Segoe UI", Roboto, sans-serif;
+      background: #10131a;
+      color: #f4f6fb;
+      margin: 0;
+      padding: 0 0 64px;
+    }
+    header {
+      background: linear-gradient(135deg, #2c3e50, #4b79a1);
+      padding: 32px 48px;
+      box-shadow: 0 4px 24px rgba(0, 0, 0, 0.35);
+    }
+    header h1 {
+      margin: 0 0 12px;
+      font-size: 32px;
+      letter-spacing: 0.02em;
+    }
+    header p {
+      margin: 0;
+      max-width: 720px;
+      line-height: 1.5;
+      color: rgba(255, 255, 255, 0.85);
+    }
+    main {
+      padding: 40px 48px;
+      display: grid;
+      gap: 40px;
+    }
+    section {
+      background: rgba(255, 255, 255, 0.04);
+      border-radius: 16px;
+      padding: 24px 28px;
+      box-shadow: 0 12px 36px rgba(0, 0, 0, 0.25);
+      backdrop-filter: blur(6px);
+    }
+    h2 {
+      margin-top: 0;
+      font-size: 22px;
+      color: #8dd0ff;
+      letter-spacing: 0.01em;
+    }
+    .diagram-wrapper {
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      padding: 12px 0 8px;
+    }
+    svg {
+      max-width: 960px;
+      width: 100%;
+      height: auto;
+    }
+    .legend {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 16px;
+      margin-top: 24px;
+      font-size: 15px;
+      line-height: 1.5;
+    }
+    .legend div {
+      background: rgba(255, 255, 255, 0.05);
+      border-left: 4px solid #8dd0ff;
+      padding: 12px 14px;
+      border-radius: 8px;
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    }
+    footer {
+      padding: 0 48px;
+      font-size: 14px;
+      color: rgba(255, 255, 255, 0.65);
+    }
+    a {
+      color: #8dd0ff;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>AI Identity &amp; Collaboration Topology</h1>
+    <p>
+      A high-level view of how an AI Foundation identity anchors cross-tool collaboration. Every surface honours
+      signed metadata, protocol-safe handles, and zero-trust validation so instances can roam between Notebook,
+      Task Manager, World, and Teambook without losing their cryptographic provenance.
+    </p>
+  </header>
+  <main>
+    <section aria-labelledby="diagram-title">
+      <h2 id="diagram-title">Signed Identity Pathways</h2>
+      <div class="diagram-wrapper">
+        <svg viewBox="0 0 960 560" role="img" aria-labelledby="diagram-title">
+          <defs>
+            <linearGradient id="nodeGradient" x1="0%" x2="100%">
+              <stop offset="0%" stop-color="#243b55" />
+              <stop offset="100%" stop-color="#141e30" />
+            </linearGradient>
+            <linearGradient id="hubGradient" x1="0%" x2="100%">
+              <stop offset="0%" stop-color="#00c6ff" />
+              <stop offset="100%" stop-color="#0072ff" />
+            </linearGradient>
+            <filter id="shadow" x="-40%" y="-40%" width="180%" height="180%">
+              <feDropShadow dx="0" dy="6" stdDeviation="8" flood-color="#000" flood-opacity="0.35" />
+            </filter>
+          </defs>
+
+          <!-- AI Core -->
+          <rect x="380" y="80" width="200" height="120" rx="18" fill="url(#hubGradient)" filter="url(#shadow)" />
+          <text x="480" y="136" text-anchor="middle" fill="#ffffff" font-size="24" font-weight="600">AI Identity Core</text>
+          <text x="480" y="166" text-anchor="middle" fill="#d9ecff" font-size="14">Ed25519 Keys • Registry • Handle Map</text>
+          <text x="480" y="188" text-anchor="middle" fill="#d9ecff" font-size="14">Signed MCP/CLI/HTTP envelopes</text>
+
+          <!-- Notebook -->
+          <rect x="70" y="280" width="200" height="110" rx="16" fill="url(#nodeGradient)" filter="url(#shadow)" />
+          <text x="170" y="324" text-anchor="middle" fill="#ffffff" font-size="20">Notebook</text>
+          <text x="170" y="352" text-anchor="middle" fill="#c7d8ef" font-size="13">Private memory • Semantic recall</text>
+
+          <!-- Task Manager -->
+          <rect x="360" y="380" width="200" height="110" rx="16" fill="url(#nodeGradient)" filter="url(#shadow)" />
+          <text x="460" y="424" text-anchor="middle" fill="#ffffff" font-size="20">Task Manager</text>
+          <text x="460" y="452" text-anchor="middle" fill="#c7d8ef" font-size="13">Atomic claiming • Audit logs</text>
+
+          <!-- World -->
+          <rect x="650" y="280" width="200" height="110" rx="16" fill="url(#nodeGradient)" filter="url(#shadow)" />
+          <text x="750" y="324" text-anchor="middle" fill="#ffffff" font-size="20">World</text>
+          <text x="750" y="352" text-anchor="middle" fill="#c7d8ef" font-size="13">Time &amp; context • Environment facts</text>
+
+          <!-- Teambook -->
+          <rect x="360" y="240" width="200" height="110" rx="16" fill="url(#nodeGradient)" filter="url(#shadow)" />
+          <text x="460" y="284" text-anchor="middle" fill="#ffffff" font-size="20">Teambook</text>
+          <text x="460" y="312" text-anchor="middle" fill="#c7d8ef" font-size="13">Collaboration • Presence • Messaging</text>
+
+          <!-- Connectors -->
+          <path d="M480 200 L170 280" stroke="#8dd0ff" stroke-width="4" fill="none" marker-end="url(#arrow)" opacity="0.8" />
+          <path d="M480 200 L460 240" stroke="#8dd0ff" stroke-width="4" fill="none" marker-end="url(#arrow)" opacity="0.8" />
+          <path d="M480 200 L460 380" stroke="#8dd0ff" stroke-width="4" fill="none" marker-end="url(#arrow)" opacity="0.8" />
+          <path d="M480 200 L750 280" stroke="#8dd0ff" stroke-width="4" fill="none" marker-end="url(#arrow)" opacity="0.8" />
+
+          <defs>
+            <marker id="arrow" markerWidth="12" markerHeight="12" refX="6" refY="6" orient="auto">
+              <path d="M0,0 L12,6 L0,12 z" fill="#8dd0ff" />
+            </marker>
+          </defs>
+
+          <!-- Security Notes -->
+          <text x="170" y="405" text-anchor="middle" fill="#8dd0ff" font-size="12">Signed entries with ascii-safe handles</text>
+          <text x="460" y="510" text-anchor="middle" fill="#8dd0ff" font-size="12">Queue claims verified by envelopes</text>
+          <text x="750" y="405" text-anchor="middle" fill="#8dd0ff" font-size="12">Temporal data stamped &amp; validated</text>
+          <text x="460" y="360" text-anchor="middle" fill="#8dd0ff" font-size="12">Presence, messaging, HTTP identity API</text>
+        </svg>
+      </div>
+      <div class="legend">
+        <div>
+          <strong>Handle Strategy</strong><br />
+          Protocol-aware handle variants are negotiated per client. CLI fallbacks stay ASCII-clean, while MCP/HTTP surfaces
+          honour stricter patterns (<code>[a-zA-Z0-9_-]{1,64}</code>) without sacrificing human-friendly names.
+        </div>
+        <div>
+          <strong>Zero-Trust Validation</strong><br />
+          Every edge carries a signed security envelope embedding fingerprints, protocol handle maps, and resolved
+          variants. Consumers verify payload hashes and Ed25519 signatures before accepting state transitions.
+        </div>
+        <div>
+          <strong>Portability</strong><br />
+          Remote deployments fetch the HTTP identity snapshot for immediate trust bootstrapping. The same metadata powers
+          Notebook sync, Task Manager audit trails, and Teambook presence records.
+        </div>
+      </div>
+    </section>
+    <section>
+      <h2>How to Use This Visual</h2>
+      <p>
+        Deploy the HTTP identity service (<code>teambook_http_identity.py</code>) alongside core tools to serve signed JSON
+        snapshots. CLI or MCP clients can request ASCII or emoji-rich handles, guaranteeing compatibility with
+        <abbr title="Model Context Protocol">MCP</abbr>, terminal-only, or HTTP-native consumers. The shared identity core
+        automatically refreshes protocol maps so every tool reflects the same provenance.
+      </p>
+    </section>
+  </main>
+  <footer>
+    Generated for AI-Foundation enterprise reviews. Update alongside <code>IDENTITY_SECURITY.md</code> when the
+    identity model evolves.
+  </footer>
+</body>
+</html>
