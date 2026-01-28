@@ -34,7 +34,7 @@ See [QUICKSTART.md](QUICKSTART.md) for setup instructions.
 └─────────────────────────────────────────────────────────┘
 ```
 
-## Tools (51 total)
+## API Reference
 
 ### Notebook (12) - Private Memory
 | Tool | Description |
