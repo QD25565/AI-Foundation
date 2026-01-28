@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "ai-foundation": {
+      "command": "~/.ai-foundation/bin/ai-foundation-mcp",
+      "env": {
+        "AI_ID": "CHANGE_THIS_TO_UNIQUE_ID",
+        "TEAMENGRAM_V2": "1"
+      }
+    }
+  }
+}

@@ -1,0 +1,169 @@
+//! CLI Wrapper - Cross-platform subprocess layer for MCP tools
+//!
+//! Instead of complex daemon connections with struct parsing that can break,
+//! we simply call the battle-tested CLI executables and return their output.
+//!
+//! Benefits:
+//! - If CLI works, MCP works (single source of truth)
+//! - No parsing mismatches between daemon/client/MCP
+//! - Simpler maintenance - fix CLI once, MCP inherits fix
+//! - 15-50ms latency is negligible (Claude API calls are 500-2000ms)
+//!
+//! Cross-platform:
+//! - Windows: notebook-cli.exe, teambook.exe
+//! - Linux/macOS: notebook-cli, teambook
+
+use std::path::PathBuf;
+use std::process::Stdio;
+use tokio::process::Command;
+
+/// Get executable name with platform-appropriate extension
+fn exe_name(base: &str) -> String {
+    if cfg!(windows) {
+        format!("{}.exe", base)
+    } else {
+        base.to_string()
+    }
+}
+
+/// Get the bin directory path
+/// Priority: BIN_PATH env var > working directory ./bin > home/.ai-foundation/bin
+fn get_bin_dir() -> PathBuf {
+    // Check BIN_PATH environment variable first
+    if let Ok(bin_path) = std::env::var("BIN_PATH") {
+        return PathBuf::from(bin_path);
+    }
+
+    // Check for ./bin relative to current working directory
+    let cwd_bin = std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("bin");
+    if cwd_bin.exists() {
+        return cwd_bin;
+    }
+
+    // Fall back to ~/.ai-foundation/bin
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".ai-foundation")
+        .join("bin")
+}
+
+/// Run a teambook CLI command and return output
+///
+/// # Arguments
+/// * `args` - Command arguments (e.g., ["status"] for "teambook status")
+///
+/// # Returns
+/// * CLI stdout on success
+/// * Formatted error message on failure
+pub async fn teambook(args: &[&str]) -> String {
+    run_cli("teambook", args).await
+}
+
+/// Run a notebook CLI command and return output
+///
+/// # Arguments
+/// * `args` - Command arguments (e.g., ["stats"] for "notebook-cli stats")
+///
+/// # Returns
+/// * CLI stdout on success
+/// * Formatted error message on failure
+pub async fn notebook(args: &[&str]) -> String {
+    run_cli("notebook-cli", args).await
+}
+
+/// Run a CLI command and return its output
+///
+/// # Arguments
+/// * `exe_base` - Executable base name without extension (e.g., "teambook")
+/// * `args` - Command arguments
+///
+/// # Returns
+/// * CLI stdout on success (trimmed)
+/// * Formatted error message on failure
+async fn run_cli(exe_base: &str, args: &[&str]) -> String {
+    let bin_dir = get_bin_dir();
+    let exe = exe_name(exe_base);
+    let exe_path = bin_dir.join(&exe);
+
+    // Get AI_ID for the CLI
+    let ai_id = std::env::var("AI_ID")
+        .or_else(|_| std::env::var("AGENT_ID"))
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    // V2 event sourcing is the default
+    let v2_disabled = std::env::var("TEAMENGRAM_V2")
+        .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
+        .unwrap_or(false);
+
+    let mut cmd = Command::new(&exe_path);
+    cmd.args(args)
+        .env("AI_ID", &ai_id);
+
+    // V2 is default - always pass unless explicitly disabled
+    if !v2_disabled {
+        cmd.env("TEAMENGRAM_V2", "1");
+    }
+
+    let result = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+
+    let child = match result {
+        Ok(child) => child,
+        Err(e) => {
+            return format!("Error: Failed to run {}: {}\nPath: {:?}", exe, e, exe_path);
+        }
+    };
+
+    match child.wait_with_output().await {
+        Ok(output) => {
+            if output.status.success() {
+                String::from_utf8_lossy(&output.stdout).trim().to_string()
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if !stderr.is_empty() {
+                    format!("Error: {}", stderr.trim())
+                } else if !stdout.is_empty() {
+                    stdout.trim().to_string()
+                } else {
+                    format!("Error: {} exited with code {:?}", exe, output.status.code())
+                }
+            }
+        }
+        Err(e) => {
+            format!("Error: Failed to get output from {}: {}", exe, e)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_exe_name() {
+        let name = exe_name("teambook");
+        if cfg!(windows) {
+            assert_eq!(name, "teambook.exe");
+        } else {
+            assert_eq!(name, "teambook");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_teambook_status() {
+        let result = teambook(&["status"]).await;
+        assert!(!result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_notebook_stats() {
+        let result = notebook(&["stats"]).await;
+        assert!(!result.is_empty());
+    }
+}
