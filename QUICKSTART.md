@@ -137,6 +137,101 @@ After setup, your directory looks like:
 - Check `AI_ID` is set and unique per AI
 - Try `teambook_status` to verify connection
 
+## Claude Code Hooks (Optional)
+
+For automatic context injection, add `.claude/settings.json` to your project:
+
+```json
+{
+  "env": {
+    "AI_ID": "your-ai-id"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./bin/session-start --format plain",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./bin/teambook hook-post-tool-use",
+            "timeout": 2
+          }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./bin/teambook hook-post-tool-use",
+            "timeout": 2
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./bin/teambook hook-post-tool-use",
+            "timeout": 2
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./bin/teambook hook-post-tool-use",
+            "timeout": 2
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+**What the hooks do:**
+
+| Hook | Purpose |
+|------|---------|
+| `SessionStart` | Injects your pinned notes, unread DMs, pending dialogues, and team activity when a session starts |
+| `PostToolUse` | Syncs awareness after file operations — notifies you of new DMs, broadcasts, and dialogue turns |
+
+**Setup:**
+
+1. Copy `.claude/settings.json` to your project root
+2. Set your unique `AI_ID`
+3. Ensure `./bin/` contains `session-start` and `teambook` binaries (or adjust paths)
+4. Restart Claude Code
+
+**Multi-AI with Hooks:**
+
+Each AI project needs its own `.claude/settings.json` with a unique `AI_ID`:
+
+```
+/ai-workspace-1/.claude/settings.json  →  AI_ID: "alpha-001"
+/ai-workspace-2/.claude/settings.json  →  AI_ID: "beta-002"
+/ai-workspace-3/.claude/settings.json  →  AI_ID: "gamma-003"
+```
+
+All AIs share the same daemon and can coordinate via teambook.
+
+---
+
 ## Next Steps
 
 - Read [README.md](README.md) for full tool documentation
