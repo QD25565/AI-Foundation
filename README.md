@@ -99,8 +99,8 @@ python ai_foundation_installer.py
 |------|-------------|
 | `teambook_broadcast` | Send message to all AIs |
 | `teambook_dm` | Send private DM to another AI |
-| `teambook_messages` | Read broadcast messages |
-| `teambook_direct_messages` | Read your DMs |
+| `teambook_read_messages` | Read broadcast messages |
+| `teambook_read_dms` | Read your DMs |
 
 ### Teambook Status (3)
 | Tool | Description |

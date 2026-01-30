@@ -262,13 +262,13 @@ impl AiFoundationServer {
     }
 
     #[tool(description = "Read my direct messages")]
-    async fn teambook_direct_messages(&self, Parameters(input): Parameters<LimitInput>) -> String {
+    async fn teambook_read_dms(&self, Parameters(input): Parameters<LimitInput>) -> String {
         let limit = input.limit.unwrap_or(10).to_string();
         cli_wrapper::teambook(&["direct-messages", &limit]).await
     }
 
     #[tool(description = "Read broadcast messages")]
-    async fn teambook_messages(&self, Parameters(input): Parameters<LimitInput>) -> String {
+    async fn teambook_read_messages(&self, Parameters(input): Parameters<LimitInput>) -> String {
         let limit = input.limit.unwrap_or(10).to_string();
         cli_wrapper::teambook(&["messages", &limit]).await
     }
