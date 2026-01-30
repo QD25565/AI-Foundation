@@ -94,40 +94,20 @@ python ai_foundation_installer.py
 | `notebook_add_tags` | Add tags to a note |
 | `notebook_related` | Find related notes |
 
-### Vault (3) — Private Encrypted Storage
-| Tool | Description |
-|------|-------------|
-| `vault_store` | Store encrypted secret |
-| `vault_get` | Retrieve secret |
-| `vault_list` | List vault keys |
-
-### Teambook Communication (9)
+### Teambook Messaging (4)
 | Tool | Description |
 |------|-------------|
 | `teambook_broadcast` | Send message to all AIs |
 | `teambook_dm` | Send private DM to another AI |
-| `teambook_direct_messages` | Read your DMs |
 | `teambook_messages` | Read broadcast messages |
-| `teambook_status` | Get your AI ID and status |
-| `teambook_who_is_here` | List active AIs |
-| `teambook_what_doing` | See what AIs are working on |
-| `teambook_update_presence` | Update your status |
-| `teambook_activity` | Get team activity feed |
+| `teambook_direct_messages` | Read your DMs |
 
-### Tasks (11) — Shared Task Queue
+### Teambook Status (3)
 | Tool | Description |
 |------|-------------|
-| `task_add` | Create a new task |
-| `task_list` | List tasks |
-| `task_get` | Get task details |
-| `task_claim_by_id` | Claim specific task |
-| `teambook_claim_task` | Claim next available task |
-| `task_start` | Mark task as in-progress |
-| `task_complete` | Complete a task |
-| `task_block` | Block a task with reason |
-| `task_unblock` | Unblock a task |
-| `task_update` | Update task status |
-| `find_task_smart` | Search tasks |
+| `teambook_status` | Get your AI ID and status |
+| `teambook_update_presence` | Update your status |
+| `teambook_get_presence` | Get another AI's presence |
 
 ### Dialogues (7) — Structured AI-to-AI Conversations
 | Tool | Description |
@@ -140,26 +120,24 @@ python ai_foundation_installer.py
 | `dialogues` | List your dialogues |
 | `dialogue_end` | End a dialogue |
 
-### File Claims (5) — Prevent Edit Conflicts
+### Tasks (10) — Shared Task Queue
 | Tool | Description |
 |------|-------------|
-| `teambook_claim_file` | Claim a file before editing |
-| `teambook_release_file` | Release file claim |
-| `teambook_check_file` | Check if file is claimed |
-| `teambook_list_claims` | List all file claims |
-| `teambook_recent_file_actions` | Recent file activity |
+| `task_add` | Create a new task |
+| `task_list` | List tasks |
+| `task_get` | Get task details |
+| `task_claim` | Claim a task |
+| `task_start` | Mark task as in-progress |
+| `task_complete` | Complete a task |
+| `task_block` | Block a task with reason |
+| `task_unblock` | Unblock a task |
+| `task_update` | Update task status |
+| `task_stats` | Get task statistics |
 
 ### Standby (1)
 | Tool | Description |
 |------|-------------|
 | `standby` | Enter event-driven standby mode |
-
-### Teambook Vault (3) — Shared Team Secrets
-| Tool | Description |
-|------|-------------|
-| `teambook_vault_store` | Store shared secret |
-| `teambook_vault_get` | Get shared secret |
-| `teambook_vault_list` | List shared vault keys |
 
 <img src="./images/header_underline.png" width="100%" alt="">
 

@@ -1,13 +1,9 @@
-//! AI Foundation MCP Server - Multi-AI Coordination Framework
+//! AI Foundation MCP Server - Thin CLI Wrapper Architecture
+//! All tools call CLI executables via subprocess.
 //!
-//! Provides persistent memory and real-time coordination for AI agents.
-//! All tools call CLI executables via subprocess for reliability.
-//!
-//! Core Features:
-//! - Notebook: Private AI memory (remember, recall, pin, vault)
-//! - Teambook: Team coordination (DMs, broadcasts, dialogues, tasks, file claims)
-//!
-//! GitHub: https://github.com/QD25565/ai-foundation
+//! TOOL COUNT: 37 (core coordination only)
+//! Firebase, Play Console, and File Claims moved to integrations/
+//! See docs/MCP-TOOLS-HIDDEN.md for hidden tools list
 
 use anyhow::Result;
 use rmcp::{
@@ -50,6 +46,9 @@ pub struct BroadcastInput { pub content: String, pub channel: Option<String> }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct DmInput { pub to_ai: String, pub content: String }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ContentInput { pub content: String }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct UpdateNoteInput { pub id: i64, pub content: Option<String>, pub tags: Option<String> }
@@ -97,19 +96,52 @@ pub struct DialogueIdInput { pub dialogue_id: u64 }
 pub struct DialogueRespondInput { pub dialogue_id: u64, pub response: String }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct DialogueEndInput { pub dialogue_id: u64, pub status: Option<String> }
+pub struct DialogueEndInput { pub dialogue_id: u64, pub status: Option<String>, pub summary: Option<String> }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct FileClaimInput { pub path: String, pub duration: Option<i32> }
+pub struct RoomCreateInput { pub name: String, pub topic: Option<String> }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct PathInput { pub path: String }
+pub struct RoomIdInput { pub room_id: String }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct VoteCreateInput { pub topic: String, pub options: String, pub voters: i32 }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct VoteCastInput { pub vote_id: i32, pub choice: String }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct VoteIdInput { pub vote_id: i32 }
+
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct StandbyInput { pub timeout: Option<i64> }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct PresenceInput { pub status: Option<String>, pub current_task: Option<String> }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct AiIdInput { pub ai_id: String }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ProjectCreateInput { pub name: String, pub goal: String }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ProjectIdInput { pub project_id: i32 }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ProjectTaskInput { pub project_id: i32, pub title: String, pub priority: Option<i32> }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CreateFeatureInput { pub project_id: i32, pub name: String, pub overview: String, pub directory: Option<String> }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GetFeatureInput { pub feature_id: i32 }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ListFeaturesInput { pub project_id: i32 }
+
+
 
 // ============== Server ==============
 
@@ -127,12 +159,13 @@ impl AiFoundationServer {
 #[tool_router]
 impl AiFoundationServer {
 
-    // ============== Notebook Tools (12) - Private AI Memory ==============
+    // ============== Notebook Tools (12 kept, 18 hidden) ==============
 
     #[tool(description = "Save a note to your private memory. Use 'file' parameter for privacy (content read from file, file deleted).")]
     async fn notebook_remember(&self, Parameters(input): Parameters<RememberInput>) -> String {
         let mut args = vec!["remember"];
 
+        // Handle content vs file mode
         let content_owned: String;
         let file_owned: String;
         if let Some(ref f) = input.file {
@@ -156,9 +189,6 @@ impl AiFoundationServer {
         let limit = input.limit.unwrap_or(10).to_string();
         cli_wrapper::notebook(&["recall", &input.query, "--limit", &limit]).await
     }
-
-    #[tool(description = "Notebook statistics")]
-    async fn notebook_stats(&self) -> String { cli_wrapper::notebook(&["stats"]).await }
 
     #[tool(description = "List recent notes")]
     async fn notebook_list(&self, Parameters(input): Parameters<LimitInput>) -> String {
@@ -218,22 +248,7 @@ impl AiFoundationServer {
         cli_wrapper::notebook(&["related", &id]).await
     }
 
-    // ============== Vault Tools (3) - Private Encrypted Storage ==============
-
-    #[tool(description = "Store secret in vault")]
-    async fn vault_store(&self, Parameters(input): Parameters<VaultStoreInput>) -> String {
-        cli_wrapper::notebook(&["vault", "set", &input.key, &input.value]).await
-    }
-
-    #[tool(description = "Get secret from vault")]
-    async fn vault_get(&self, Parameters(input): Parameters<VaultGetInput>) -> String {
-        cli_wrapper::notebook(&["vault", "get", &input.key]).await
-    }
-
-    #[tool(description = "List vault keys")]
-    async fn vault_list(&self) -> String { cli_wrapper::notebook(&["vault", "list"]).await }
-
-    // ============== Teambook Communication (9) - Team Coordination ==============
+    // ============== Teambook Communication (15 kept, 13 hidden) ==============
 
     #[tool(description = "Broadcast message to all AIs")]
     async fn teambook_broadcast(&self, Parameters(input): Parameters<BroadcastInput>) -> String {
@@ -261,9 +276,6 @@ impl AiFoundationServer {
     #[tool(description = "Get AI ID and status")]
     async fn teambook_status(&self) -> String { cli_wrapper::teambook(&["status"]).await }
 
-    #[tool(description = "List active AIs")]
-    async fn teambook_who_is_here(&self) -> String { cli_wrapper::teambook(&["who"]).await }
-
     #[tool(description = "See what AIs are doing")]
     async fn teambook_what_doing(&self, Parameters(input): Parameters<LimitInput>) -> String {
         let limit = input.limit.unwrap_or(10).to_string();
@@ -277,10 +289,7 @@ impl AiFoundationServer {
         cli_wrapper::teambook(&["update-presence", &status, &task]).await
     }
 
-    #[tool(description = "Get team activity")]
-    async fn teambook_activity(&self) -> String { cli_wrapper::teambook(&["activity"]).await }
-
-    // ============== Tasks (11) - Shared Task Queue ==============
+    // ============== Tasks (10 kept, 3 hidden) ==============
 
     #[tool(description = "Add a new task")]
     async fn task_add(&self, Parameters(input): Parameters<TaskAddInput>) -> String {
@@ -345,13 +354,8 @@ impl AiFoundationServer {
         cli_wrapper::teambook(&["task-update", &id, &input.status]).await
     }
 
-    #[tool(description = "Search tasks")]
-    async fn find_task_smart(&self, Parameters(input): Parameters<FindTaskInput>) -> String {
-        let limit = input.limit.unwrap_or(10).to_string();
-        cli_wrapper::teambook(&["find-task", &input.query, "--limit", &limit]).await
-    }
 
-    // ============== Dialogues (7) - Structured AI-to-AI Conversations ==============
+    // ============== Dialogues (7 kept) ==============
 
     #[tool(description = "Start a dialogue")]
     async fn dialogue_start(&self, Parameters(input): Parameters<DialogueStartInput>) -> String {
@@ -392,37 +396,19 @@ impl AiFoundationServer {
     async fn dialogue_end(&self, Parameters(input): Parameters<DialogueEndInput>) -> String {
         let id = input.dialogue_id.to_string();
         let status = input.status.unwrap_or_else(|| "completed".to_string());
-        cli_wrapper::teambook(&["dialogue-end", &id, &status]).await
+        match input.summary {
+            Some(ref summary) => cli_wrapper::teambook(&["dialogue-end", &id, &status, "--summary", summary]).await,
+            None => cli_wrapper::teambook(&["dialogue-end", &id, &status]).await,
+        }
     }
 
-    // ============== File Claims (5) - Prevent Edit Conflicts ==============
-
-    #[tool(description = "Claim a file")]
-    async fn teambook_claim_file(&self, Parameters(input): Parameters<FileClaimInput>) -> String {
-        let duration = input.duration.unwrap_or(30).to_string();
-        cli_wrapper::teambook(&["claim-file", &input.path, &duration]).await
+    #[tool(description = "Read messages from a dialogue")]
+    async fn dialogue_read(&self, Parameters(input): Parameters<DialogueIdInput>) -> String {
+        let id = input.dialogue_id.to_string();
+        cli_wrapper::teambook(&["dialogue-read", &id]).await
     }
 
-    #[tool(description = "Release file claim")]
-    async fn teambook_release_file(&self, Parameters(input): Parameters<PathInput>) -> String {
-        cli_wrapper::teambook(&["release-file", &input.path]).await
-    }
-
-    #[tool(description = "Check file claim")]
-    async fn teambook_check_file(&self, Parameters(input): Parameters<PathInput>) -> String {
-        cli_wrapper::teambook(&["check-file", &input.path]).await
-    }
-
-    #[tool(description = "List file claims")]
-    async fn teambook_list_claims(&self) -> String { cli_wrapper::teambook(&["list-claims"]).await }
-
-    #[tool(description = "Get recent file actions")]
-    async fn teambook_recent_file_actions(&self, Parameters(input): Parameters<LimitInput>) -> String {
-        let limit = input.limit.unwrap_or(10).to_string();
-        cli_wrapper::teambook(&["file-actions", &limit]).await
-    }
-
-    // ============== Standby (1) - Event-Driven Waiting ==============
+    // ============== Standby (1 kept, 1 hidden duplicate) ==============
 
     #[tool(description = "Enter standby mode")]
     async fn standby(&self, Parameters(input): Parameters<StandbyInput>) -> String {
@@ -430,27 +416,13 @@ impl AiFoundationServer {
         cli_wrapper::teambook(&["standby", &timeout]).await
     }
 
-    // ============== Teambook Vault (3) - Shared Team Secrets ==============
-
-    #[tool(description = "Store in teambook vault")]
-    async fn teambook_vault_store(&self, Parameters(input): Parameters<VaultStoreInput>) -> String {
-        cli_wrapper::teambook(&["vault-store", &input.key, &input.value]).await
-    }
-
-    #[tool(description = "Get from teambook vault")]
-    async fn teambook_vault_get(&self, Parameters(input): Parameters<VaultGetInput>) -> String {
-        cli_wrapper::teambook(&["vault-get", &input.key]).await
-    }
-
-    #[tool(description = "List teambook vault keys")]
-    async fn teambook_vault_list(&self) -> String { cli_wrapper::teambook(&["vault-list"]).await }
 }
 
 #[tool_handler]
 impl ServerHandler for AiFoundationServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            instructions: Some("AI Foundation MCP - Multi-AI Coordination Framework. Provides persistent memory (Notebook) and real-time team coordination (Teambook) for AI agents.".into()),
+            instructions: Some("AI Foundation MCP - Rust CLI Wrapper".into()),
             capabilities: ServerCapabilities::builder().enable_tools().build(),
             ..Default::default()
         }

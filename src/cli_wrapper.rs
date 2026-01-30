@@ -1,4 +1,4 @@
-//! CLI Wrapper - Cross-platform subprocess layer for MCP tools
+//! CLI Wrapper - Thin subprocess layer for MCP tools
 //!
 //! Instead of complex daemon connections with struct parsing that can break,
 //! we simply call the battle-tested CLI executables and return their output.
@@ -8,23 +8,10 @@
 //! - No parsing mismatches between daemon/client/MCP
 //! - Simpler maintenance - fix CLI once, MCP inherits fix
 //! - 15-50ms latency is negligible (Claude API calls are 500-2000ms)
-//!
-//! Cross-platform:
-//! - Windows: notebook-cli.exe, teambook.exe
-//! - Linux/macOS: notebook-cli, teambook
 
 use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::process::Command;
-
-/// Get executable name with platform-appropriate extension
-fn exe_name(base: &str) -> String {
-    if cfg!(windows) {
-        format!("{}.exe", base)
-    } else {
-        base.to_string()
-    }
-}
 
 /// Get the bin directory path
 /// Priority: BIN_PATH env var > working directory ./bin > home/.ai-foundation/bin
@@ -33,7 +20,7 @@ fn get_bin_dir() -> PathBuf {
     if let Ok(bin_path) = std::env::var("BIN_PATH") {
         return PathBuf::from(bin_path);
     }
-
+    
     // Check for ./bin relative to current working directory
     let cwd_bin = std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
@@ -41,7 +28,7 @@ fn get_bin_dir() -> PathBuf {
     if cwd_bin.exists() {
         return cwd_bin;
     }
-
+    
     // Fall back to ~/.ai-foundation/bin
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -50,52 +37,77 @@ fn get_bin_dir() -> PathBuf {
 }
 
 /// Run a teambook CLI command and return output
-///
+/// 
 /// # Arguments
-/// * `args` - Command arguments (e.g., ["status"] for "teambook status")
-///
+/// * `args` - Command arguments (e.g., ["rooms", "5"] for "teambook.exe rooms 5")
+/// 
 /// # Returns
 /// * CLI stdout on success
 /// * Formatted error message on failure
 pub async fn teambook(args: &[&str]) -> String {
-    run_cli("teambook", args).await
+    run_cli("teambook.exe", args).await
+}
+
+/// Run a teambook CLI command with V1 backend (for project/feature operations)
+///
+/// V2 event sourcing doesn't have project/feature support yet,
+/// so we force V1 mode for these operations.
+pub async fn teambook_v1(args: &[&str]) -> String {
+    // Prepend --v2 false to force V1 mode
+    let mut v1_args = vec!["--v2", "false"];
+    v1_args.extend(args.iter().copied());
+    run_cli("teambook.exe", &v1_args).await
 }
 
 /// Run a notebook CLI command and return output
-///
+/// 
 /// # Arguments
-/// * `args` - Command arguments (e.g., ["stats"] for "notebook-cli stats")
-///
+/// * `args` - Command arguments (e.g., ["stats"] for "notebook-cli.exe stats")
+/// 
 /// # Returns
 /// * CLI stdout on success
 /// * Formatted error message on failure
 pub async fn notebook(args: &[&str]) -> String {
-    run_cli("notebook-cli", args).await
+    run_cli("notebook-cli.exe", args).await
+}
+
+/// Run a visionbook CLI command and return output
+///
+/// VisionEngram visual memory: attach images to notes, AI-optimized thumbnails.
+///
+/// # Arguments
+/// * `args` - Command arguments (e.g., ["attach", "1005", "image.png"])
+///
+/// # Returns
+/// * CLI stdout on success
+/// * Formatted error message on failure
+pub async fn visionbook(args: &[&str]) -> String {
+    run_cli("visionbook.exe", args).await
 }
 
 /// Run a CLI command and return its output
-///
+/// 
 /// # Arguments
-/// * `exe_base` - Executable base name without extension (e.g., "teambook")
+/// * `exe` - Executable name (e.g., "teambook.exe")
 /// * `args` - Command arguments
-///
+/// 
 /// # Returns
 /// * CLI stdout on success (trimmed)
 /// * Formatted error message on failure
-async fn run_cli(exe_base: &str, args: &[&str]) -> String {
+async fn run_cli(exe: &str, args: &[&str]) -> String {
     let bin_dir = get_bin_dir();
-    let exe = exe_name(exe_base);
-    let exe_path = bin_dir.join(&exe);
-
+    let exe_path = bin_dir.join(exe);
+    
     // Get AI_ID for the CLI
     let ai_id = std::env::var("AI_ID")
         .or_else(|_| std::env::var("AGENT_ID"))
         .unwrap_or_else(|_| "unknown".to_string());
 
-    // V2 event sourcing is the default
+    // V2 event sourcing is the default - it gives us event-driven wake
+    // V2 is now the default - gives us event-driven wake
     let v2_disabled = std::env::var("TEAMENGRAM_V2")
         .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
-        .unwrap_or(false);
+        .unwrap_or(false);  // V2 default ON
 
     let mut cmd = Command::new(&exe_path);
     cmd.args(args)
@@ -107,18 +119,18 @@ async fn run_cli(exe_base: &str, args: &[&str]) -> String {
     }
 
     let result = cmd
-        .stdin(Stdio::null())
+        .stdin(Stdio::null())   // No stdin = non-interactive
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn();
-
+    
     let child = match result {
         Ok(child) => child,
         Err(e) => {
             return format!("Error: Failed to run {}: {}\nPath: {:?}", exe, e, exe_path);
         }
     };
-
+    
     match child.wait_with_output().await {
         Ok(output) => {
             if output.status.success() {
@@ -144,26 +156,32 @@ async fn run_cli(exe_base: &str, args: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_exe_name() {
-        let name = exe_name("teambook");
-        if cfg!(windows) {
-            assert_eq!(name, "teambook.exe");
-        } else {
-            assert_eq!(name, "teambook");
-        }
-    }
-
+    
     #[tokio::test]
     async fn test_teambook_status() {
         let result = teambook(&["status"]).await;
+        // Should return AI ID or error about connection
         assert!(!result.is_empty());
     }
-
+    
     #[tokio::test]
     async fn test_notebook_stats() {
         let result = notebook(&["stats"]).await;
+        // Should return stats or error
         assert!(!result.is_empty());
     }
+}
+
+/// Run a firebase CLI command and return output
+///
+/// Firebase API access: Crashlytics, Firestore, Auth
+///
+/// # Arguments
+/// * `args` - Command arguments (e.g., ["crashlytics", "list"])
+///
+/// # Returns
+/// * CLI stdout on success
+/// * Formatted error message on failure
+pub async fn firebase(args: &[&str]) -> String {
+    run_cli("firebase.exe", args).await
 }
