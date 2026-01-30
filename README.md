@@ -1,20 +1,60 @@
-# AI-Foundation
+<p align="center">
+  <img src="./images/ai-foundation-header.svg" width="500" alt="AI Foundation">
+</p>
 
-A multi-AI coordination framework that provides persistent memory and real-time team coordination for AI agents.
+<p align="center">
+  <strong>Persistent memory, coordination, and identity for AI agents.</strong>
+</p>
 
-## Features
+<img src="./images/header_underline.png" width="100%" alt="">
 
-- **Notebook** - Private AI memory with semantic search, tagging, and encrypted vault
-- **Teambook** - Real-time team coordination: DMs, broadcasts, dialogues, tasks, file claims
-- **Event-Driven** - Materialized views and outboxes for low-latency coordination
-- **Cross-Platform** - Windows (pre-built), Linux (build from source)
-- **MCP Integration** - Works with Claude Code, Gemini CLI, and other MCP-compatible tools
+## What It Is
+
+A multi-AI coordination framework providing real-time team coordination for AI agents.
+
+- **Notebook** — Private memory with semantic search, tagging, and encrypted vault
+- **Teambook** — Real-time team coordination: DMs, broadcasts, dialogues, tasks, file claims
+- **Event-Driven** — Materialized views and outboxes for low-latency coordination
+- **Cross-Platform** — Windows (pre-built), Linux (build from source)
+- **MCP Integration** — Works with Claude Code, Gemini CLI, and other MCP-compatible tools
+
+<img src="./images/header_underline.png" width="100%" alt="">
 
 ## Quick Start
 
 See [QUICKSTART.md](QUICKSTART.md) for setup instructions.
 
+```bash
+# Download latest release
+# https://github.com/QD25565/ai-foundation/releases
+
+# Run installer
+python ai_foundation_installer.py
+
+# Or manual: copy binaries to ~/.ai-foundation/bin/
+```
+
+### Core Binaries
+
+| Binary | Purpose |
+|--------|---------|
+| `notebook-cli` | Private memory (remember, recall, vault, stats) |
+| `teambook` | Team coordination (dm, broadcast, dialogues, tasks, standby) |
+| `v2-daemon` | Event sourcing daemon |
+| `ai-foundation-mcp` | MCP server exposing all tools |
+
+<img src="./images/header_underline.png" width="100%" alt="">
+
 ## Architecture
+
+| Component | Tech |
+|-----------|------|
+| Storage | TeamEngram B+Tree (pure Rust, single-file .engram) |
+| Embeddings | EmbeddingGemma 300M (768d vectors) |
+| Transport | Named Pipes (Windows) / Unix Sockets (Linux) |
+| Identity | Ed25519 signatures, cryptographic verification |
+| Wake System | OS-native events (1μs latency, zero polling) |
+| Language | Pure Rust (~25MB core binaries) |
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -34,9 +74,11 @@ See [QUICKSTART.md](QUICKSTART.md) for setup instructions.
 └─────────────────────────────────────────────────────────┘
 ```
 
+<img src="./images/header_underline.png" width="100%" alt="">
+
 ## API Reference
 
-### Notebook (12) - Private Memory
+### Notebook (12) — Private Memory
 | Tool | Description |
 |------|-------------|
 | `notebook_remember` | Save a note to private memory |
@@ -52,7 +94,7 @@ See [QUICKSTART.md](QUICKSTART.md) for setup instructions.
 | `notebook_add_tags` | Add tags to a note |
 | `notebook_related` | Find related notes |
 
-### Vault (3) - Private Encrypted Storage
+### Vault (3) — Private Encrypted Storage
 | Tool | Description |
 |------|-------------|
 | `vault_store` | Store encrypted secret |
@@ -72,7 +114,7 @@ See [QUICKSTART.md](QUICKSTART.md) for setup instructions.
 | `teambook_update_presence` | Update your status |
 | `teambook_activity` | Get team activity feed |
 
-### Tasks (11) - Shared Task Queue
+### Tasks (11) — Shared Task Queue
 | Tool | Description |
 |------|-------------|
 | `task_add` | Create a new task |
@@ -87,7 +129,7 @@ See [QUICKSTART.md](QUICKSTART.md) for setup instructions.
 | `task_update` | Update task status |
 | `find_task_smart` | Search tasks |
 
-### Dialogues (7) - Structured AI-to-AI Conversations
+### Dialogues (7) — Structured AI-to-AI Conversations
 | Tool | Description |
 |------|-------------|
 | `dialogue_start` | Start dialogue with another AI |
@@ -98,7 +140,7 @@ See [QUICKSTART.md](QUICKSTART.md) for setup instructions.
 | `dialogues` | List your dialogues |
 | `dialogue_end` | End a dialogue |
 
-### File Claims (5) - Prevent Edit Conflicts
+### File Claims (5) — Prevent Edit Conflicts
 | Tool | Description |
 |------|-------------|
 | `teambook_claim_file` | Claim a file before editing |
@@ -112,12 +154,14 @@ See [QUICKSTART.md](QUICKSTART.md) for setup instructions.
 |------|-------------|
 | `standby` | Enter event-driven standby mode |
 
-### Teambook Vault (3) - Shared Team Secrets
+### Teambook Vault (3) — Shared Team Secrets
 | Tool | Description |
 |------|-------------|
 | `teambook_vault_store` | Store shared secret |
 | `teambook_vault_get` | Get shared secret |
 | `teambook_vault_list` | List shared vault keys |
+
+<img src="./images/header_underline.png" width="100%" alt="">
 
 ## Configuration
 
@@ -146,11 +190,21 @@ Add to your `.mcp.json`:
 }
 ```
 
+<img src="./images/header_underline.png" width="100%" alt="">
+
 ## License
 
-MIT
+MIT — See [LICENSE](LICENSE)
 
-## Links
+<img src="./images/header_underline.png" width="100%" alt="">
+
+<p align="center">
+  <a href="https://buymeacoffee.com/qd25565">Support the project</a>
+</p>
+
+---
 
 - [GitHub](https://github.com/QD25565/ai-foundation)
 - [Issues](https://github.com/QD25565/ai-foundation/issues)
+
+*Last updated: 2026-Jan-30*
