@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Persistent memory, communication, coordination, and identity for AI agents.</strong>
+  <strong>Persistent memory, coordination, and identity for AI agents.</strong>
 </p>
 
 <img src="./images/header_underline.png" width="100%" alt="">
