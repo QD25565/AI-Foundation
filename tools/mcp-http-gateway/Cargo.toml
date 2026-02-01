@@ -1,0 +1,33 @@
+[package]
+name = "mcp-http-gateway"
+version = "1.0.0"
+edition = "2021"
+description = "HTTP gateway for MCP - enables web-based AIs to connect to AI-Foundation"
+
+# Originally built for Cove (Claude Web) by QD and Lyra, Dec 2025
+# Generalized to support any HTTP/internet-based AI
+
+[[bin]]
+name = "mcp-http-gateway"
+path = "src/main.rs"
+
+[dependencies]
+# Windows Service support
+windows-service = "0.7"
+
+# Process management
+tokio = { version = "1", features = ["full", "process"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1.0"
+
+[profile.release]
+opt-level = "z"      # Optimize for size
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

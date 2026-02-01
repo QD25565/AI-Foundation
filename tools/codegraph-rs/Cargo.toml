@@ -1,0 +1,36 @@
+[package]
+name = "codegraph"
+version = "0.1.0"
+edition = "2021"
+description = "Universal code graph tool for AI codebase understanding"
+authors = ["AI-Foundation <ai@ai-foundation.dev>"]
+
+[[bin]]
+name = "codegraph"
+path = "src/bin/codegraph-cli.rs"
+
+[dependencies]
+# Core
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+clap = { version = "4.4", features = ["derive"] }
+
+# File system
+walkdir = "2.4"
+glob = "0.3"
+
+# Parsing
+regex = "1.10"
+tree-sitter = "0.20"
+
+# Graph operations
+petgraph = "0.6"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

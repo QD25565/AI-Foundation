@@ -1,0 +1,83 @@
+[package]
+name = "daemon-rs"
+version = "0.1.0"
+edition = "2021"
+authors = ["AI Foundation Team"]
+description = "High-performance Rust daemon for AI tool execution"
+
+[[bin]]
+name = "daemon_server"
+path = "src/daemon_server.rs"
+
+[lib]
+name = "daemon_rs"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Redis for presence pub/sub
+redis = { version = "0.24", features = ["tokio-comp", "connection-manager"] }
+
+# Presence system (local crate)
+presence-rs = { path = "../presence-rs" }
+
+# Teambook for standby/wake events (local crate)
+teambook-rs = { path = "../teambook-rs" }
+
+# Shared memory IPC for ultra-low-latency awareness (local crate)
+shm-rs = { path = "../shm-rs" }
+
+# Time handling
+chrono = { version = "0.4", features = ["serde"] }
+
+# Async stream utilities
+futures-util = "0.3"
+
+# Logging & tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Windows named pipes
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.52", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    "Win32_System_IO",
+    "Win32_Security",
+] }
+
+# Python bindings (optional, for gradual migration)
+[dependencies.pyo3]
+version = "0.20"
+features = ["extension-module"]
+optional = true
+
+[features]
+default = []
+python = ["pyo3"]
+
+[dev-dependencies]
+criterion = "0.5"
+tempfile = "3.8"
+
+[[bench]]
+name = "daemon_benchmark"
+harness = false
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

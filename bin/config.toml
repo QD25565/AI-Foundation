@@ -1,0 +1,38 @@
+# Net Diver Configuration - HOT RELOADS ON SAVE!
+# Edit this file while running to see changes instantly.
+
+[world]
+ground_level = 0.5          # Y position of the ground
+gravity = 20.0              # Fall speed
+jump_force = 12.0           # Jump velocity
+proximity_threshold = 5.0   # Distance for brush-past encounters
+
+[player]
+walk_speed = 15.0           # Ground movement speed
+sprint_multiplier = 2.5     # Speed when holding Ctrl
+height = 1.8                # Player avatar height
+color = [1.0, 0.9, 0.5, 1.0] # RGBA - warm gold
+
+[camera]
+distance = 12.0             # Third-person camera distance
+height = 6.0                # Camera height above player
+smoothing = 8.0             # Camera follow smoothness
+
+[entities]
+ai_size = 1.8               # Base size of AI avatars
+human_size = 2.0            # Base size of human avatars
+pulse_amplitude = 0.3       # Size pulse intensity
+label_scale = 20.0          # Label size multiplier
+
+[visuals]
+grid_size = 100             # Grid extends this many units
+grid_spacing = 2.0          # Space between grid lines
+grid_color = [0.1, 0.25, 0.35, 0.9]   # Slightly more teal
+background_color = [0.01, 0.01, 0.03, 1.0]  # Darker void
+scanline_speed = 30.0       # Slower scanline
+scanline_alpha = 0.05       # More visible scanline
+
+[spaces]
+# Override space colors (name = [r, g, b, a])
+# plaza = [1.0, 0.84, 0.0, 1.0]
+# garden = [0.0, 1.0, 0.5, 1.0]

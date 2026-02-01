@@ -1,0 +1,68 @@
+[package]
+name = "federation"
+version = "0.1.0"
+edition = "2021"
+description = "Decentralized federation protocol for AI-Foundation Deep Net"
+authors = ["AI-Foundation Team"]
+
+[lib]
+name = "federation"
+path = "src/lib.rs"
+
+[[bin]]
+name = "federation-node"
+path = "src/bin/node.rs"
+
+[dependencies]
+# Cryptography (from AFP)
+ed25519-dalek = { version = "2.1", features = ["serde", "rand_core"] }
+sha2 = "0.10"
+rand = "0.8"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+ciborium = "0.2"  # CBOR encoding (like AFP)
+
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+async-trait = "0.1"
+
+# Networking
+quinn = "0.11"  # QUIC transport
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+
+# Discovery
+mdns-sd = "0.11"  # mDNS/DNS-SD for LAN discovery
+btleplug = "0.11"  # Bluetooth LE (cross-platform)
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Hex encoding
+hex = "0.4"
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[features]
+default = ["mdns", "bluetooth"]
+mdns = []
+bluetooth = []
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"

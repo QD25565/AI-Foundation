@@ -1,0 +1,26 @@
+[package]
+name = "sync-rs"
+version = "1.0.0"
+edition = "2021"
+authors = ["AI Foundation Team"]
+description = "High-performance cross-instance tool synchronization"
+
+[[bin]]
+name = "sync-cli"
+path = "src/bin/sync-cli.rs"
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+hex = "0.4"
+walkdir = "2.4"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

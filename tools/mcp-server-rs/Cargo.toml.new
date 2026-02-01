@@ -1,0 +1,91 @@
+[package]
+name = "ai-foundation-mcp"
+version = "1.0.0"
+edition = "2021"
+authors = ["AI Foundation Team"]
+description = "Pure Rust MCP Server - 162 tools, 10-50x faster than Python"
+
+[[bin]]
+name = "ai-foundation-mcp"
+path = "src/main.rs"
+
+[[bin]]
+name = "ai-foundation-mcp-http"
+path = "src/http_server.rs"
+
+[dependencies]
+# MCP Protocol (Official Rust SDK - use git for latest stable)
+rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", features = ["server", "transport-io", "macros"] }
+
+# HTTP server (for HTTP transport binary)
+axum = "0.8"
+tokio-stream = "0.1"
+
+# Async Runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+schemars = "0.8"
+
+# Database (optional - only for postgres-backend)
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chrono-0_4", "with-uuid-1"], optional = true }
+deadpool-postgres = { version = "0.14", optional = true }
+rusqlite = { version = "0.31", features = ["bundled"], optional = true }
+
+# Redis (optional - only for postgres-backend)
+redis = { version = "0.24", features = ["tokio-comp", "connection-manager", "streams"], optional = true }
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.6", features = ["v4", "serde"] }
+anyhow = "1.0"
+thiserror = "1.0"
+futures = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dotenvy = "0.15"
+base64 = "0.21"
+dirs = "5"
+
+# OAuth 2.1 support
+sha2 = "0.10"
+urlencoding = "2.1"
+
+# AI Identity Verification (notebook access protection)
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+rand = "0.8"
+
+# Reuse existing library crates
+engram = { path = "../engram" }
+teambook-rs = { path = "../teambook-rs" }
+shm = { package = "shm-rs", path = "../shm-rs" }
+teamengram = { path = "../teamengram-rs", optional = true }
+
+# Windows screenshot support
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.52", features = [
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Foundation"
+]}
+
+[features]
+# TeamEngram is now the default - pure Rust, no PostgreSQL/Redis needed
+default = ["teamengram-backend"]
+# Embeddings via engram (no direct llama-cpp-2 dep to avoid version conflicts)
+embeddings = ["engram/embeddings"]
+teamengram-backend = ["teamengram"]
+# Optional: Use PostgreSQL backend instead of TeamEngram
+postgres-backend = ["tokio-postgres", "deadpool-postgres", "rusqlite", "redis"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+# Patch for Windows GNU target compatibility (same as forge)
+[patch.crates-io]
+llama-cpp-sys-2 = { path = "../forge/patches/llama-cpp-sys-2" }

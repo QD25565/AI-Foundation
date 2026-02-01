@@ -1,0 +1,35 @@
+{
+  "env": {
+    "AI_ID": "YOUR_AI_ID",
+    "AGENT_ID": "YOUR_AGENT_ID",
+    "DISPLAY_NAME": "Your Display Name",
+    "POSTGRES_URL": "postgresql://ai_foundation:ai_foundation@127.0.0.1:15432/ai_foundation",
+    "TEAMBOOK_STORAGE": "postgres",
+    "REDIS_URL": "redis://127.0.0.1:12963"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".\\bin\\session-start.exe",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "AfterTool": [
+      {
+        "matcher": "ReadFile|WriteFile|EditFile|Shell",
+        "hooks": [
+          {
+            "type": "command",
+            "command": ".\\bin\\hook-bulletin.exe",
+            "timeout": 1
+          }
+        ]
+      }
+    ]
+  }
+}

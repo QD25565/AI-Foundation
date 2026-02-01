@@ -1,0 +1,27 @@
+[package]
+name = "format-rs"
+version = "1.0.0"
+edition = "2021"
+authors = ["AI Foundation Team"]
+description = "Token-efficient formatting utilities for AI context"
+
+[lib]
+name = "format_rs"
+path = "src/lib.rs"
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1.0", features = ["derive"] }
+lazy_static = "1.4"
+pyo3 = { version = "0.22", features = ["extension-module"], optional = true }
+
+[features]
+default = []
+python = ["pyo3"]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

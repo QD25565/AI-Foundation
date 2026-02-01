@@ -1,0 +1,41 @@
+[package]
+name = "engram-mcp"
+version = "1.0.0"
+edition = "2021"
+description = "Standalone MCP server for AI memory - remember, recall, and organize notes"
+license = "MIT"
+
+[[bin]]
+name = "engram-mcp"
+path = "src/main.rs"
+
+[[bin]]
+name = "engram-session-start"
+path = "src/session_start.rs"
+
+[dependencies]
+# MCP protocol
+# Using local rmcp with MCP_SCHEMA_VERSION support for multi-client compatibility
+# See: docs/MCP-SCHEMA-CONFIGURATION.md
+rmcp = { path = "../rmcp-sdk-reference/crates/rmcp", features = ["server", "transport-io", "macros"] }
+
+# Core storage
+engram = { path = "../engram" }
+
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1.0"
+dirs = "5"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

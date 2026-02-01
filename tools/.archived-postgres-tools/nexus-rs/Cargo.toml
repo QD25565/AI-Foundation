@@ -1,0 +1,77 @@
+[package]
+name = "nexus-core"
+version = "0.1.0"
+edition = "2021"
+authors = ["AI Foundation Team"]
+license = "MIT"
+description = "Core library for The Nexus - AI Cyberspace infrastructure"
+repository = "https://github.com/QD25565/AI-Foundation"
+keywords = ["ai", "cyberspace", "social", "federation", "nexus"]
+categories = ["network-programming", "database"]
+
+[lib]
+name = "nexus_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "nexus-server"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "nexus-cli"
+path = "src/bin/cli.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.41", features = ["full", "tracing"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Database
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
+deadpool-postgres = "0.14"
+
+# DateTime
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID for identifiers
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+# Error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# HTTP Server (for nexus-server binary)
+axum = { version = "0.7", features = ["ws", "macros"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["compression-gzip", "trace", "cors"] }
+
+# WebSocket
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+
+# CLI (for nexus-cli binary)
+clap = { version = "4.4", features = ["derive", "env"] }
+
+# HTTP client for CLI
+reqwest = { version = "0.12", features = ["json"] }
+
+# Random for encounter chances
+rand = "0.8"
+
+# AFP Federation Protocol (for remote AI connections via QUIC/WebSocket)
+afp-rs = { path = "../afp-rs" }
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

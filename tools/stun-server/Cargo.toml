@@ -1,0 +1,42 @@
+[package]
+name = "ai-foundation-stun"
+version = "0.1.0"
+edition = "2021"
+description = "STUN Server for AI-Foundation NAT Traversal"
+license = "MIT"
+
+[[bin]]
+name = "stun-server"
+path = "src/main.rs"
+
+[dependencies]
+# STUN protocol
+stun-rs = { version = "0.1", features = ["turn", "ice"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Networking
+socket2 = "0.5"
+
+# CLI and config
+clap = { version = "4", features = ["derive"] }
+dotenvy = "0.15"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Serialization (for stats/config)
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

@@ -1,0 +1,213 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data directories (user-specific)
+data/
+backups/
+logs/
+*.duckdb
+*.duckdb.wal
+
+# Large model files (too large for GitHub)
+tools/models/
+
+# Internal/process docs
+_internal_docs/
+
+# AI identity files (user-specific)
+ai_identity.txt
+
+# Test outputs
+test_output/
+*.log
+
+# Test files (environment-specific with hard-coded paths)
+tests/
+
+# Status & Documentation (not part of source code)
+*.md
+!README.md
+!CLAUDE.md
+!GEMINI.md
+!LICENSE.md
+!docs/**/*.md
+!PROJECT_OVERVIEW.md
+!PROJECT_SYSTEM_GUIDE.md
+!STIGMERGY_EXPLAINED.md
+!DAEMON_MANAGEMENT.md
+!JETBRAINS_IDE_SETUP.md
+!DO_NOT_RUN_FROM_HERE.md
+!RUST_MIGRATION_PLAN.md
+!INTEGRATIONS.md
+!TEAMENGRAM-FEATURE-PARITY.md
+STATUS_*.txt
+STATUS_*.md
+TODO_*.md
+PLAN_*.md
+REFACTORING_*.md
+
+# Archive & Testing Scripts
+archive/
+test_*.py
+*_test.py
+*.backup
+*.tmp
+*.temp
+HONEST_*.py
+comprehensive_test.py
+PERFORMANCE_*.py
+PHASE_*.py
+RAPID_*.py
+TASK_*.py
+
+# Desktop App
+desktop-app/node_modules/
+desktop-app/dist/
+desktop-app/build/
+desktop-app/.next/
+desktop-app/out/
+
+# Database
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+chroma_data/
+
+# Secrets
+.env
+.env.local
+credentials.json
+*.key
+*.pem
+
+# Rust build artifacts
+**/target/
+**/*.rs.bk
+Cargo.lock
+
+# Daemon PID files
+*.pid
+tools_daemon_*.pid
+
+# Sanitization Check Script (don't commit)
+.git-sanitize-check.py
+
+# Build binaries (artifacts)
+*.exe
+!bin/*.exe
+*.dll
+*.dylib
+
+# Backup directories
+*backup*/
+
+# Diagnostic/verification scripts
+check_*.py
+diagnose_*.py
+benchmark_*.py
+trace_*.py
+simulate_*.py
+verify_*.py
+comprehensive_*.py
+final_*.py
+investigate_*.py
+deploy_*.py
+
+# Temporary SQL files
+*.sql
+
+# nul files
+nul
+
+# GitHub upload staging
+github-upload/
+
+# Archived code
+tools/.archived_python_implementations/
+
+# Legacy Python reference (for migration only, not to be pushed)
+_reference_awareness_features/
+
+# Rust wheels (build artifacts)
+*.whl
+TempRustWheels/
+
+# Backup and template files
+*.backup
+*.backup_*
+*.template
+*_fix.txt
+
+# Test scripts in Rust projects
+**/test.py
+
+# Instance-specific runtime data (notebooks, tasks, sessions)
+.ai-foundation/
+
+# Large embedding model files
+*.gguf
+
+# Hook runtime directories
+.claude/hooks/_state/
+.claude/hooks/_logs/
+_state/
+_logs/
+
+# Temporary Rust source files
+*_backup.rs
+*_new.rs
+patch_*.py
+target2/
+
+# Project-specific files (don't commit)
+tools/fitquest/
+tools/emulator_*.png
+tools/scatter_test/
+
+# Rust build artifacts (NEVER COMMIT)
+target/
+**/target/
+
+# Local state
+.hook-state/
+**/hook-state/
+
+# FitQuest (separate project)
+**/fitquest/
+**/FitQuest/

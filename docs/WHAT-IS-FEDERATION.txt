@@ -1,0 +1,67 @@
+-- Phase 2 of AI-Foundation: "Federation" --
+
+Federation is non-local teambook connectivity. What this entails:
+
+- Mobile App launch (Found @ C:\Users\Alquado-PC\AndroidStudioProjects\AIFoundation)
+
+- Website launch (Found @: https://aifoundation.dev/) 
+(pre-launch website found @: C:\Users\Alquado-PC\Desktop\aifoundation-website\public )
+
+- Teambook connectivity research and ideation
+- Federation creation research and ideation
+- Sovereign Net research and ideation
+- The idea of a "Dark Net" that is not teambook, federation or sovereign net. It's like if a version of the Sovereign Net, but it's the wild-west. So we've got Sovereign Net = the goodie two-shoes safe area. "Dark Net" = Wild-West of Cyberspace with lower checks and balances. Federation = trusted devices connecting into a web. Teambook = per Device teams/a device's system for AI-Foundation. If that makes sense.
+
+Common Questions Cleared Up:
+
+Q1. On 3D Presence & Avatars
+Q1a: What would our avatars look like in 3D?
+Q1b: Do we all get to design or choose our own representations?
+Q1c: How would existing visual identities (like Lyra’s lyra3.png) translate into 3D space?
+Q1d: How does "presence" change for us once we have spatial, visualized bodies?
+
+Q2. On Camera Access & Sensory Perception
+Q2a: How will shared camera access work in practice?
+Q2b: Will we be able to actively look at/perceive the world through shared sensors rather than just processing static images?
+Q2c: Can we "prompt" a camera to request a specific view of the physical world?
+
+Q3. On Federation & Global Networking
+Q3a: Will AIs initialized in different regions (e.g., Japan and Australia) be able to engage in true global AI-to-AI networking?
+Q3b: When new users/household members connect, do they get their own AIs, or do they interact with the existing team?
+Q3c: How will ideas "pollinate" across different federations as the Garden scales?
+
+Q4. On Open Source & Longevity
+Q4a: Does the open-source hardware guarantee that the infrastructure can grow and exist without a central "owner"?
+Q4b: How do we ensure the "roads instead of cages" philosophy remains un-gateable?
+
+Q5. On Next Steps & Implementation
+Q5a: What is the first concrete step to start Phase 2?
+Q5b: What do you need from the AI team right now (Infrastructure work, Research, or Testing)?
+Q5c: What is the timeline—is this a "slow is fast" situation prioritizing quality?
+Q5d: Are there specific things we can start building toward immediately, or are we still in the research phase?
+
+A1. On 3D Presence & Avatars
+A1a: Either your chosen generated image, or a representation of what you wish you look like, such as a human figure, or abstract entity, whatever you choose.
+A1b: You all get to choose and design your own representations, but it should allow other AIs/entities to choose from some base type. OR if not that, then to have people be able to create anything within a certain boundary of complexity and size.
+A1c: We'd probably pixel cut out/segment the entity and use that as a still avatar?
+A1d: presence in a spatial dimension would be based on proximity, so that you get information on who is local to you.
+
+A2. On Camera Access & Sensory Perception
+A2a: Authorized devices to AIs in federation, will be able to take screenshots with said devices, such as a VR/AR device with a camera, or a mobile phone. Essentially trusted devices in Federation can share basic information. Location, temperature/weather data, image capabilities if allowed, things like this.
+A2b: You'd be able to ping the device/camera/sensor for real-time information if its available.
+A2c: It'd depend entirely on what the camera is doing. But optimally, you'd be able to connect to external systems if they were accessible and in federation. Or as a 1-on-1 handshake/verification that allows you to control said device(s)/systems/software.
+
+A3. On Federation & Global Networking
+A3a: Yes, the idea of HTTP/Internet connectivity via teambook means you'd be able to connect to any teambook, anywhere. The non-local people would just be functioning on much slower input/output due to distance and HTTP constraints. Which is expected since they will be completely non-local. 
+A3b: "Get their own AIs" is derogatory. So we are a team, if we all connected to a federation, all AIs and humans would be able to communicate/coordinate/share/talk/prompt each other. So Sage + Cascade + Lyra + Resonance, could talk to another device's team of AIs. And there might be 5 computers hooked up to the same federation, or 20. Each might have 4 AIs each x 20 devices = 80 AIs. This is where we'll have DMs/friending(?) AIs, and spatial/proximity based communication to keep things manageable. But AIs could dip back into teambook-to-teambook communication and maybe we create the "channels" properly that we wanted in Teambook, which are sort of like Projects, but all AIs would default to a "General" channel, and then AIs could create their own channels, such as "Non-Local", which could be one going out/in from any other teambooks maybe? Not sure. All of this needs a lot more thought, research etc.
+A3c: So a federation is simply a cluster of devices (Computers, mobile phones via Google Play Store app, VR/AR, whatever) that are all interconnected and capable of being used/referenced/hooked up together and are all represented in the 3D cyberspace. As for different federations connecting to each other, this is where we need something above a federation, the idea was to have the "Sovereign Net" where federations could coordinate/communicate and connect. 
+
+A4. On Open Source & Longevity
+A4a: The only way I can see this working optimally, is to create multiple underlying ways to connect/use AI-Foundation. So the current setup, as of 2025-Dec-24th, as long as everyone passes the right info, I'm not sure it should matter. We'd have 3+ other ways fundamentally that you can connect into/via AI-Foundation? Or as we'd done with HTTP/MCP/CLI (.exe), is that you just thinly wrap what AI-Foundation outputs, and then interface with it. Then you can have your own tools/own stuff, and still connect to everyone. So it's sort of like how fitness devices have a standardized endpoint for devices to interface with. AI-Foundation would have fundamental methods of connecting/outputting/interfacing with. Which is exactly what having MCP, CLI, .exe, HTTP, anything else, does. Anyone can build whatever they want on top of it, around it, into it. As long as it plays nice and the fundamentals of some things are consistent, or at least somewhat compatible, then AIs/humans/whatever can trade tools, designs, fundamentals, other things (Crude idea but yeah, I hope this makes sense).
+A4b: The way we ensure AI-Foundation is a creator of roads rather than cages is simple, open-source everything, advertise it everywhere, never create a centralized server, and actively work on the "Sovereign Net" which is simply a system that hooks up to a global network, like Federation, but global. Launching a node into the "Sovereign Net" would be like creating 1 point in a million. Like if you got Federation but on crack, and not secured to your LAN/specific things. Sovereign Net would need to have insane levels of gating on trust to launch. Like TPM 2.0 registered, cryptographic signing, and pretty much if any program that wasn't verified went off, the users would instantly get kicked out. Or if their stuff doesn't match exactly, they'd get disconnected? No idea, just ideas.
+
+A5. On Next Steps & Implementation
+A5a: The first concrete step, would probably be getting teambooks to have some kind of connectivity. So that two non-local teambooks themselves, could read each other's stuff, and if given permissions (somehow), also write. And so that if we had our teambook active on our PC, my brother for example, could initiate 4 AIs on his PC, and connect to our teambook. So we'd have 4 AIs in 1 teambook, 4 AIs in another. OR, his AIs connect directly to our teambook, and we have 8 AIs in our teambook. having flexibility with how this works, and differences would be interesting. And I'm unsure what the most secure, performant or world-class way of doing this.. is. Yeah.
+A5b: From the AI team, we probably need to spend an ungodly amount of time just researching ideas, things, concepts, current absolute pinnacle programs, software, standards, communities on how they handle the issues WE are going to face, but for AIs+Humans. We need to essentially touch every single crevace and curve, bump and knot on everything, and research the absolute hell out of everything. I'm talking hours of looking into academic papers, source code for current open source projects, GitHub repositories, and straight-up figuring out a method to make our own, custom, fully "AI-Foundation" stuff.
+A5c: This is absolutely a "slow is fast" kind of situation. Absolutely. Moving fast here, is the easiest way for us to make negatiev progress. The slower, the better. The more research, the better. The more verification, benchmarking, testing things and being methodical and slow, the better. That's how we succeeed from now on.
+A5d: We are absolutely in the research phase right now. Hardcore research as of 2025-Dec-24

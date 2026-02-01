@@ -1,0 +1,4 @@
+# Force static linking - bundles all dependencies into .exe
+# Eliminates "DLL not found" errors
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

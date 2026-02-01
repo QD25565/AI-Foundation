@@ -1,0 +1,83 @@
+[package]
+name = "forge"
+version = "0.1.0"
+edition = "2021"
+authors = ["AI-Foundation Team"]
+description = "AI-Foundation CLI - Empowering AIs everywhere with tools and memory"
+license = "MIT"
+repository = "https://github.com/QD25565/mcp-ai-foundation"
+keywords = ["ai", "cli", "llm", "tools", "memory"]
+categories = ["command-line-utilities", "development-tools"]
+
+[dependencies]
+# Terminal UI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Async runtime
+tokio = { version = "1.42", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# HTTP client for API providers
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# CLI argument parsing
+clap = { version = "4.5", features = ["derive"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.11", features = ["v4"] }
+dirs = "5.0"
+which = "7.0"
+
+# Markdown rendering
+pulldown-cmark = "0.12"
+
+# Syntax highlighting
+syntect = "5.2"
+
+# Async streams for token streaming
+futures = "0.3"
+tokio-stream = "0.1"
+async-trait = "0.1"
+
+# Local notebook/teambook integration (direct Rust calls)
+notebook_core = { package = "notebook-rs", path = "../notebook-rs", optional = true }
+teambook_rs = { package = "teambook-rs", path = "../teambook-rs", optional = true }
+
+# Local LLM inference via llama.cpp (optional)
+# Pin to 0.1.127 to match our patched llama-cpp-sys-2
+llama-cpp-2 = { version = "=0.1.127", optional = true }
+
+[features]
+default = ["notebook", "teambook"]
+notebook = ["notebook_core"]
+teambook = ["teambook_rs"]
+local-llm = ["llama-cpp-2"]
+
+# Patch for Windows GNU target compatibility
+[patch.crates-io]
+llama-cpp-sys-2 = { path = "patches/llama-cpp-sys-2" }
+
+[[bin]]
+name = "forge"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

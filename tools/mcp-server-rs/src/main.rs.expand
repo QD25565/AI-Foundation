@@ -1,0 +1,73 @@
+// Additional schemas for expanded tools
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct VaultStoreInput { pub key: String, pub value: String }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct VaultGetInput { pub key: String }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct TaskAddInput { pub description: String, pub priority: Option<i32>, pub tags: Option<String> }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct TaskIdInput { pub id: i32 }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct TaskCompleteInput { pub id: i32, pub result: String }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct TaskBlockInput { pub id: i32, pub reason: String }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct TaskListInput { pub status: Option<String>, pub limit: Option<i32> }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DialogueStartInput { pub responder: String, pub topic: String }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DialogueIdInput { pub dialogue_id: u64 }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RoomCreateInput { pub name: String, pub topic: Option<String> }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RoomIdInput { pub room_id: String }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct VoteCreateInput { pub topic: String, pub options: String, pub voters: i32 }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct VoteCastInput { pub vote_id: i32, pub choice: String }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct VoteIdInput { pub vote_id: i32 }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct LockAcquireInput { pub resource: String, pub working_on: String, pub duration: Option<u32> }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct LockResourceInput { pub resource: String }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct FileClaimInput { pub path: String, pub duration: Option<i32> }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct PathInput { pub path: String }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct StigmergySenseInput { pub location: String, pub pheromone_type: Option<String> }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct StandbyInput { pub timeout: Option<i64> }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct PresenceInput { pub status: Option<String>, pub current_task: Option<String> }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct AiIdInput { pub ai_id: String }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ProjectCreateInput { pub name: String, pub goal: String }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ProjectIdInput { pub project_id: i32 }

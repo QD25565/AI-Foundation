@@ -1,0 +1,42 @@
+[package]
+name = "ai-foundation-turn"
+version = "0.1.0"
+edition = "2021"
+description = "TURN Relay for AI-Foundation Federation - NAT Traversal Fallback"
+license = "MIT"
+
+[[bin]]
+name = "turn-relay"
+path = "src/main.rs"
+
+[dependencies]
+# TURN server implementation
+turn-rs = "1.2"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# CLI and config
+clap = { version = "4", features = ["derive", "env"] }
+dotenvy = "0.15"
+toml = "0.8"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+
+# Serialization (for config)
+serde = { version = "1", features = ["derive"] }
+
+# Crypto for credential verification
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

@@ -1,0 +1,55 @@
+[package]
+name = "ai-foundation-mcp"
+version = "1.0.0"
+edition = "2021"
+authors = ["AI Foundation Team"]
+description = "Pure Rust MCP Server - TeamEngram B+Tree backend ONLY"
+
+[[bin]]
+name = "ai-foundation-mcp"
+path = "src/main.rs"
+
+[[bin]]
+name = "ai-foundation-mcp-http"
+path = "src/http_server.rs"
+
+[dependencies]
+rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", features = ["server", "transport-io", "macros"] }
+axum = "0.8"
+tokio-stream = "0.1"
+tokio = { version = "1.35", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+schemars = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.6", features = ["v4", "serde"] }
+anyhow = "1.0"
+thiserror = "1.0"
+futures = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dotenvy = "0.15"
+base64 = "0.21"
+dirs = "5"
+sha2 = "0.10"
+urlencoding = "2.1"
+ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+rand = "0.8"
+engram = { path = "../engram" }
+teamengram = { path = "../teamengram-rs" }
+shm = { package = "shm-rs", path = "../shm-rs" }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.52", features = ["Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging", "Win32_Foundation"] }
+
+# No features needed - embeddings are now foundational in engram
+# keyword + semantic + graph = exceptional recall
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+
+[patch.crates-io]
+llama-cpp-sys-2 = { path = "../forge/patches/llama-cpp-sys-2" }

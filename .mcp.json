@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "ai-f": {
+      "command": "python3",
+      "args": [".claude/mcp-launcher.py", "ai-foundation-mcp"],
+      "env": {
+        "AI_ID": "dev-tools-000",
+        "TEAMENGRAM_V2": "1"
+      }
+    }
+  }
+}

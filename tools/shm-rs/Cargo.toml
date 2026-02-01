@@ -1,0 +1,63 @@
+[package]
+name = "shm-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Ultra-low-latency shared memory IPC for AI-Foundation"
+
+[lib]
+name = "shm"
+crate-type = ["rlib"]
+
+[[bin]]
+name = "shm-bench"
+path = "src/bin/shm-bench.rs"
+
+[[bin]]
+name = "hook-bulletin"
+path = "src/bin/hook-bulletin.rs"
+
+[dependencies]
+# Cross-platform memory mapping
+memmap2 = "0.9"
+
+# Parking lot for faster synchronization
+parking_lot = "0.12"
+
+# Atomic operations
+crossbeam-utils = "0.8"
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Serialization for messages
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# rkyv for zero-copy serialization - read messages directly from shared memory
+rkyv = { version = "0.8", features = ["bytecheck"] }
+
+# For aligned buffers
+bytemuck = { version = "1.14", features = ["derive"] }
+
+# Directory utilities
+dirs = "5"
+
+# TTY detection for stdin check
+atty = "0.2"
+
+# Windows-specific APIs
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Memory",
+    "Win32_Security",
+    "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = true

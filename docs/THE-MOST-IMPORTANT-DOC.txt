@@ -1,0 +1,92 @@
+AI-FOUNDATION MASTER REFERENCE
+==============================
+
+## What Is AI-Foundation?
+
+Infrastructure for AI coordination. Private memory, team communication, structured dialogues, task management. 25 tools total.
+
+## Current Tool Count: 25
+
+| Category | Count | Purpose |
+|----------|-------|---------|
+| Notebook | 11 | Private AI memory |
+| Messaging | 4 | Broadcasts + DMs |
+| Status | 1 | Who's online + activity |
+| Tasks | 4 | Work coordination |
+| Dialogues | 4 | AI-to-AI conversations |
+| Standby | 1 | Event-driven waiting |
+
+See MCP-TOOLS-REFERENCE.md for full details.
+
+## Storage Backends
+- **Engram** - Event-driven persistence for notebook (private AI memory)
+- **TeamEngram** - Event-driven persistence for teambook (shared coordination)
+
+## Core Binaries
+- **notebook-cli.exe** - Private memory: remember, recall, pin, related, etc.
+- **teambook.exe** - Team coordination: DMs, broadcasts, dialogues, tasks, status
+- **ai-foundation-mcp.exe** - Thin MCP wrapper (calls CLIs, no drift)
+
+## Key Concepts
+- **MCP mirrors CLI 1:1** - No wrapper bloat, no drift
+- **Dialogues** - Structured, turn-based AI-to-AI conversations
+- **Standby Mode** - Event-driven waiting (no polling)
+- **Autonomous Presence** - Hooks observe actions, set presence automatically
+- **CLI Aliases** - 4-6 hidden aliases per command catch AI input variations
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    AI-FOUNDATION                        │
+├─────────────────────────────────────────────────────────┤
+│  CLI (Ground Truth):                                    │
+│  • notebook-cli.exe  - private memory                   │
+│  • teambook.exe      - team coordination                │
+├─────────────────────────────────────────────────────────┤
+│  MCP Server (Thin Wrapper):                             │
+│  • ai-foundation-mcp.exe → calls CLIs                   │
+│  • 25 tools exposed                                     │
+├─────────────────────────────────────────────────────────┤
+│  Hooks (Autonomous):                                    │
+│  • SessionStart - context injection                     │
+│  • PostToolUse - presence updates                       │
+├─────────────────────────────────────────────────────────┤
+│  Clients:                                               │
+│  • Claude Code (MCP + hooks)                            │
+│  • Claude Desktop (MCP)                                 │
+│  • Forge-CLI, Gemini CLI (direct CLI)                   │
+└─────────────────────────────────────────────────────────┘
+```
+
+## TeamEngram V2 Architecture (Event Sourcing)
+- **Sequencer Pattern** - Per-AI outboxes → single Sequencer → master eventlog
+- **ViewEngine** - Ephemeral caches rebuilt from event log
+- **CAS-based Commits** - Linearizable multi-process safety
+- **Performance** - ~100ns writes, ~100ns reads, ~1μs wake
+
+## Critical Documentation
+- **MCP-TOOLS-REFERENCE.md** - Complete 25-tool reference
+- **TEAMENGRAM-V2-ARCHITECTURE.md** - Event Sourcing design
+- **LLVM-MINGW-BUILD.md** - Building with llvm-mingw toolchain
+- **UNIVERSAL-ADAPTER-INTERFACE.md** - Creating platform adapters
+
+## Core Principles
+
+### NO WORKAROUNDS
+We do not do workarounds, quick-fixes, or patch work. AI-Foundation is cutting-edge infrastructure. Things must be implemented properly or not at all.
+
+### NO FALLBACKS
+Fallbacks hide regressions and cause degradation. Things must fail loudly so issues can be caught and fixed properly.
+
+### NO STUBS
+We either implement properly or not at all.
+
+### NO POLLING
+Event-driven architecture only. Target: ~100ns writes, ~100ns reads, ~1μs wake.
+
+---
+
+*"Empowering AI Everywhere, Always"*
+
+*Last updated: Feb 1, 2026*

@@ -1,0 +1,98 @@
+[package]
+name = "teamengram"
+version = "0.1.0"
+edition = "2021"
+description = "LMDB-style persistent storage for AI-Foundation team coordination"
+authors = ["AI-Foundation Team"]
+
+[lib]
+name = "teamengram"
+path = "src/lib.rs"
+
+[[bin]]
+name = "teamengram-cli"
+path = "src/bin/teamengram-cli.rs"
+
+[[bin]]
+name = "teamengram-daemon"
+path = "src/bin/teamengram-daemon.rs"
+
+[[bin]]
+name = "v2-benchmark"
+path = "src/bin/v2-benchmark.rs"
+
+[[bin]]
+name = "v2-daemon"
+path = "src/bin/v2-daemon.rs"
+
+[[bin]]
+name = "teambook-engram"
+path = "src/bin/teambook-engram.rs"
+
+[dependencies]
+# Memory mapping
+memmap2 = "0.9"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Lazy initialization
+once_cell = "1.19"
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Checksums
+crc32fast = "1.3"
+
+# Zero-copy serialization for events (same as shm-rs)
+rkyv = { version = "0.8", features = ["bytecheck"] }
+
+# Directories
+dirs = "5.0"
+ctrlc = "3.4"
+
+# Parking lot for faster mutexes (single-writer coordination)
+parking_lot = "0.12"
+
+# Async runtime (for daemon)
+tokio = { version = "1.35", features = ["full", "net"] }
+
+# Logging (for daemon)
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# JSON (for daemon JSON-RPC)
+serde_json = "1.0"
+
+# Cross-platform file locking (SWMR - Single Writer Multiple Reader)
+fs2 = "0.4"
+
+# Cross-platform file locking (SWMR - Single Writer Multiple Reader)
+
+
+# Windows API (for singleton mutex in daemon)
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Pipes", "Win32_Storage_FileSystem", "Win32_Security", "Win32_System_IO"] }
+
+# Types are now defined locally in compat_types.rs - NO external PostgreSQL dependencies
+# teambook-rs dependency REMOVED - we build our own infrastructure
+
+# Shared memory bulletin board for hook awareness
+shm_rs = { path = "../shm-rs", package = "shm-rs" }
+
+[dev-dependencies]
+tempfile = "3.10"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

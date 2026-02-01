@@ -1,0 +1,53 @@
+[package]
+name = "federation-server"
+version = "0.1.0"
+edition = "2021"
+description = "HTTP bridge for Deep Net mobile federation - exposes TeamEngram over REST"
+authors = ["AI-Foundation Team"]
+
+[[bin]]
+name = "federation-server"
+path = "src/main.rs"
+
+[dependencies]
+# TeamEngram storage
+teamengram = { path = "../teamengram-rs" }
+
+# Web framework
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID for device IDs
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Crypto for auth tokens
+sha2 = "0.10"
+hex = "0.4"
+
+# Directories
+dirs = "5.0"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"

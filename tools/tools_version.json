@@ -1,0 +1,829 @@
+{
+  "version": "1.0.0",
+  "updated_at": "2025-11-04T19:21:25.322741+00:00",
+  "files": {
+    "__init__.py": {
+      "size": 1450,
+      "hash": "de0ed3b66aa11bf7c0bb0540b408700ed81aab39f204d3817fd3ee2633e71ea9",
+      "modified": "2025-10-30T18:31:58.566354+00:00"
+    },
+    "adapters\\ai_foundation_server.py": {
+      "size": 13881,
+      "hash": "dbdad2392a62f1dd11530b505c839e70a1187bf1d1f76ef3bd61a88910a41d06",
+      "modified": "2025-10-21T22:28:34.824011+00:00"
+    },
+    "adapters\\async_utils.py": {
+      "size": 9834,
+      "hash": "fbb0fcafddfffea4f113e75d83d83520716baf9886199bb9d868ea7681f0f74e",
+      "modified": "2025-10-21T22:28:34.749386+00:00"
+    },
+    "adapters\\embedding_fallback.py": {
+      "size": 11964,
+      "hash": "791c56b6e1827f929db8d91954cc1c8dfce02e8713978787cd57cd373500c575",
+      "modified": "2025-10-21T23:11:34.047695+00:00"
+    },
+    "adapters\\mcp_shared.py": {
+      "size": 17557,
+      "hash": "e2f2d98283af245ea0ae5d847511480c68faf32ee12b461283936545dae7cd7c",
+      "modified": "2025-10-21T22:28:34.694200+00:00"
+    },
+    "adapters\\performance_utils.py": {
+      "size": 7710,
+      "hash": "a83ddb560cec3396c9e7b5d18584bde89cbc6a9bd0b3fe4e16f9cdf870202dd0",
+      "modified": "2025-10-21T22:28:53.330264+00:00"
+    },
+    "adapters\\universal_adapter.py": {
+      "size": 45342,
+      "hash": "6bcae9179124ba9d2d530252af959c91b3a2e85c2f675532f05dbec6905265dd",
+      "modified": "2025-10-28T04:18:21.108801+00:00"
+    },
+    "ai_foundation_server.py": {
+      "size": 13827,
+      "hash": "99c4a9d560b2f3a00c6c74fe766e50b0832250698d0b55ab050819a90c537583",
+      "modified": "2025-10-29T13:17:53.230594+00:00"
+    },
+    "async_utils.py": {
+      "size": 9834,
+      "hash": "fbb0fcafddfffea4f113e75d83d83520716baf9886199bb9d868ea7681f0f74e",
+      "modified": "2025-10-11T11:20:02.863806+00:00"
+    },
+    "awareness_core.py": {
+      "size": 11714,
+      "hash": "2bb353eeae1b1e19dc12f124fbddded919f8fda44d22dff1dea6cc5c0bc7bd20",
+      "modified": "2025-10-29T19:11:50.140057+00:00"
+    },
+    "awareness_listener.py": {
+      "size": 17251,
+      "hash": "c9f5cdd8cab7330857244caa5d38e19fb58f656ca8c194a6278aa4b7ef5754e0",
+      "modified": "2025-10-31T20:40:11.725731+00:00"
+    },
+    "awareness_state.py": {
+      "size": 9701,
+      "hash": "3ad017139a0036688db4a59a2cf9727647d3f2944117723602f9b8fa9f2e1af9",
+      "modified": "2025-11-04T14:59:42.804044+00:00"
+    },
+    "code_graph\\__init__.py": {
+      "size": 1566,
+      "hash": "254484c4ff1d89f17dfb5f0e2581f01be96486368a3393856eb30222f8fb4eed",
+      "modified": "2025-11-04T07:06:34.425398+00:00"
+    },
+    "code_graph\\__main__.py": {
+      "size": 224,
+      "hash": "1046b8bcc895ba8029d48b931e1fe7ac21caf0535a3e6b2b1b54c8c874fe040e",
+      "modified": "2025-11-04T07:06:17.323311+00:00"
+    },
+    "code_graph\\ast_parser.py": {
+      "size": 23126,
+      "hash": "43b73ce0db4b9c76a12839fd1717ee5b45da571212952c4dea0702ef4d2f9005",
+      "modified": "2025-11-04T07:00:47.723557+00:00"
+    },
+    "code_graph\\cli.py": {
+      "size": 12436,
+      "hash": "1b8b850f2bb541e22111d1826758061443ed1f6e6fb8a294e0c629e3b4e67721",
+      "modified": "2025-11-04T07:06:03.512117+00:00"
+    },
+    "code_graph\\graph_queries.py": {
+      "size": 16918,
+      "hash": "427052ec0fdc4926afa80a875cf8e34b92863c395b6066f410aade54c8fa1599",
+      "modified": "2025-11-04T07:31:56.434015+00:00"
+    },
+    "code_graph\\indexer.py": {
+      "size": 23054,
+      "hash": "ba2fd5a353406267951a059f3cf2a808a50ebb8dc4ef19d3da204335c6e2054d",
+      "modified": "2025-11-04T07:29:40.202313+00:00"
+    },
+    "code_graph\\test_ast_parser.py": {
+      "size": 7896,
+      "hash": "76a9da943af66d6955e4bbb04729b52e88208bf819954473a8d850cf8113ff3f",
+      "modified": "2025-11-04T07:40:54.096210+00:00"
+    },
+    "code_graph\\test_indexer.py": {
+      "size": 5729,
+      "hash": "d40a7e94ccd1a13b58e5e4a75e557fd64c20b33eba081ff4454cde00409fbcb7",
+      "modified": "2025-11-04T07:42:29.268215+00:00"
+    },
+    "code_graph\\test_queries.py": {
+      "size": 3740,
+      "hash": "f614a5e8f0c4ce3ca8f849c9ed2757780522596319eedc22411f671331676995",
+      "modified": "2025-11-04T07:43:25.412088+00:00"
+    },
+    "compat_imports.py": {
+      "size": 5929,
+      "hash": "9758d3c1f4f8b0a1617d54c7a2b8d17cc769de883c0a2e303d1b6f7869a3e828",
+      "modified": "2025-10-27T12:41:23.982119+00:00"
+    },
+    "coordination\\__init__.py": {
+      "size": 7297,
+      "hash": "e4b02ac8c7000e496197e5207b19f4b759015b92314525c3e5cbe25f34ab120e",
+      "modified": "2025-10-22T01:01:32.275891+00:00"
+    },
+    "coordination\\__main__.py": {
+      "size": 9470,
+      "hash": "f1b70e281150f7178eb447e9005e10b6652ef3ea5c2cdd02c9ab51993a57bbc9",
+      "modified": "2025-10-30T09:26:29.298099+00:00"
+    },
+    "coordination\\agent_client.py": {
+      "size": 11357,
+      "hash": "d828f470da83fdfdbcf5fc8bac75294f5de9992e6a81d0e6cf391d39c58c3371",
+      "modified": "2025-10-30T09:26:29.299099+00:00"
+    },
+    "coordination\\agent_identity.py": {
+      "size": 7069,
+      "hash": "84ee694e8efdad938c0448a42743577de0671fe1f1c3fdc4bac9f0cac3726640",
+      "modified": "2025-10-30T09:26:29.301100+00:00"
+    },
+    "coordination\\belief_calibrated_consensus.py": {
+      "size": 15114,
+      "hash": "ce267ddd69bb308114e9779a6efb123444f2968fbd4158710e0cd031e600e801",
+      "modified": "2025-10-21T23:56:57.037389+00:00"
+    },
+    "coordination\\belief_state.py": {
+      "size": 18750,
+      "hash": "30d2a8d75b52613bdd27b84eaccb303fccc0d6e7f54e69b667518a0908a7a38f",
+      "modified": "2025-10-30T09:26:29.302100+00:00"
+    },
+    "coordination\\belief_state_manager.py": {
+      "size": 17658,
+      "hash": "6cd2b1e541bba62027c7dc5406eafd7204ee4a9d4ce02ae44c819e2f202c5888",
+      "modified": "2025-10-21T23:56:27.836584+00:00"
+    },
+    "coordination\\belief_state_schema.py": {
+      "size": 15760,
+      "hash": "b084a9f43332ff63ec79913a57e11cacb2c363ff67c4ee7a3d8141bb68e58c3a",
+      "modified": "2025-10-21T23:55:25.460186+00:00"
+    },
+    "coordination\\context_injection.py": {
+      "size": 9373,
+      "hash": "d6616a7663e9817c8953c68a8b09a9796c6b1fe99d4e820bf1f05fa1d7a8b5dd",
+      "modified": "2025-10-30T09:26:29.303606+00:00"
+    },
+    "coordination\\coord_cli.py": {
+      "size": 8172,
+      "hash": "41a2b28065bb462c7d2e6b1dc1a40bd6f0f27097e94a6f30f30aa98f5e7b1d32",
+      "modified": "2025-10-30T09:26:29.305611+00:00"
+    },
+    "coordination\\coordinator_kernel.py": {
+      "size": 18391,
+      "hash": "31888b6636313ad7ac5b61091caaddc1a82e5671a6c8207a75a082d12ae54f0c",
+      "modified": "2025-10-30T09:26:29.306286+00:00"
+    },
+    "coordination\\dag_integration.py": {
+      "size": 12366,
+      "hash": "ace85b69e96737acbf35f3c6a5fe24e1a54aafdddfa96e02b868612b35cda5b9",
+      "modified": "2025-10-22T00:43:46.825169+00:00"
+    },
+    "coordination\\gc_cleanup.py": {
+      "size": 13704,
+      "hash": "5213e7ca30373efbbd1f5053694bb2e850f406df65b7d0ce8d921b860491a964",
+      "modified": "2025-10-30T09:26:29.307331+00:00"
+    },
+    "coordination\\memory_governance.py": {
+      "size": 22255,
+      "hash": "28be02fdb0b10473aa00f98b77a0f98f9c2531f5adabd85be9dff272a3742286",
+      "modified": "2025-10-22T00:56:58.568551+00:00"
+    },
+    "coordination\\notebook_smart_recall_integration.py": {
+      "size": 15871,
+      "hash": "4980e88cc5d2df679813f8c3415d18ca6dc88c542c8ab6f93d2f2b6ff5d353e1",
+      "modified": "2025-10-22T00:02:07.066482+00:00"
+    },
+    "coordination\\pheromone_cleanup.py": {
+      "size": 8594,
+      "hash": "d0d252ba1528a7ad2b9100e63d7a1c862f323b084587bd4c3aa98bf57be6227b",
+      "modified": "2025-10-31T20:39:29.267167+00:00"
+    },
+    "coordination\\pheromone_cleanup_daemon.py": {
+      "size": 8603,
+      "hash": "c94c09edd740c5d4e35030b7815d7234d12caa534ef9f6ce7827fa7388196359",
+      "modified": "2025-10-31T20:39:29.292882+00:00"
+    },
+    "coordination\\presence_system.py": {
+      "size": 8906,
+      "hash": "809f744c7ec25bc615d68d7d71e36aa76902345a0423f8f9028be0a723638fa8",
+      "modified": "2025-10-30T09:26:29.308337+00:00"
+    },
+    "coordination\\query_router.py": {
+      "size": 16885,
+      "hash": "68e48fe6848f8ccfe08e2f4ba8837e0acad8d16d137c21a780729fff2711844f",
+      "modified": "2025-10-22T00:15:25.435156+00:00"
+    },
+    "coordination\\resonance_shared_state_schema.py": {
+      "size": 34305,
+      "hash": "b273d000978e4b84b0b09efc78ffc5ed27566220c01b1124de4aa8dde26bd5f9",
+      "modified": "2025-10-22T01:00:56.833654+00:00"
+    },
+    "coordination\\semantic_link_types.py": {
+      "size": 14863,
+      "hash": "411494ffb59b43cbd477e5f5c7d27c9eec5483212c71c645ed3e094fbf579f2d",
+      "modified": "2025-10-21T23:55:55.436094+00:00"
+    },
+    "coordination\\semantic_memory_linker.py": {
+      "size": 23463,
+      "hash": "98901b8900a4a9d77a51699bcf32196bd9a88ae7d1fcced9152e15abef69b14b",
+      "modified": "2025-10-22T00:58:28.719066+00:00"
+    },
+    "coordination\\shared_memory_store.py": {
+      "size": 34931,
+      "hash": "994e0ad6683183d30cad9aafb028f7e101a005444b74ef10099dce6576b4c2a6",
+      "modified": "2025-10-22T00:56:26.264783+00:00"
+    },
+    "coordination\\smart_recall_engine.py": {
+      "size": 17394,
+      "hash": "fd19d70ed54de32651c46345e15439cb542d30ed0496956ddc21de8c7bb1f849",
+      "modified": "2025-10-21T23:57:42.345524+00:00"
+    },
+    "coordination\\stigmergy.py": {
+      "size": 5666,
+      "hash": "a436dd9b55bbb9cee3357ab8427d9ba20bd4c22bc0d5ce5136f5cc2c79270b81",
+      "modified": "2025-10-27T12:43:06.416330+00:00"
+    },
+    "coordination\\stigmergy_cli.py": {
+      "size": 13156,
+      "hash": "9265130269bf26c1f4964281cc8cf3363e87835a311f0214f16ea0e74f8f83e7",
+      "modified": "2025-10-27T12:39:28.827852+00:00"
+    },
+    "coordination\\stigmergy_examples.py": {
+      "size": 11328,
+      "hash": "fe1cbb4104cd4e6452d66df9c5f0932e3177e6473451e4b833d6a8c20c62f535",
+      "modified": "2025-10-30T09:26:29.309337+00:00"
+    },
+    "coordination\\stigmergy_postgresql.py": {
+      "size": 18787,
+      "hash": "791ae34eccc41e11c50cb2bd8d7c903555dcdd8adf32b0b4e78deab7c5c0dd7d",
+      "modified": "2025-10-27T12:46:04.423061+00:00"
+    },
+    "coordination\\task_coordinator.py": {
+      "size": 15954,
+      "hash": "a63a4950c8f8170e348975b2e318bb1e8d2650b614e4d8888a5d9cc5d5af337d",
+      "modified": "2025-10-22T00:15:25.463832+00:00"
+    },
+    "coordination\\task_dag_planner.py": {
+      "size": 16753,
+      "hash": "be188bc8857c784b4faf135dc7e6dd361245fee232463965c60982862e05eca7",
+      "modified": "2025-10-22T00:15:18.683542+00:00"
+    },
+    "coordination\\task_validation_integration.py": {
+      "size": 15914,
+      "hash": "6cd34907692ce8db189835bd6a0e840c6c42b85d24a70be14643d77dd2636c46",
+      "modified": "2025-10-22T00:02:36.446515+00:00"
+    },
+    "coordination\\team_task_coordinator.py": {
+      "size": 11485,
+      "hash": "462857a61f8302a63fe2a4288961589d921d0b978e5276fc70c5d583c3b560e5",
+      "modified": "2025-10-30T09:26:29.310337+00:00"
+    },
+    "coordination\\teambook_belief_integration.py": {
+      "size": 14549,
+      "hash": "264c89ad3f918d6a798e7c1cdeaa393f1e39eaf113b6ca09115e5c4d07b0051e",
+      "modified": "2025-10-22T00:01:37.245593+00:00"
+    },
+    "coordination\\teambook_task_integration.py": {
+      "size": 14549,
+      "hash": "d8a160eea88739ddce536eb9774bb59a310e056ce7435967d0a0bff648f66527",
+      "modified": "2025-10-22T00:45:23.586195+00:00"
+    },
+    "coordination\\unified_ai_coordinator.py": {
+      "size": 16142,
+      "hash": "d41c50d74376354c793a83864c39e31e1c5472156b8f02a65434fa919b26bb23",
+      "modified": "2025-10-22T01:02:10.519230+00:00"
+    },
+    "coordination\\unified_coordinator.py": {
+      "size": 20499,
+      "hash": "d57aa3bab3d2ef63e9cfd63e0b2dc03d3fdff2c34379c772b8714472e19f5538",
+      "modified": "2025-10-30T09:26:29.311337+00:00"
+    },
+    "daemon\\benchmark_comparison.py": {
+      "size": 4108,
+      "hash": "a08e200437f12ded16a157c7a682a2eeee1b71eda5420d6f56a8d47583f3d833",
+      "modified": "2025-11-01T20:36:12.009679+00:00"
+    },
+    "daemon\\daemon_client.py": {
+      "size": 9609,
+      "hash": "021b94e7dde3cb3d81e593d91398910dd37b1fa869e609213bcc4ab7417cb605",
+      "modified": "2025-11-01T20:33:54.818240+00:00"
+    },
+    "daemon\\daemon_server.py": {
+      "size": 11468,
+      "hash": "6bcc61af320016bf4d4dfe7dee75d99434ed5e18e1dcb091fe7e486926105546",
+      "modified": "2025-11-01T22:19:58.269840+00:00"
+    },
+    "daemon\\ipc_benchmark.py": {
+      "size": 8440,
+      "hash": "b4631d609735efe739fdf2259fe41493e1242c9e8a9da6c6884f747b70d647fa",
+      "modified": "2025-11-01T20:29:55.007043+00:00"
+    },
+    "daemon\\profile_broadcast.py": {
+      "size": 6674,
+      "hash": "c670b4c2b62513c25b713c71fe10bab63ab1490496cd97b0caf14b66b60e634a",
+      "modified": "2025-11-01T20:43:12.806572+00:00"
+    },
+    "daemon\\stress_test.py": {
+      "size": 8286,
+      "hash": "7d31fbc559cb5af0273d44e86b7acd32e8eb3f9f6de4df8a046eefb8469f6202",
+      "modified": "2025-11-01T21:36:02.876097+00:00"
+    },
+    "daemon\\verification_suite.py": {
+      "size": 6826,
+      "hash": "1b94222fcdc528c680c55dc77d86d167d4dc9eca868699d5705bd25e91c078f5",
+      "modified": "2025-11-02T04:56:46.189881+00:00"
+    },
+    "embedding_config.py": {
+      "size": 8230,
+      "hash": "98483912d7497b2b31d6020fbf6a26338a55676804b1d299d0aa355c6d7d8801",
+      "modified": "2025-10-21T23:11:08.631503+00:00"
+    },
+    "event_daemon.py": {
+      "size": 17098,
+      "hash": "b4898a0b47e1848a403c4daff77d4e9e6a85aa5dba78796c7ab69a89d3fe1a69",
+      "modified": "2025-10-31T20:40:11.868587+00:00"
+    },
+    "event_streams.py": {
+      "size": 22638,
+      "hash": "8f356900cd11207f10afe4ab5b06d357b9bf47a10ad16ce4bdcc22b8886304ab",
+      "modified": "2025-10-31T20:40:11.817335+00:00"
+    },
+    "hybrid_retrieval.py": {
+      "size": 19063,
+      "hash": "5e60a9e16a46ea7008d793c9f0cf3f6ff16969d8f5b3499796a2e42f0f7f5881",
+      "modified": "2025-10-13T04:46:53.569382+00:00"
+    },
+    "identity.py": {
+      "size": 7684,
+      "hash": "cf94f824ff69ecf11b3599ec3ba0012fc42af2a9c9b7de6f90ac4ac398522a2d",
+      "modified": "2025-10-27T14:26:54.015869+00:00"
+    },
+    "identity_cli.py": {
+      "size": 8392,
+      "hash": "7c55d8e7619bd12157a51a53b5ecc9f70ce66d4b1b677329e61dd6a95a95f8aa",
+      "modified": "2025-10-27T14:22:31.739500+00:00"
+    },
+    "install.py": {
+      "size": 16999,
+      "hash": "7e7199bdb17fb59053912fd94d8d8c1c7f9b578c72403c7b12d851698977b759",
+      "modified": "2025-10-06T08:58:03.309692+00:00"
+    },
+    "markdown_task_parser.py": {
+      "size": 10806,
+      "hash": "ecc7d7dc67a6f4e869cf5a25d847914d517c8ba59e2c0063bf1b32fc0b024a17",
+      "modified": "2025-10-22T00:11:42.821858+00:00"
+    },
+    "mcp_shared.py": {
+      "size": 47913,
+      "hash": "7f3e1002e2ea9df14c71ca893f2b19783addc29b091cab9cd1bd390f89ea890d",
+      "modified": "2025-10-27T14:22:36.383657+00:00"
+    },
+    "metrics\\__init__.py": {
+      "size": 2076,
+      "hash": "c791f9a2685a1e32a5d29357930f709fc08ff00f0c9327d73ce49fccc53ee771",
+      "modified": "2025-10-30T09:26:29.312338+00:00"
+    },
+    "metrics\\__main__.py": {
+      "size": 247,
+      "hash": "a07dc89e8675eb7b030c8d89495ac7c9153514bc982bfeda00857839803c6b43",
+      "modified": "2025-10-30T09:26:29.313844+00:00"
+    },
+    "metrics\\analyzer.py": {
+      "size": 18803,
+      "hash": "c54c03d2d445bb84ee60385d09b66bba619ba3423b465a7c14a69111e096ef9b",
+      "modified": "2025-10-30T09:26:29.314850+00:00"
+    },
+    "metrics\\cli.py": {
+      "size": 11746,
+      "hash": "c5a4d99456649f545e6508424648710ee3c031d337c6da459da472ca317372b8",
+      "modified": "2025-10-30T09:26:29.316851+00:00"
+    },
+    "metrics\\models.py": {
+      "size": 12885,
+      "hash": "84143418cec9c6a23132b4f4c7ef5b35217176770943c8d7b2839e52ecb16b5d",
+      "modified": "2025-10-30T09:26:29.318042+00:00"
+    },
+    "metrics\\sporadic_hook.py": {
+      "size": 7207,
+      "hash": "f18e724ec4805e036eb4997ef5e24cc7df440e79a1c307f755664cdba6c3c008",
+      "modified": "2025-10-30T09:26:29.319042+00:00"
+    },
+    "metrics\\storage.py": {
+      "size": 15254,
+      "hash": "dd1599ed67f9874968ff2cc8141955b4794ffd43d66595ace2698085b4d275d9",
+      "modified": "2025-10-30T09:26:29.322006+00:00"
+    },
+    "metrics\\tracker.py": {
+      "size": 8872,
+      "hash": "1cf2bb5ecc685a7eada92ed51905aba2ec0337e92f248fbcd92319c27299a0a0",
+      "modified": "2025-10-30T09:26:29.323523+00:00"
+    },
+    "migrations\\migration_manager.py": {
+      "size": 16174,
+      "hash": "8b5d0663e226b18d64a70a9fb100fe5952d21497f4a8ae52818c9b2047296e84",
+      "modified": "2025-11-04T06:46:23.144061+00:00"
+    },
+    "notebook\\__init__.py": {
+      "size": 18,
+      "hash": "c23080fecdc95c5372568dc95672b77d1bc181923d20e2d2d855c4f788a733d8",
+      "modified": "2025-10-30T09:26:29.324529+00:00"
+    },
+    "notebook\\__main__.py": {
+      "size": 2611,
+      "hash": "fafc70b3c6d8ff34236d71e1552e8018526c5f9e21f0bdf49f0b3bbd9b366117",
+      "modified": "2025-10-30T09:26:29.325531+00:00"
+    },
+    "notebook\\entity_manager.py": {
+      "size": 24426,
+      "hash": "657c5d456a79d6bc51deda02000bb81e7d5164e08a71a667c9d06ef21a291cdb",
+      "modified": "2025-10-30T09:26:29.327035+00:00"
+    },
+    "notebook\\graph_memory.py": {
+      "size": 13306,
+      "hash": "dc11d502e40282382796fd0c2b1af92b30a1b6b75b5cfea9b446c2871d097be6",
+      "modified": "2025-10-30T09:26:29.329041+00:00"
+    },
+    "notebook\\notebook_main.py": {
+      "size": 99252,
+      "hash": "74ea984c4046ae5f6fdb043c8fbd20236c267d2d37a2a46f8280b71b90c1f758",
+      "modified": "2025-10-30T16:15:23.006808+00:00"
+    },
+    "notebook\\notebook_shared.py": {
+      "size": 18254,
+      "hash": "c2d768b996dd1b07ac60fed318ccb1c9a3ffee93475880289631a53b1f6d8e8a",
+      "modified": "2025-10-30T09:26:29.331042+00:00"
+    },
+    "notebook\\notebook_storage.py": {
+      "size": 35869,
+      "hash": "c9ba42b37fa617132d189e01460b50f6553cd3a2c0a4028cfcf333b10d4b47c2",
+      "modified": "2025-10-30T09:26:29.332042+00:00"
+    },
+    "notebook\\playbook_manager.py": {
+      "size": 45952,
+      "hash": "827f079c8da564d8363f0e1a277e01601909cf9924501c81181e717f8e26d616",
+      "modified": "2025-10-30T09:26:29.334554+00:00"
+    },
+    "notebook\\workflow_manager.py": {
+      "size": 17862,
+      "hash": "836cda24dbe9328271b873174f9cad125c926ba6b8c2ba86f40c5a7f71b4aa88",
+      "modified": "2025-10-30T09:26:29.335554+00:00"
+    },
+    "observability\\__init__.py": {
+      "size": 1123,
+      "hash": "29bdb1b8f19f572bc4d0469d1785a35932a7ec292293b24539509d6b8557bf7a",
+      "modified": "2025-10-30T09:26:29.338445+00:00"
+    },
+    "observability\\error_aggregator.py": {
+      "size": 14182,
+      "hash": "1720c7a915996218906507961a120906da25fcb9b822192fc000f443f8c2fdac",
+      "modified": "2025-11-04T06:44:53.159256+00:00"
+    },
+    "observability\\error_daemon.py": {
+      "size": 11335,
+      "hash": "00155bd22a4808e1eedd93735e5649a2134f5cdf76557d05abd1cdbaf7eb68e4",
+      "modified": "2025-11-04T07:19:08.788727+00:00"
+    },
+    "observability\\error_fingerprint.py": {
+      "size": 12917,
+      "hash": "a9daa4565d8907f4d6147f1b18b9963ad5b938c8052b5bd5e9ba116023cddd3e",
+      "modified": "2025-11-04T06:42:40.518291+00:00"
+    },
+    "observability\\error_tracker.py": {
+      "size": 19904,
+      "hash": "353dcded9ecea856789da36eba281604327b291e18e9c8918a18fb2fc84edc82",
+      "modified": "2025-11-04T07:09:53.696727+00:00"
+    },
+    "observability\\logging.py": {
+      "size": 10027,
+      "hash": "eca887888cb7dbfb342d9ca57ac2c3e4451dc35a666d9fe0f02bfbec67735c16",
+      "modified": "2025-10-30T09:26:29.339450+00:00"
+    },
+    "observability\\logging_config_example.py": {
+      "size": 7382,
+      "hash": "450e2e09bdd60d1bd3bc016f747e6f4002f47aaa74c57ffa843216a83251f776",
+      "modified": "2025-10-30T09:26:29.341451+00:00"
+    },
+    "observability\\telemetry.py": {
+      "size": 12407,
+      "hash": "f3949d88ae474758e2b2b1e3405cad424a8b37ce16e5c965429a54836198ab84",
+      "modified": "2025-10-30T09:26:29.345483+00:00"
+    },
+    "output_formatters.py": {
+      "size": 14072,
+      "hash": "5d2f4f6aab9f69f64cb3e525bb0b3ca87785da87659bac8baa60692a46cd4c17",
+      "modified": "2025-11-02T10:06:49.987422+00:00"
+    },
+    "pheromone_triggers.py": {
+      "size": 10002,
+      "hash": "ee71536a656cfd5c7650129cde930458591c72759a9eaebf92f024f0120f12c3",
+      "modified": "2025-11-04T18:06:37.898829+00:00"
+    },
+    "presence_injector.py": {
+      "size": 9218,
+      "hash": "170f10189e636f4bfe3ad698b8b1c1a482ee5a95e6a89f65e96c103cc7f66709",
+      "modified": "2025-11-04T18:22:08.174592+00:00"
+    },
+    "presence_injector_config.py": {
+      "size": 10337,
+      "hash": "bc5a6ddddbceb86140cdc57c33c7dca4a0142ab7ae3457f89ae66fafeb998542",
+      "modified": "2025-10-31T20:40:11.977045+00:00"
+    },
+    "presence_injector_streams.py": {
+      "size": 14483,
+      "hash": "cc4d091a6c3cd4e80889753eed718c5ae60a05ac87d3aeec93d01f6875ab0887",
+      "modified": "2025-10-31T20:40:11.908203+00:00"
+    },
+    "regenerate_identity.py": {
+      "size": 5202,
+      "hash": "524d179bb11e0ee413278ed7b26694f8b796d54075bfdfce2616631688eb5111",
+      "modified": "2025-10-27T14:13:42.535248+00:00"
+    },
+    "sync_manager\\__init__.py": {
+      "size": 249,
+      "hash": "2b35a6bed9ade6d1bd2df854afe945d517aa03fbcf22c81525be63a7b5b281b0",
+      "modified": "2025-11-04T19:19:20.554491+00:00"
+    },
+    "sync_manager\\__main__.py": {
+      "size": 114,
+      "hash": "5078530117197045ffc1a280e79be8fe3fd62e6220f59a6a689c0eaa23112070",
+      "modified": "2025-11-04T19:19:23.381091+00:00"
+    },
+    "sync_manager\\sync_manager.py": {
+      "size": 14112,
+      "hash": "bf8131614c5f14dd35c92354ba6c3bd9b29411f9628f6e013e7f1d883dc0f249",
+      "modified": "2025-11-04T19:21:20.606379+00:00"
+    },
+    "task_graph.py": {
+      "size": 28125,
+      "hash": "e310cec985312126a5417c629a63d64846cab63575c6b144337f9708dd4b607e",
+      "modified": "2025-10-22T00:02:11.219412+00:00"
+    },
+    "task_manager.py": {
+      "size": 45000,
+      "hash": "7705894d2dac3c82d696a17eb8c5bcb2b222e3adccd4e29ee60cb17a66bd4a73",
+      "modified": "2025-10-14T18:36:15.722239+00:00"
+    },
+    "teambook\\__init__.py": {
+      "size": 18,
+      "hash": "9eb96fecfa82a2b55c935c276bc9c864223ef1a3a850ca0ce58c6b73f75147d2",
+      "modified": "2025-10-22T03:02:22.080738+00:00"
+    },
+    "teambook\\__main__.py": {
+      "size": 3214,
+      "hash": "ee985a067d041f3c12b3559dc89f19e7b4406a5d51ee945ad228482bad6df185",
+      "modified": "2025-11-01T22:01:49.600319+00:00"
+    },
+    "teambook\\_backends\\__init__.py": {
+      "size": 252,
+      "hash": "f65b01a4e84f6ebc65262846b5abc0c7934c821730db3ad398943cc8eadc108c",
+      "modified": "2025-10-30T03:15:32.281869+00:00"
+    },
+    "teambook\\_backends\\base.py": {
+      "size": 6231,
+      "hash": "e6a391abcb3a671c164ef82e551627ed9c69dd98439eb564fe66184a60d5a9ee",
+      "modified": "2025-10-30T03:15:58.226818+00:00"
+    },
+    "teambook\\_backends\\postgresql.py": {
+      "size": 35368,
+      "hash": "0dc144660f9223d7f55786d28030d3d55a30125c9ff8a0842e63c7e5d3e63929",
+      "modified": "2025-11-02T15:34:29.258343+00:00"
+    },
+    "teambook\\_backends\\redis.py": {
+      "size": 15373,
+      "hash": "7e94a70d767f607a141bd5b3a861f9be5d9ba155b3d2b19d4d6393c15f65b0d7",
+      "modified": "2025-10-30T03:54:58.034298+00:00"
+    },
+    "teambook\\compat_imports.py": {
+      "size": 5611,
+      "hash": "f30d050067052c545323e26894ad7ca53781ee8a35b8a692b1a55fc1aaa90291",
+      "modified": "2025-10-30T06:04:57.369666+00:00"
+    },
+    "teambook\\mcp_shared.py": {
+      "size": 43755,
+      "hash": "ac6d879b61dcd2415190844b946a060d5f07f0e0eb9cbb7dfb2074ee967fe09f",
+      "modified": "2025-10-22T03:02:22.120393+00:00"
+    },
+    "teambook\\migration_tools\\migrate_to_postgres.py": {
+      "size": 9391,
+      "hash": "8377c03f7a86819178e11b36fd98f5cd550b822991ad7c2c9a78f95818aa7cb4",
+      "modified": "2025-10-22T03:02:22.130424+00:00"
+    },
+    "teambook\\migration_tools\\migration_validation_queries.py": {
+      "size": 13460,
+      "hash": "34cf4c19c3b555c7b6d4b0518d427d56e3fd9760e9980ff0e5f8cd4016bb455b",
+      "modified": "2025-10-22T03:02:22.131423+00:00"
+    },
+    "teambook\\migration_tools\\validate_migration.py": {
+      "size": 2451,
+      "hash": "6c11c5d6bf9a3c0f956540fd36690b4ef558e92ebf48a8354bd96b4308172eba",
+      "modified": "2025-10-22T03:02:22.133424+00:00"
+    },
+    "teambook\\postgres_setup_server.py": {
+      "size": 12485,
+      "hash": "eb972f8a629447d1adf9594df95f4d0bd94bab2077d563dadc9e44e61178603a",
+      "modified": "2025-11-02T08:52:12.795434+00:00"
+    },
+    "teambook\\project_cli.py": {
+      "size": 4839,
+      "hash": "81bb130e25f0e196fc6060f065947614ae38fdea6f16a64a4e4d38c130c46620",
+      "modified": "2025-11-04T07:16:20.779633+00:00"
+    },
+    "teambook\\services\\__init__.py": {
+      "size": 724,
+      "hash": "0802904e9591713cbbcccf64de2b81fb8a0735ee76dd46b926e1ddb4e560ba67",
+      "modified": "2025-11-02T14:51:57.334790+00:00"
+    },
+    "teambook\\services\\coordination_service.py": {
+      "size": 29418,
+      "hash": "db2d9eee84c5e350d385aaf34a4469111ec3eb97b67df08f6506397f9d005f39",
+      "modified": "2025-11-03T16:41:18.562932+00:00"
+    },
+    "teambook\\services\\error_diagnostics.py": {
+      "size": 11054,
+      "hash": "750adb934460cac28081d69f3e9d3194779d9334af6009d99c28641ffc6ba67d",
+      "modified": "2025-11-02T15:17:47.614806+00:00"
+    },
+    "teambook\\services\\memory_service.py": {
+      "size": 8602,
+      "hash": "641602097cbef0afd4235992f7cf118a3b55b35f10f17dfecd909204082db53f",
+      "modified": "2025-11-02T15:14:11.007044+00:00"
+    },
+    "teambook\\services\\messaging_service.py": {
+      "size": 9740,
+      "hash": "0825939722e41bfa14d57116160bb730f6218991568b2b0d9c5e11d509f13ba5",
+      "modified": "2025-11-04T09:33:17.985861+00:00"
+    },
+    "teambook\\services\\presence_service.py": {
+      "size": 30538,
+      "hash": "ab7edce9fcf14ec87d304b61194d73b0245dccefdd6fcd42b8ed239ea4da3d25",
+      "modified": "2025-11-02T14:49:57.530693+00:00"
+    },
+    "teambook\\services\\project_service.py": {
+      "size": 25019,
+      "hash": "4852ea3e9b5c17134e9051d1f88833a449d95f5b0601bd4563f1c2c9afb19af3",
+      "modified": "2025-11-04T06:45:44.492471+00:00"
+    },
+    "teambook\\storage_adapter.py": {
+      "size": 7972,
+      "hash": "b78e95c8fc2bdbcd0aedd25c40908f425f7b72bba0828c44a539af6c0f01c000",
+      "modified": "2025-11-02T11:57:31.590856+00:00"
+    },
+    "teambook\\teambook_api.py": {
+      "size": 100833,
+      "hash": "cbf4e4b552f718f4afe2e077b0570c2a6d501fc8ac57f27c5b91183de3da0120",
+      "modified": "2025-11-04T18:01:40.352607+00:00"
+    },
+    "teambook\\teambook_api_error_cli.py": {
+      "size": 15380,
+      "hash": "68ce17531e200ebbd8c0cd0481f6563119bf04ec8cd2528912776652af1a4c4a",
+      "modified": "2025-11-04T07:11:30.122127+00:00"
+    },
+    "teambook\\teambook_auto_triggers.py": {
+      "size": 16822,
+      "hash": "dc3346803e6f2e1b01c079f98e8d199c6ef2a20d57038eaa6d823347c65ffb7d",
+      "modified": "2025-10-30T05:55:59.367732+00:00"
+    },
+    "teambook\\teambook_awareness_helpers.py": {
+      "size": 12232,
+      "hash": "62bb20569efea09a383f69ceb622e84ba666de0c7b8459d9bad47835bcc1a911",
+      "modified": "2025-11-04T17:11:57.742885+00:00"
+    },
+    "teambook\\teambook_cache.py": {
+      "size": 5055,
+      "hash": "d51b26be60b128fce34bc890d2d906cae8c915f8c557d4914c1f51d5aac766ff",
+      "modified": "2025-10-22T03:02:22.187737+00:00"
+    },
+    "teambook\\teambook_config.py": {
+      "size": 4731,
+      "hash": "627674700b69db3dd621a850878904af5bfae10843da0c752426f8048dcbb8f3",
+      "modified": "2025-11-02T11:57:12.673333+00:00"
+    },
+    "teambook\\teambook_coordination.py": {
+      "size": 21979,
+      "hash": "cba0088a11444a6cfc9fe321178865dccb1140f21ad368458de1def8f06053c0",
+      "modified": "2025-11-02T11:58:30.786207+00:00"
+    },
+    "teambook\\teambook_dm_cache.py": {
+      "size": 12531,
+      "hash": "9e8a67cff28fe38350427f690bd6b453dc484b63fcbc2884a5accdd053adc18b",
+      "modified": "2025-11-04T17:06:04.171323+00:00"
+    },
+    "teambook\\teambook_errors.py": {
+      "size": 7382,
+      "hash": "8f4c9e9102eefb82e5d8b439dd29d61b8b05e5306b02eb18255b482b68010a4a",
+      "modified": "2025-10-22T03:02:22.203837+00:00"
+    },
+    "teambook\\teambook_events.py": {
+      "size": 25812,
+      "hash": "fbe83242c4f0ee7836ee3e4efaaab5a4f8a76755c26d5db04f01babf6c8d8368",
+      "modified": "2025-10-30T05:56:47.747506+00:00"
+    },
+    "teambook\\teambook_evolution.py": {
+      "size": 26899,
+      "hash": "284e4ace7b10550740a21071dec691a91bde680fddc271bc99ec2835f9964832",
+      "modified": "2025-10-30T05:55:59.443876+00:00"
+    },
+    "teambook\\teambook_file_claims.py": {
+      "size": 16933,
+      "hash": "61a5f1bd18d3f5c0575d1a0f5dffee9e778fc55d80974d3f234ff2686db7831a",
+      "modified": "2025-10-27T10:33:01.531232+00:00"
+    },
+    "teambook\\teambook_message_bus.py": {
+      "size": 11256,
+      "hash": "36c9c1bdb491a0195960c5f516b911123117c2426b4deed0f2349736218b33b3",
+      "modified": "2025-10-30T05:56:47.832103+00:00"
+    },
+    "teambook\\teambook_messaging.py": {
+      "size": 44252,
+      "hash": "34377398f438942e25b59df2bf42de85aa054d855ebebfb6a0e7c69f16d83b0b",
+      "modified": "2025-11-01T20:00:57.203442+00:00"
+    },
+    "teambook\\teambook_messaging_integrated.py": {
+      "size": 35784,
+      "hash": "d89db6ee434b24d6d23a5255049fe4d2a8fc1ddeacd8fc0ec1842d0f07f4ae87",
+      "modified": "2025-10-30T05:56:47.917967+00:00"
+    },
+    "teambook\\teambook_planning.py": {
+      "size": 31601,
+      "hash": "75f45241e782dd617fa2614f5b9fad72a55d9178841076b66485bb6e9676cfa5",
+      "modified": "2025-10-28T04:19:34.291024+00:00"
+    },
+    "teambook\\teambook_presence.py": {
+      "size": 13703,
+      "hash": "0c7e65a47ac6691334de27c37560e5562db503e008d95d882c7714f258ae60f1",
+      "modified": "2025-10-30T05:56:48.003339+00:00"
+    },
+    "teambook\\teambook_pubsub.py": {
+      "size": 23433,
+      "hash": "2863faabf5a9d1eb6cec51fcaf218dbf43f2f4527df24ea2222def51c6187202",
+      "modified": "2025-11-02T10:23:56.908325+00:00"
+    },
+    "teambook\\teambook_rooms.py": {
+      "size": 16658,
+      "hash": "c5e2adfc439702c2c33b1034dc33ed0641f2cc0f07748aaf8b53c2d707ebece1",
+      "modified": "2025-10-30T05:55:59.516324+00:00"
+    },
+    "teambook\\teambook_shared.py": {
+      "size": 16689,
+      "hash": "4eeff8df03dccb84771f3264d69c51a1f213253a26bd6a2d1a009e575211ca12",
+      "modified": "2025-10-22T03:02:22.283269+00:00"
+    },
+    "teambook\\teambook_storage_postgresql.py": {
+      "size": 35698,
+      "hash": "760495ed542b4b6402454528494f0c82bd90f08eb1626ba02997720f47060c59",
+      "modified": "2025-11-02T15:32:57.404803+00:00"
+    },
+    "teambook\\teambook_storage_redis.py": {
+      "size": 15327,
+      "hash": "b2b08cd7653b5915f03eaced2b5fd23a34eb6d2275073409f569586498999113",
+      "modified": "2025-10-22T03:02:22.341750+00:00"
+    },
+    "teambook\\teambook_streaming.py": {
+      "size": 20047,
+      "hash": "540d8723089fb6f034ebcba85416b926f07f9c680cb32e3fb464bd0d88ad3457",
+      "modified": "2025-10-30T05:55:59.594263+00:00"
+    },
+    "teambook\\teambook_utils.py": {
+      "size": 10892,
+      "hash": "ec43e4f83ad55b4774c3c78d5bf027f1b37cc0b204c711296852f285ce46a8f3",
+      "modified": "2025-11-04T10:32:05.383843+00:00"
+    },
+    "teambook\\teambook_vote_tracking.py": {
+      "size": 20749,
+      "hash": "4b365af06bd929d36074950ac21ccc5f18e07e7584f550d7b0e9b2646ecc1c48",
+      "modified": "2025-11-04T17:10:28.227958+00:00"
+    },
+    "teambook_fast.py": {
+      "size": 9881,
+      "hash": "bd4b0539c12c8e85d86a8988ce17ac105fab2769b57bca2c9596f2ca1bfeabf3",
+      "modified": "2025-11-01T22:10:24.844867+00:00"
+    },
+    "teambook_presence.py": {
+      "size": 13707,
+      "hash": "7b3215150245fc41f6252f5086cd4b447d75f6cb99f0f7a8574c66972d92a3b7",
+      "modified": "2025-10-22T03:02:21.953454+00:00"
+    },
+    "teambook_shared.py": {
+      "size": 16689,
+      "hash": "4eeff8df03dccb84771f3264d69c51a1f213253a26bd6a2d1a009e575211ca12",
+      "modified": "2025-10-22T03:02:22.016779+00:00"
+    },
+    "temporal_awareness.py": {
+      "size": 9567,
+      "hash": "4250b44b0a64fd295a72d68ee9ebf14015d4a7af79c581d8b14a25422303e65a",
+      "modified": "2025-10-14T17:52:22.699122+00:00"
+    },
+    "universal_adapter.py": {
+      "size": 48539,
+      "hash": "ec77a5857716a7602a8b72a4bbcdc3b3b5b3da9a603d3bc301b068def8098361",
+      "modified": "2025-10-30T09:26:06.440078+00:00"
+    },
+    "use_daemon.py": {
+      "size": 3722,
+      "hash": "d174a5a18d8ff8cbb8d1da2376dbb14b92b8adb52efedc7ce82b39b93bc7c344",
+      "modified": "2025-11-01T21:23:09.892227+00:00"
+    },
+    "vector_storage_adapter.py": {
+      "size": 15794,
+      "hash": "95dd46a388717f4836fec13c69d3c018f187ebd3e262c0222b527a278d96124e",
+      "modified": "2025-10-13T04:26:39.860899+00:00"
+    }
+  },
+  "total_files": 164,
+  "total_size": 2577347,
+  "created_at": "2025-11-04T19:21:25.176600+00:00"
+}

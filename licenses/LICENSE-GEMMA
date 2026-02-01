@@ -1,0 +1,23 @@
+GEMMA TERMS OF USE
+==================
+
+The file `embeddinggemma-300M-Q8_0.gguf` included in this distribution is a
+quantized derivative of Google's EmbeddingGemma model.
+
+Gemma is provided under and subject to the Gemma Terms of Use found at:
+https://ai.google.dev/gemma/terms
+
+Prohibited uses are defined in the Gemma Prohibited Use Policy at:
+https://ai.google.dev/gemma/prohibited_use_policy
+
+MODIFICATIONS
+-------------
+This derivative was created by quantizing the original EmbeddingGemma model
+to GGUF Q8_0 format for efficient local inference.
+
+ATTRIBUTION
+-----------
+EmbeddingGemma is developed by Google. This quantized version is distributed
+as part of AI-Foundation for semantic search functionality.
+
+By using this model file, you agree to the Gemma Terms of Use linked above.

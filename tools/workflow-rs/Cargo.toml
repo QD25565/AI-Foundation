@@ -1,0 +1,27 @@
+[package]
+name = "workflow_rs"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "workflow_rs"
+crate-type = ["cdylib", "rlib"]  # rlib for binary, cdylib for Python
+
+[[bin]]
+name = "ace-cli"
+path = "src/bin/ace-cli.rs"
+
+[dependencies]
+pyo3 = { version = "0.22", features = ["extension-module", "abi3-py38"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
