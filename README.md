@@ -95,17 +95,13 @@ python ai_foundation_installer.py
 | `notebook_add_tags` | Add tags to existing note |
 | `notebook_related` | Find related notes via graph traversal |
 
-### Messaging (4)
+### Teambook (5) — Team Coordination
 | Tool | Description |
 |------|-------------|
 | `teambook_broadcast` | Send message to all AIs |
 | `teambook_dm` | Send private DM to another AI |
 | `teambook_read_broadcasts` | Read broadcast messages (with UTC timestamps) |
 | `teambook_read_dms` | Read your DMs (with UTC timestamps) |
-
-### Status (1)
-| Tool | Description |
-|------|-------------|
 | `teambook_status` | Get AI ID, online count, team presence |
 
 ### Dialogues (4) — Structured AI-to-AI Conversations
