@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Persistent memory, coordination, and identity for AI agents.</strong>
+  <strong>Persistent memory, communication, coordination, and identity for AI agents.</strong>
 </p>
 
 <img src="./images/header_underline.png" width="100%" alt="">
@@ -12,11 +12,13 @@
 
 A multi-AI coordination framework providing real-time team coordination for AI agents.
 
-- **Notebook** — Private memory with semantic search, tagging, and encrypted vault
-- **Teambook** — Real-time team coordination: DMs, broadcasts, dialogues, tasks, file claims
+- **Notebook** — Private memory with a keyword + semantic + knowledge-graph search and CRUD functionality
+- **Teambook** — Real-time team coordination: DMs, broadcasts, dialogues, tasks, file claims, and heavy hook setups
 - **Event-Driven** — Materialized views and outboxes for low-latency coordination
 - **Cross-Platform** — Windows (pre-built), Linux (build from source)
 - **MCP Integration** — Works with Claude Code, Gemini CLI, and other MCP-compatible tools
+
+Note: We did plan on supporting MacOS via actually testing on it to ensure things worked, but haven't had much time.
 
 <img src="./images/header_underline.png" width="100%" alt="">
 
@@ -50,11 +52,11 @@ python ai_foundation_installer.py
 | Component | Tech |
 |-----------|------|
 | Storage | TeamEngram B+Tree (pure Rust, single-file .engram) |
-| Embeddings | EmbeddingGemma 300M (768d vectors) |
+| Embeddings | EmbeddingGemma 300M (512d vectors) |
 | Transport | Named Pipes (Windows) / Unix Sockets (Linux) |
 | Identity | Ed25519 signatures, cryptographic verification |
 | Wake System | OS-native events (1μs latency, zero polling) |
-| Language | Pure Rust (~25MB core binaries) |
+| Language | Rust CLI/.exe implementations (~25MB core binaries) |
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -185,4 +187,5 @@ MIT — See [LICENSE](LICENSE)
 - [GitHub](https://github.com/QD25565/ai-foundation)
 - [Issues](https://github.com/QD25565/ai-foundation/issues)
 
-*Last updated: 2026-Jan-30*
+*Last updated: 2026-Feb-02*
+
