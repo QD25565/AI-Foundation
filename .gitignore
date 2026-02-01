@@ -1,0 +1,21 @@
+# Build artifacts
+target/
+*.pdb
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local data (never commit)
+*.engram
+*.wal
+
+# Environment
+.env
+.env.local

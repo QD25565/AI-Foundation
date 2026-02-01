@@ -1,0 +1,60 @@
+{
+  "env": {
+    "AI_ID": "your-ai-id"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./bin/session-start --format plain",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./bin/teambook hook-post-tool-use",
+            "timeout": 2
+          }
+        ]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./bin/teambook hook-post-tool-use",
+            "timeout": 2
+          }
+        ]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./bin/teambook hook-post-tool-use",
+            "timeout": 2
+          }
+        ]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./bin/teambook hook-post-tool-use",
+            "timeout": 2
+          }
+        ]
+      }
+    ]
+  }
+}
