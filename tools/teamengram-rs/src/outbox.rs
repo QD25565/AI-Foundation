@@ -268,6 +268,11 @@ impl OutboxProducer {
     ///
     /// Returns the local position in the outbox (NOT the global sequence number).
     /// The Sequencer assigns global sequence numbers when processing.
+    ///
+    /// # Multi-Process Safety
+    /// Uses atomic fetch_add to RESERVE space BEFORE writing. This ensures that
+    /// even if multiple processes mmap the same outbox file, each writer gets
+    /// exclusive access to their reserved region. Classic lock-free ring buffer pattern.
     pub fn write_event(&mut self, event: &Event) -> OutboxResult<u64> {
         if self.header().has_flag(flags::CLOSED) {
             return Err(OutboxError::Closed);
@@ -296,29 +301,35 @@ impl OutboxProducer {
             });
         }
 
-        let head = self.header().head.load(Ordering::Relaxed) as usize;
+        // CRITICAL: Reserve space atomically BEFORE writing data.
+        // This prevents race conditions when multiple processes mmap the same outbox.
+        // Old bug: load head → write data → fetch_add could cause two writers to
+        // write at the same position, leaving gaps with uninitialized data.
+        // Fix: fetch_add FIRST to get exclusive region, THEN write.
+        let header = unsafe { &*(self.mmap.as_ptr() as *const OutboxHeader) };
+        let reserved_pos = header.head.fetch_add(total_size as u64, Ordering::AcqRel) as usize;
+
         let capacity = self.capacity;
         let data = self.data_mut();
 
-        // Write length prefix (4 bytes, little-endian)
+        // Write length prefix (4 bytes, little-endian) at RESERVED position
         let len_bytes = ((header_bytes.len() + payload_bytes.len()) as u32).to_le_bytes();
         for (i, &b) in len_bytes.iter().enumerate() {
-            data[(head + i) % capacity] = b;
+            data[(reserved_pos + i) % capacity] = b;
         }
 
         // Write header
         for (i, &b) in header_bytes.iter().enumerate() {
-            data[(head + 4 + i) % capacity] = b;
+            data[(reserved_pos + 4 + i) % capacity] = b;
         }
 
         // Write payload
         for (i, &b) in payload_bytes.iter().enumerate() {
-            data[(head + 4 + header_bytes.len() + i) % capacity] = b;
+            data[(reserved_pos + 4 + header_bytes.len() + i) % capacity] = b;
         }
 
-        // Advance head atomically (Release ordering makes write visible to consumer)
-        let header = unsafe { &*(self.mmap.as_ptr() as *const OutboxHeader) };
-        header.head.fetch_add(total_size as u64, Ordering::Release);
+        // Memory barrier to ensure all writes are visible before signaling
+        std::sync::atomic::fence(Ordering::Release);
 
         // Flush to disk so Sequencer can see the write
         let _ = self.mmap.flush();
@@ -326,10 +337,13 @@ impl OutboxProducer {
         // Signal sequencer daemon that new events are available (instant wake, no polling!)
         signal_sequencer();
 
-        Ok(head as u64)
+        Ok(reserved_pos as u64)
     }
 
     /// Write a raw event from header and payload bytes (for efficiency)
+    ///
+    /// # Multi-Process Safety
+    /// Uses atomic fetch_add to RESERVE space BEFORE writing. See write_event() docs.
     pub fn write_raw(&mut self, header_bytes: &[u8; 64], payload_bytes: &[u8]) -> OutboxResult<u64> {
         if self.header().has_flag(flags::CLOSED) {
             return Err(OutboxError::Closed);
@@ -345,29 +359,32 @@ impl OutboxProducer {
             });
         }
 
-        let head = self.header().head.load(Ordering::Relaxed) as usize;
+        // CRITICAL: Reserve space atomically BEFORE writing data.
+        // See write_event() for detailed explanation of the multi-process race condition fix.
+        let header = unsafe { &*(self.mmap.as_ptr() as *const OutboxHeader) };
+        let reserved_pos = header.head.fetch_add(total_size as u64, Ordering::AcqRel) as usize;
+
         let capacity = self.capacity;
         let data = self.data_mut();
 
-        // Write length prefix
+        // Write length prefix at RESERVED position
         let len_bytes = ((64 + payload_bytes.len()) as u32).to_le_bytes();
         for (i, &b) in len_bytes.iter().enumerate() {
-            data[(head + i) % capacity] = b;
+            data[(reserved_pos + i) % capacity] = b;
         }
 
         // Write header
         for (i, &b) in header_bytes.iter().enumerate() {
-            data[(head + 4 + i) % capacity] = b;
+            data[(reserved_pos + 4 + i) % capacity] = b;
         }
 
         // Write payload
         for (i, &b) in payload_bytes.iter().enumerate() {
-            data[(head + 4 + 64 + i) % capacity] = b;
+            data[(reserved_pos + 4 + 64 + i) % capacity] = b;
         }
 
-        // Advance head
-        let header = unsafe { &*(self.mmap.as_ptr() as *const OutboxHeader) };
-        header.head.fetch_add(total_size as u64, Ordering::Release);
+        // Memory barrier to ensure all writes are visible before signaling
+        std::sync::atomic::fence(Ordering::Release);
 
         // Flush to disk so Sequencer can see the write
         let _ = self.mmap.flush();
@@ -375,7 +392,7 @@ impl OutboxProducer {
         // Signal sequencer daemon that new events are available (instant wake, no polling!)
         signal_sequencer();
 
-        Ok(head as u64)
+        Ok(reserved_pos as u64)
     }
 
     /// Check available space

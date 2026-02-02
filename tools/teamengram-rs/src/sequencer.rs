@@ -254,14 +254,17 @@ impl Sequencer {
         stop_signal: Arc<AtomicBool>,
     ) -> SequencerResult<()> {
         // Create the cross-process wake receiver - FAIL LOUDLY if this doesn't work
+        eprintln!("[SEQUENCER] Creating SequencerWakeReceiver (Local\\TeamEngram_SequencerWake)...");
         let wake_receiver = SequencerWakeReceiver::new()
             .map_err(|e| SequencerError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("CRITICAL: Failed to create SequencerWakeReceiver: {}. Event-driven wake is REQUIRED - no fallbacks!", e)
             )))?;
+        eprintln!("[SEQUENCER] SequencerWakeReceiver created successfully");
 
         // Initial outbox scan
         self.refresh_outboxes()?;
+        eprintln!("[SEQUENCER] Found {} outboxes", self.outboxes.len());
 
         eprintln!("[SEQUENCER] Running (event-driven, ZERO POLLING - blocks until signal)");
 
@@ -270,13 +273,17 @@ impl Sequencer {
             self.refresh_outboxes()?;
 
             // Process all available events
+            eprintln!("[SEQUENCER] Processing batch...");
             let events_processed = self.process_batch()?;
+            eprintln!("[SEQUENCER] Processed {} events", events_processed);
             self.stats.active_outboxes.store(self.outboxes.len() as u64, Ordering::Relaxed);
 
             // If no events, BLOCK until signal from outbox writers
             // NO TIMEOUT. NO POLLING. Pure event-driven.
             if events_processed == 0 {
+                eprintln!("[SEQUENCER] No events, blocking on wake_receiver.wait()...");
                 wake_receiver.wait(); // Blocks indefinitely until signaled
+                eprintln!("[SEQUENCER] Woke up from wait!");
             }
             // If events were processed, immediately loop to check for more
         }

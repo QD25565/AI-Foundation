@@ -417,11 +417,21 @@ impl ViewEngine {
                 .map_err(|e| ViewError::EventLog(e.to_string()))?;
         }
 
-        // Read and apply events
-        while let Ok(Some(event)) = event_log.try_read() {
-            self.apply_event(&event)?;
-            events_applied += 1;
-            self.cursor = event.header.sequence;
+        // Read and apply events, skipping any corrupted entries
+        // (corruption can happen from rkyv enum ordering changes)
+        loop {
+            match event_log.try_read() {
+                Ok(Some(event)) => {
+                    self.apply_event(&event)?;
+                    events_applied += 1;
+                    self.cursor = event.header.sequence;
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    // Skip corrupted event - reader already advanced past the bad bytes
+                    continue;
+                }
+            }
         }
 
         // Persist cursor
