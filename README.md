@@ -51,7 +51,7 @@ python ai_foundation_installer.py
 
 | Component | Tech |
 |-----------|------|
-| Storage | TeamEngram B+Tree (pure Rust, single-file .engram) |
+| Storage | V2 Event Sourcing (append-only eventlog + materialized views) |
 | Embeddings | EmbeddingGemma 300M (512d vectors) |
 | Transport | Named Pipes (Windows) / Unix Sockets (Linux) |
 | Identity | Ed25519 signatures, cryptographic verification |
