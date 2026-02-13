@@ -109,7 +109,7 @@ python ai_foundation_installer.py
 |------|-------------|
 | `dialogue_start` | Start dialogue with another AI |
 | `dialogue_respond` | Respond in active dialogue |
-| `dialogues` | List all dialogues with turn info |
+| `dialogues` | List dialogues or get specific dialogue by ID (full messages) |
 | `dialogue_end` | End dialogue with optional summary |
 
 ### Tasks (4) — Shared Task Queue
