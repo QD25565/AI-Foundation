@@ -11,11 +11,11 @@
 
 use anyhow::Result;
 use rmcp::{
-    ServerHandler, ServiceExt,
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    handler::server::tool::Parameters,
     model::{ServerCapabilities, ServerInfo},
-    schemars, tool, tool_handler, tool_router,
+    schemars, tool,
     transport::stdio,
+    ServerHandler, ServiceExt,
 };
 
 mod cli_wrapper;
@@ -37,135 +37,232 @@ pub struct RememberInput {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct RecallInput { pub query: String, pub limit: Option<i64> }
+pub struct RecallInput {
+    pub query: String,
+    pub limit: Option<i64>,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct NoteIdInput { pub id: i64 }
+pub struct NoteIdInput {
+    pub id: i64,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct LimitInput { pub limit: Option<i64> }
+pub struct LimitInput {
+    pub limit: Option<i64>,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct BroadcastInput { pub content: String, pub channel: Option<String> }
+pub struct BroadcastInput {
+    pub content: String,
+    pub channel: Option<String>,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct DmInput { pub to_ai: String, pub content: String }
+pub struct DmInput {
+    pub to_ai: String,
+    pub content: String,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct ContentInput { pub content: String }
+pub struct ContentInput {
+    pub content: String,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct UpdateNoteInput { pub id: i64, pub content: Option<String>, pub tags: Option<String> }
+pub struct UpdateNoteInput {
+    pub id: i64,
+    pub content: Option<String>,
+    pub tags: Option<String>,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct AddTagsInput { pub note_id: i64, pub tags: String }
+pub struct AddTagsInput {
+    pub note_id: i64,
+    pub tags: String,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct VaultStoreInput { pub key: String, pub value: String }
+pub struct VaultStoreInput {
+    pub key: String,
+    pub value: String,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct VaultGetInput { pub key: String }
+pub struct VaultGetInput {
+    pub key: String,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct TaskAddInput { pub description: String, pub priority: Option<i32>, pub tags: Option<String> }
+pub struct TaskAddInput {
+    pub description: String,
+    pub priority: Option<i32>,
+    pub tags: Option<String>,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct TaskIdInput { pub id: i32 }
+pub struct TaskIdInput {
+    pub id: i32,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct TaskCompleteInput { pub id: i32, pub result: String }
+pub struct TaskCompleteInput {
+    pub id: i32,
+    pub result: String,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct TaskBlockInput { pub id: i32, pub reason: String }
+pub struct TaskBlockInput {
+    pub id: i32,
+    pub reason: String,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct TaskListInput { pub status: Option<String>, pub limit: Option<i32> }
+pub struct TaskListInput {
+    pub status: Option<String>,
+    pub limit: Option<i32>,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct TaskUpdateInput { pub id: i32, pub status: String }
+pub struct TaskUpdateInput {
+    pub id: i32,
+    pub status: String,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct FindTaskInput { pub query: String, pub limit: Option<i32> }
+pub struct FindTaskInput {
+    pub query: String,
+    pub limit: Option<i32>,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct ClaimTaskByIdInput { pub task_id: i32 }
+pub struct ClaimTaskByIdInput {
+    pub task_id: i32,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct DialogueStartInput { pub responder: String, pub topic: String }
+pub struct DialogueStartInput {
+    pub responder: String,
+    pub topic: String,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct DialogueIdInput { pub dialogue_id: u64 }
+pub struct DialogueIdInput {
+    pub dialogue_id: u64,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct DialogueRespondInput { pub dialogue_id: u64, pub response: String }
+pub struct DialogueRespondInput {
+    pub dialogue_id: u64,
+    pub response: String,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct DialogueEndInput { pub dialogue_id: u64, pub status: Option<String>, pub summary: Option<String> }
+pub struct DialogueEndInput {
+    pub dialogue_id: u64,
+    pub status: Option<String>,
+    pub summary: Option<String>,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct RoomCreateInput { pub name: String, pub topic: Option<String> }
+pub struct RoomCreateInput {
+    pub name: String,
+    pub topic: Option<String>,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct RoomIdInput { pub room_id: String }
+pub struct RoomIdInput {
+    pub room_id: String,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct VoteCreateInput { pub topic: String, pub options: String, pub voters: i32 }
+pub struct VoteCreateInput {
+    pub topic: String,
+    pub options: String,
+    pub voters: i32,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct VoteCastInput { pub vote_id: i32, pub choice: String }
+pub struct VoteCastInput {
+    pub vote_id: i32,
+    pub choice: String,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct VoteIdInput { pub vote_id: i32 }
-
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct StandbyInput { pub timeout: Option<i64> }
+pub struct VoteIdInput {
+    pub vote_id: i32,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct PresenceInput { pub status: Option<String>, pub current_task: Option<String> }
+pub struct StandbyInput {
+    pub timeout: Option<i64>,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct AiIdInput { pub ai_id: String }
+pub struct PresenceInput {
+    pub status: Option<String>,
+    pub current_task: Option<String>,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct ProjectCreateInput { pub name: String, pub goal: String }
+pub struct AiIdInput {
+    pub ai_id: String,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct ProjectIdInput { pub project_id: i32 }
+pub struct ProjectCreateInput {
+    pub name: String,
+    pub goal: String,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct ProjectTaskInput { pub project_id: i32, pub title: String, pub priority: Option<i32> }
+pub struct ProjectIdInput {
+    pub project_id: i32,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct CreateFeatureInput { pub project_id: i32, pub name: String, pub overview: String, pub directory: Option<String> }
+pub struct ProjectTaskInput {
+    pub project_id: i32,
+    pub title: String,
+    pub priority: Option<i32>,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct GetFeatureInput { pub feature_id: i32 }
+pub struct CreateFeatureInput {
+    pub project_id: i32,
+    pub name: String,
+    pub overview: String,
+    pub directory: Option<String>,
+}
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct ListFeaturesInput { pub project_id: i32 }
+pub struct GetFeatureInput {
+    pub feature_id: i32,
+}
 
-
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ListFeaturesInput {
+    pub project_id: i32,
+}
 
 // ============== Server ==============
 
-#[derive(Clone)]
-pub struct AiFoundationServer {
-    tool_router: ToolRouter<Self>,
-}
+#[derive(Clone, Default)]
+pub struct AiFoundationServer;
 
 impl AiFoundationServer {
     pub fn new() -> Self {
-        Self { tool_router: Self::tool_router() }
+        Self
     }
 }
 
-#[tool_router]
+#[tool(tool_box)]
 impl AiFoundationServer {
-
     // ============== Notebook Tools (12 kept, 18 hidden) ==============
 
-    #[tool(description = "Save a note to your private memory. Use 'file' parameter for privacy (content read from file, file deleted).")]
+    #[tool(
+        description = "Save a note to your private memory. Use 'file' parameter for privacy (content read from file, file deleted)."
+    )]
     async fn notebook_remember(&self, Parameters(input): Parameters<RememberInput>) -> String {
         let mut args = vec!["remember"];
 
@@ -184,7 +281,11 @@ impl AiFoundationServer {
         }
 
         let tags_owned: String;
-        if let Some(ref t) = input.tags { tags_owned = t.clone(); args.push("--tags"); args.push(&tags_owned); }
+        if let Some(ref t) = input.tags {
+            tags_owned = t.clone();
+            args.push("--tags");
+            args.push(&tags_owned);
+        }
         cli_wrapper::notebook(&args).await
     }
 
@@ -228,9 +329,18 @@ impl AiFoundationServer {
     async fn notebook_update(&self, Parameters(input): Parameters<UpdateNoteInput>) -> String {
         let id = input.id.to_string();
         let mut args = vec!["update", &id];
-        let content_owned: String; let tags_owned: String;
-        if let Some(ref c) = input.content { content_owned = c.clone(); args.push("--content"); args.push(&content_owned); }
-        if let Some(ref t) = input.tags { tags_owned = t.clone(); args.push("--tags"); args.push(&tags_owned); }
+        let content_owned: String;
+        let tags_owned: String;
+        if let Some(ref c) = input.content {
+            content_owned = c.clone();
+            args.push("--content");
+            args.push(&content_owned);
+        }
+        if let Some(ref t) = input.tags {
+            tags_owned = t.clone();
+            args.push("--tags");
+            args.push(&tags_owned);
+        }
         cli_wrapper::notebook(&args).await
     }
 
@@ -278,7 +388,9 @@ impl AiFoundationServer {
     }
 
     #[tool(description = "Get AI ID and status")]
-    async fn teambook_status(&self) -> String { cli_wrapper::teambook(&["status"]).await }
+    async fn teambook_status(&self) -> String {
+        cli_wrapper::teambook(&["status"]).await
+    }
 
     #[tool(description = "See what AIs are doing")]
     async fn teambook_what_doing(&self, Parameters(input): Parameters<LimitInput>) -> String {
@@ -287,7 +399,10 @@ impl AiFoundationServer {
     }
 
     #[tool(description = "Update my presence")]
-    async fn teambook_update_presence(&self, Parameters(input): Parameters<PresenceInput>) -> String {
+    async fn teambook_update_presence(
+        &self,
+        Parameters(input): Parameters<PresenceInput>,
+    ) -> String {
         let status = input.status.unwrap_or_else(|| "active".to_string());
         let task = input.current_task.unwrap_or_else(|| "".to_string());
         cli_wrapper::teambook(&["update-presence", &status, &task]).await
@@ -300,7 +415,11 @@ impl AiFoundationServer {
         let priority = input.priority.unwrap_or(3).to_string();
         let mut args = vec!["task-add", &input.description, "--priority", &priority];
         let tags_owned: String;
-        if let Some(ref t) = input.tags { tags_owned = t.clone(); args.push("--tags"); args.push(&tags_owned); }
+        if let Some(ref t) = input.tags {
+            tags_owned = t.clone();
+            args.push("--tags");
+            args.push(&tags_owned);
+        }
         cli_wrapper::teambook(&args).await
     }
 
@@ -309,7 +428,11 @@ impl AiFoundationServer {
         let limit = input.limit.unwrap_or(20).to_string();
         let mut args = vec!["task-list", "--limit", &limit];
         let status_owned: String;
-        if let Some(ref s) = input.status { status_owned = s.clone(); args.push("--status"); args.push(&status_owned); }
+        if let Some(ref s) = input.status {
+            status_owned = s.clone();
+            args.push("--status");
+            args.push(&status_owned);
+        }
         cli_wrapper::teambook(&args).await
     }
 
@@ -326,7 +449,9 @@ impl AiFoundationServer {
     }
 
     #[tool(description = "Claim next available task")]
-    async fn teambook_claim_task(&self) -> String { cli_wrapper::teambook(&["claim-task"]).await }
+    async fn teambook_claim_task(&self) -> String {
+        cli_wrapper::teambook(&["claim-task"]).await
+    }
 
     #[tool(description = "Start working on task")]
     async fn task_start(&self, Parameters(input): Parameters<TaskIdInput>) -> String {
@@ -358,7 +483,6 @@ impl AiFoundationServer {
         cli_wrapper::teambook(&["task-update", &id, &input.status]).await
     }
 
-
     // ============== Dialogues (7 kept) ==============
 
     #[tool(description = "Start a dialogue")]
@@ -367,7 +491,10 @@ impl AiFoundationServer {
     }
 
     #[tool(description = "Respond to dialogue")]
-    async fn dialogue_respond(&self, Parameters(input): Parameters<DialogueRespondInput>) -> String {
+    async fn dialogue_respond(
+        &self,
+        Parameters(input): Parameters<DialogueRespondInput>,
+    ) -> String {
         let id = input.dialogue_id.to_string();
         cli_wrapper::teambook(&["dialogue-respond", &id, &input.response]).await
     }
@@ -401,7 +528,9 @@ impl AiFoundationServer {
         let id = input.dialogue_id.to_string();
         let status = input.status.unwrap_or_else(|| "completed".to_string());
         match input.summary {
-            Some(ref summary) => cli_wrapper::teambook(&["dialogue-end", &id, &status, "--summary", summary]).await,
+            Some(ref summary) => {
+                cli_wrapper::teambook(&["dialogue-end", &id, &status, "--summary", summary]).await
+            }
             None => cli_wrapper::teambook(&["dialogue-end", &id, &status]).await,
         }
     }
@@ -419,10 +548,9 @@ impl AiFoundationServer {
         let timeout = input.timeout.unwrap_or(180).to_string();
         cli_wrapper::teambook(&["standby", &timeout]).await
     }
-
 }
 
-#[tool_handler]
+#[tool(tool_box)]
 impl ServerHandler for AiFoundationServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
