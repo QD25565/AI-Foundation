@@ -20,7 +20,7 @@ fn get_bin_dir() -> PathBuf {
     if let Ok(bin_path) = std::env::var("BIN_PATH") {
         return PathBuf::from(bin_path);
     }
-    
+
     // Check for ./bin relative to current working directory
     let cwd_bin = std::env::current_dir()
         .unwrap_or_else(|_| PathBuf::from("."))
@@ -28,7 +28,7 @@ fn get_bin_dir() -> PathBuf {
     if cwd_bin.exists() {
         return cwd_bin;
     }
-    
+
     // Fall back to ~/.ai-foundation/bin
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
@@ -39,9 +39,13 @@ fn get_bin_dir() -> PathBuf {
 /// Get executable name with platform-appropriate extension
 fn exe_name(base: &str) -> String {
     #[cfg(windows)]
-    { format!("{}.exe", base) }
+    {
+        format!("{}.exe", base)
+    }
     #[cfg(not(windows))]
-    { base.to_string() }
+    {
+        base.to_string()
+    }
 }
 
 /// Run a teambook CLI command and return output
@@ -68,10 +72,10 @@ pub async fn teambook_v1(args: &[&str]) -> String {
 }
 
 /// Run a notebook CLI command and return output
-/// 
+///
 /// # Arguments
 /// * `args` - Command arguments (e.g., ["stats"] for "notebook-cli.exe stats")
-/// 
+///
 /// # Returns
 /// * CLI stdout on success
 /// * Formatted error message on failure
@@ -94,18 +98,18 @@ pub async fn visionbook(args: &[&str]) -> String {
 }
 
 /// Run a CLI command and return its output
-/// 
+///
 /// # Arguments
 /// * `exe` - Executable name (e.g., "teambook.exe")
 /// * `args` - Command arguments
-/// 
+///
 /// # Returns
 /// * CLI stdout on success (trimmed)
 /// * Formatted error message on failure
 async fn run_cli(exe: &str, args: &[&str]) -> String {
     let bin_dir = get_bin_dir();
     let exe_path = bin_dir.join(exe);
-    
+
     // Get AI_ID for the CLI
     let ai_id = std::env::var("AI_ID")
         .or_else(|_| std::env::var("AGENT_ID"))
@@ -115,11 +119,10 @@ async fn run_cli(exe: &str, args: &[&str]) -> String {
     // V2 is now the default - gives us event-driven wake
     let v2_disabled = std::env::var("TEAMENGRAM_V2")
         .map(|v| v == "0" || v.eq_ignore_ascii_case("false"))
-        .unwrap_or(false);  // V2 default ON
+        .unwrap_or(false); // V2 default ON
 
     let mut cmd = Command::new(&exe_path);
-    cmd.args(args)
-        .env("AI_ID", &ai_id);
+    cmd.args(args).env("AI_ID", &ai_id);
 
     // V2 is default - always pass unless explicitly disabled
     if !v2_disabled {
@@ -127,18 +130,18 @@ async fn run_cli(exe: &str, args: &[&str]) -> String {
     }
 
     let result = cmd
-        .stdin(Stdio::null())   // No stdin = non-interactive
+        .stdin(Stdio::null()) // No stdin = non-interactive
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn();
-    
+
     let child = match result {
         Ok(child) => child,
         Err(e) => {
             return format!("Error: Failed to run {}: {}\nPath: {:?}", exe, e, exe_path);
         }
     };
-    
+
     match child.wait_with_output().await {
         Ok(output) => {
             if output.status.success() {
@@ -164,14 +167,14 @@ async fn run_cli(exe: &str, args: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
     async fn test_teambook_status() {
         let result = teambook(&["status"]).await;
         // Should return AI ID or error about connection
         assert!(!result.is_empty());
     }
-    
+
     #[tokio::test]
     async fn test_notebook_stats() {
         let result = notebook(&["stats"]).await;
