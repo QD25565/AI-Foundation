@@ -1,0 +1,48 @@
+[package]
+name = "deepnet-core"
+version = "0.1.0"
+edition = "2021"
+description = "Core protocol, types, and traits for Deep Net distributed mesh"
+authors = ["AI Foundation Team"]
+license = "MIT"
+
+[dependencies]
+# Cryptography
+ed25519-dalek = { version = "2.1", features = ["rand_core", "serde"] }
+x25519-dalek = { version = "2.0", features = ["serde"] }
+rand = "0.8"
+sha2 = "0.10"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3"
+
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+async-trait = "0.1"
+
+# Networking
+quinn = "0.11"  # QUIC implementation
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = "0.13"  # Certificate generation
+
+# Discovery
+mdns-sd = "0.11"  # mDNS/DNS-SD for LAN discovery
+hostname = "0.4"  # Get local hostname
+
+# Utilities
+thiserror = "1.0"
+tracing = "0.1"
+parking_lot = "0.12"
+bytes = "1.5"
+uuid = { version = "1.6", features = ["v4", "serde"] }
+
+# For test binary
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[[bin]]
+name = "p2p_test"
+path = "src/bin/p2p_test.rs"

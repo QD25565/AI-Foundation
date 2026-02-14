@@ -17,7 +17,7 @@ use rmcp::{
     transport::stdio,
 };
 
-mod cli_wrapper;
+use ai_foundation_mcp::cli_wrapper;
 
 // ============== Input Schemas ==============
 

@@ -1,0 +1,9 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- Base application theme for Compose app -->
+    <style name="Theme.AIFoundation" parent="android:Theme.Material.Light.NoActionBar">
+        <!-- Status bar color - dark for Deep Net theme -->
+        <item name="android:statusBarColor">#0A0E14</item>
+        <item name="android:navigationBarColor">#0A0E14</item>
+        <item name="android:windowBackground">#0A0E14</item>
+    </style>
+</resources>

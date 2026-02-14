@@ -1,0 +1,18 @@
+*.iml
+.gradle
+/local.properties
+/.idea/
+.DS_Store
+/build
+/captures
+.externalNativeBuild
+.cxx
+local.properties
+nul
+/nul
+
+# Rust build artifacts
+rust/*/target/
+
+# Local build scripts (contain machine-specific paths)
+build_debug.bat

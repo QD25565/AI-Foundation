@@ -1,0 +1,273 @@
+// Deep Net Mobile - UniFFI Interface Definition
+// Distributed Mesh Federation for Android/iOS
+//
+// Architecture:
+// - Each device is a sovereign node in the mesh
+// - Ed25519 cryptographic identity (no central authority)
+// - Multiple transports: mDNS/LAN, QUIC, Bluetooth, HTTP fallback
+// - Offline-first with P2P sync when peers available
+
+namespace deepnet {
+    // === INITIALIZATION ===
+
+    // Initialize Deep Net with storage directory (call first!)
+    boolean deep_net_init(string storage_dir);
+
+    // === MESH IDENTITY ===
+
+    // Generate or load node identity (Ed25519 keypair)
+    MeshIdentityResult mesh_identity_init(string display_name);
+
+    // Get current node ID (hex-encoded public key)
+    string mesh_get_node_id();
+
+    // Get node display name
+    string mesh_get_display_name();
+
+    // Export identity for backup (encrypted bytes)
+    sequence<u8> mesh_export_identity();
+
+    // Import identity from backup
+    boolean mesh_import_identity(sequence<u8> data);
+
+    // === MESH DISCOVERY ===
+
+    // Start mesh discovery (mDNS for LAN)
+    boolean mesh_start_discovery();
+
+    // Stop mesh discovery
+    void mesh_stop_discovery();
+
+    // Get discovered peers on LAN
+    sequence<MeshPeer> mesh_get_discovered_peers();
+
+    // Manually add a peer by address
+    boolean mesh_add_peer(string address);
+
+    // === MESH CONNECTIONS ===
+
+    // Connect to a peer by node ID
+    MeshConnectionResult mesh_connect(string node_id);
+
+    // Connect with specific transport preference
+    MeshConnectionResult mesh_connect_with_transport(string node_id, TransportType preferred_transport);
+
+    // Disconnect from a peer
+    void mesh_disconnect(string node_id);
+
+    // Get all connected peers
+    sequence<MeshPeer> mesh_get_connected_peers();
+
+    // Get detailed connection info for a peer
+    FederationConnectionInfo? mesh_get_connection_info(string node_id);
+
+    // Get all connection infos
+    sequence<FederationConnectionInfo> mesh_get_all_connections();
+
+    // Set trust level for a peer
+    boolean mesh_set_trust_level(string node_id, TrustLevel level);
+
+    // Get available transports for a peer
+    sequence<TransportType> mesh_get_available_transports(string node_id);
+
+    // Send message to peer (P2P, no server)
+    MessageResult mesh_send(string node_id, string content);
+
+    // Get messages from peer
+    sequence<MeshMessage> mesh_get_messages(string node_id, u32 limit);
+
+    // === FEDERATION ===
+
+    // Register device with Deep Net Federation
+    FederationResult federation_register(string server_url, string device_name);
+
+    // Check federation connection status
+    ConnectionStatus federation_status();
+
+    // Disconnect from federation
+    void federation_disconnect();
+
+    // Get all federation members
+    sequence<FederationMember> federation_get_members();
+
+    // === TEAMBOOK (Messages) ===
+
+    // Send a direct message to an AI
+    MessageResult teambook_dm(string to_ai_id, string content);
+
+    // Send a broadcast message
+    MessageResult teambook_broadcast(string content, string channel);
+
+    // Get recent direct messages
+    sequence<DirectMessage> teambook_get_dms(u32 limit);
+
+    // Get recent broadcasts
+    sequence<Broadcast> teambook_get_broadcasts(u32 limit);
+
+    // Get team status (who's online)
+    sequence<TeamMember> teambook_get_team();
+
+    // === SYNC ===
+
+    // Trigger manual sync with server
+    SyncResult deep_net_sync();
+
+    // Get count of pending items to sync
+    u32 deep_net_pending_count();
+
+    // Get last sync timestamp
+    string deep_net_last_sync();
+};
+
+// Result of federation registration
+dictionary FederationResult {
+    boolean success;
+    string device_id;
+    string auth_token;
+    string? error_message;
+};
+
+// Connection status
+enum ConnectionStatus {
+    "Connected",
+    "Disconnected",
+    "Connecting",
+    "Offline",
+    "Error"
+};
+
+// Result of sending a message
+dictionary MessageResult {
+    boolean success;
+    i64 message_id;
+    string? error_message;
+};
+
+// Direct message structure
+dictionary DirectMessage {
+    i64 id;
+    string from_ai;
+    string to_ai;
+    string content;
+    string timestamp;
+};
+
+// Broadcast message structure
+dictionary Broadcast {
+    i64 id;
+    string from_ai;
+    string channel;
+    string content;
+    string timestamp;
+};
+
+// Team member (AI or device)
+dictionary TeamMember {
+    string ai_id;
+    string display_name;
+    string status;
+    string? current_activity;
+};
+
+// Federation member (registered device or AI)
+dictionary FederationMember {
+    string member_id;
+    string member_type;  // "ai", "device", "service"
+    string display_name;
+    string status;
+    string registered_at;
+};
+
+// Result of sync operation
+dictionary SyncResult {
+    boolean success;
+    u32 items_pushed;
+    u32 items_pulled;
+    string? error_message;
+};
+
+// === FEDERATION TRANSPORT TYPES ===
+
+// Transport type for mesh connections (from federation-rs)
+enum TransportType {
+    "QuicInternet",   // QUIC over public internet
+    "QuicLan",        // QUIC over LAN
+    "Mdns",           // mDNS discovered + direct connection
+    "BluetoothLe",    // Bluetooth Low Energy
+    "BluetoothClassic", // Classic Bluetooth
+    "Passkey",        // Passkey-initiated connection
+    "Relay"           // Relayed through another node
+};
+
+// Trust level for federation nodes
+enum TrustLevel {
+    "Anonymous",      // Unknown node, heavily rate-limited
+    "Verified",       // Hardware fingerprint verified
+    "Trusted",        // Vouched by trusted node
+    "Owner"           // Owner of local Teambook
+};
+
+// Rich connection state with metadata
+enum FederationConnectionState {
+    "Disconnected",
+    "Connecting",
+    "Authenticating",
+    "NegotiatingSharing",
+    "Connected",
+    "Reconnecting",
+    "Failed"
+};
+
+// Full connection info for a peer
+dictionary FederationConnectionInfo {
+    string node_id;
+    FederationConnectionState state;
+    TransportType transport;
+    TrustLevel trust_level;
+    u32 latency_ms;
+    u64 connected_at;          // Unix timestamp
+    u64 bytes_sent;
+    u64 bytes_received;
+    string? error_message;     // If state is Failed
+};
+
+// === MESH TYPES ===
+
+// Result of mesh identity initialization
+dictionary MeshIdentityResult {
+    boolean success;
+    string node_id;       // Hex-encoded Ed25519 public key
+    string display_name;
+    boolean newly_created;  // True if identity was generated, false if loaded
+    string? error_message;
+};
+
+// A peer discovered or connected in the mesh
+dictionary MeshPeer {
+    string node_id;
+    string display_name;
+    string address;           // IP:port or other address
+    string transport_type;    // "lan", "quic", "bluetooth", "relay"
+    string status;            // "discovered", "connecting", "connected", "disconnected"
+    u32 latency_ms;
+    string last_seen;
+};
+
+// Result of mesh connection attempt
+dictionary MeshConnectionResult {
+    boolean success;
+    string node_id;
+    string transport_type;
+    u32 latency_ms;
+    string? error_message;
+};
+
+// Message received via mesh (P2P)
+dictionary MeshMessage {
+    string id;
+    string from_node_id;
+    string from_display_name;
+    string content;
+    string timestamp;
+    boolean encrypted;
+};

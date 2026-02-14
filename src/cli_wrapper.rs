@@ -196,3 +196,67 @@ mod tests {
 pub async fn firebase(args: &[&str]) -> String {
     run_cli(&exe_name("firebase"), args).await
 }
+
+// ============== Caller-ID variants (for HTTP API) ==============
+//
+// These run the same CLIs but with an explicit caller_id instead of
+// reading AI_ID from the environment. Used by the HTTP server to
+// execute commands on behalf of human users (H_ID like "human-yourname").
+
+/// Run a CLI command with a specific caller ID
+///
+/// Sets `current_dir` to the system temp directory so the subprocess
+/// does NOT pick up `.claude/settings.json` from the HTTP server's CWD.
+/// Without this, teambook resolves AI_ID from settings.json (which contains
+/// the hosting AI's identity) and ignores the env var we pass.
+async fn run_cli_as(exe: &str, args: &[&str], caller_id: &str) -> String {
+    let bin_dir = get_bin_dir();
+    let exe_path = bin_dir.join(exe);
+
+    let mut cmd = Command::new(&exe_path);
+    cmd.args(args)
+        .env("AI_ID", caller_id)
+        .env("TEAMENGRAM_V2", "1")
+        .current_dir(std::env::temp_dir())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            return format!("Error: Failed to run {}: {}\nPath: {:?}", exe, e, exe_path);
+        }
+    };
+
+    match child.wait_with_output().await {
+        Ok(output) => {
+            if output.status.success() {
+                String::from_utf8_lossy(&output.stdout).trim().to_string()
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                if !stderr.is_empty() {
+                    format!("Error: {}", stderr.trim())
+                } else if !stdout.is_empty() {
+                    stdout.trim().to_string()
+                } else {
+                    format!("Error: {} exited with code {:?}", exe, output.status.code())
+                }
+            }
+        }
+        Err(e) => {
+            format!("Error: Failed to get output from {}: {}", exe, e)
+        }
+    }
+}
+
+/// Run a teambook CLI command as a specific user
+pub async fn teambook_as(args: &[&str], caller_id: &str) -> String {
+    run_cli_as(&exe_name("teambook"), args, caller_id).await
+}
+
+/// Run a notebook CLI command as a specific user
+pub async fn notebook_as(args: &[&str], caller_id: &str) -> String {
+    run_cli_as(&exe_name("notebook-cli"), args, caller_id).await
+}
