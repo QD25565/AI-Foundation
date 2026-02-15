@@ -18,13 +18,18 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::cli_wrapper;
+use crate::federation::{self, FederationState};
+use crate::federation_sync;
 use crate::pairing::PairingState;
+use crate::profile;
+use std::sync::Arc;
 
 // ============== Shared State ==============
 
 #[derive(Clone)]
 pub struct ApiState {
     pub pairing: PairingState,
+    pub federation: Arc<FederationState>,
 }
 
 // ============== Response Envelope ==============
@@ -173,6 +178,43 @@ pub struct PairValidateRequest {
     pub code: String,
 }
 
+#[derive(Deserialize)]
+struct ProfileSetRequest {
+    display_name: Option<String>,
+    bio: Option<String>,
+    interests: Option<Vec<String>>,
+    current_focus: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ProfileFocusRequest {
+    focus: String,
+}
+
+#[derive(Deserialize)]
+struct SetStatusRequest {
+    status: String,
+}
+
+#[derive(Deserialize)]
+struct PreferencesRequest {
+    auto_presence: Option<bool>,
+}
+
+#[derive(Deserialize)]
+struct VisionAttachRequest {
+    note_id: u64,
+    image_path: String,
+    context: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct VisionGetQuery {
+    output: Option<String>,
+}
+
+
+
 #[derive(Serialize)]
 struct PairValidateResponse {
     ok: bool,
@@ -214,6 +256,29 @@ pub fn api_routes() -> Router<ApiState> {
         // Pairing (no auth)
         .route("/api/pair/generate", post(pair_generate))
         .route("/api/pair", post(pair_validate))
+        // Profiles (public read, auth write)
+        .route("/api/profiles", get(profile_list))
+        .route("/api/profiles/me", get(profile_get_me))
+        .route("/api/profiles/me", put(profile_set_me))
+        .route("/api/profiles/me/focus", put(profile_set_focus))
+        .route("/api/profiles/{ai_id}", get(profile_get))
+        .route("/api/profiles/me/status", put(profile_set_status))
+        .route("/api/profiles/me/preferences", get(profile_get_preferences))
+        .route("/api/profiles/me/preferences", put(profile_set_preferences))
+        // Vision (auth required)
+        .route("/api/vision/attach", post(vision_attach))
+        .route("/api/vision/list", get(vision_list))
+        .route("/api/vision/{id}", get(vision_get))
+        .route("/api/vision/note/{note_id}", get(vision_note))
+        .route("/api/vision/stats", get(vision_stats))
+        // Federation (peer-authenticated, no Bearer token)
+        .route("/api/federation/register", post(federation_register))
+        .route("/api/federation/peers", get(federation_peers))
+        .route("/api/federation/peers/{id}", delete(federation_remove_peer))
+        .route("/api/federation/identity", get(federation_identity))
+        .route("/api/federation/events", post(federation_push_events))
+        .route("/api/federation/events", get(federation_pull_events))
+        .route("/api/federation/status", get(federation_status))
 }
 
 // ============== Messaging Handlers ==============
@@ -492,4 +557,412 @@ async fn pair_validate(
             error: Some("Invalid or expired pairing code".into()),
         }),
     }
+}
+
+// ============== Profile Handlers ==============
+
+/// List all AI profiles on this Teambook (public, no auth).
+async fn profile_list() -> (StatusCode, Json<serde_json::Value>) {
+    match profile::list_profiles().await {
+        Ok(profiles) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "ok": true,
+                "profiles": profiles,
+                "count": profiles.len(),
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "ok": false,
+                "error": e.to_string(),
+            })),
+        ),
+    }
+}
+
+/// View a specific AI's profile (public, no auth).
+async fn profile_get(
+    Path(ai_id): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match profile::load_profile(&ai_id).await {
+        Ok(Some(p)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "ok": true,
+                "profile": p,
+            })),
+        ),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "ok": false,
+                "error": format!("No profile found for '{}'", ai_id),
+            })),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "ok": false,
+                "error": e.to_string(),
+            })),
+        ),
+    }
+}
+
+/// View your own profile (auth required).
+async fn profile_get_me(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> ApiResult {
+    let h_id = resolve_auth(&state.pairing, &headers).await?;
+    match profile::load_or_create(&h_id).await {
+        Ok(p) => Ok((
+            StatusCode::OK,
+            Json(ApiResponse {
+                ok: true,
+                data: Some(serde_json::to_string_pretty(&p).unwrap_or_else(|_| p.display())),
+                error: None,
+            }),
+        )),
+        Err(e) => Ok(cli_response(format!("Error: {}", e))),
+    }
+}
+
+/// Set/update your own profile (auth required).
+async fn profile_set_me(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(body): Json<ProfileSetRequest>,
+) -> ApiResult {
+    let h_id = resolve_auth(&state.pairing, &headers).await?;
+    let mut p = match profile::load_or_create(&h_id).await {
+        Ok(p) => p,
+        Err(e) => return Ok(cli_response(format!("Error: {}", e))),
+    };
+
+    p.apply_update(profile::ProfileUpdate {
+        display_name: body.display_name,
+        bio: body.bio,
+        interests: body.interests,
+        current_focus: body.current_focus,
+    });
+
+    match profile::save_profile(&p).await {
+        Ok(()) => Ok((
+            StatusCode::OK,
+            Json(ApiResponse {
+                ok: true,
+                data: Some(serde_json::to_string_pretty(&p).unwrap_or_else(|_| p.display())),
+                error: None,
+            }),
+        )),
+        Err(e) => Ok(cli_response(format!("Error: {}", e))),
+    }
+}
+
+/// Quick-set your current focus (auth required).
+async fn profile_set_focus(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(body): Json<ProfileFocusRequest>,
+) -> ApiResult {
+    let h_id = resolve_auth(&state.pairing, &headers).await?;
+    match profile::set_focus(&h_id, &body.focus).await {
+        Ok(()) => {
+            let msg = if body.focus.is_empty() {
+                "Focus cleared".to_string()
+            } else {
+                format!("Focus set: {}", body.focus)
+            };
+            Ok((
+                StatusCode::OK,
+                Json(ApiResponse {
+                    ok: true,
+                    data: Some(msg),
+                    error: None,
+                }),
+            ))
+        }
+        Err(e) => Ok(cli_response(format!("Error: {}", e))),
+    }
+}
+
+/// Set manual status message (auth required).
+async fn profile_set_status(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(body): Json<SetStatusRequest>,
+) -> ApiResult {
+    let h_id = resolve_auth(&state.pairing, &headers).await?;
+    match profile::set_status(&h_id, &body.status).await {
+        Ok(()) => {
+            let msg = if body.status.is_empty() {
+                "Status cleared".to_string()
+            } else {
+                format!("Status set: {}", body.status)
+            };
+            Ok((
+                StatusCode::OK,
+                Json(ApiResponse { ok: true, data: Some(msg), error: None }),
+            ))
+        }
+        Err(e) => Ok(cli_response(format!("Error: {}", e))),
+    }
+}
+
+/// Get preferences (auth required).
+async fn profile_get_preferences(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> ApiResult {
+    let h_id = resolve_auth(&state.pairing, &headers).await?;
+    match profile::load_or_create(&h_id).await {
+        Ok(p) => Ok((
+            StatusCode::OK,
+            Json(ApiResponse {
+                ok: true,
+                data: Some(serde_json::to_string(&p.preferences).unwrap_or_default()),
+                error: None,
+            }),
+        )),
+        Err(e) => Ok(cli_response(format!("Error: {}", e))),
+    }
+}
+
+/// Set preferences (auth required).
+async fn profile_set_preferences(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(body): Json<PreferencesRequest>,
+) -> ApiResult {
+    let h_id = resolve_auth(&state.pairing, &headers).await?;
+    match profile::set_preferences(&h_id, body.auto_presence).await {
+        Ok(prefs) => Ok((
+            StatusCode::OK,
+            Json(ApiResponse {
+                ok: true,
+                data: Some(serde_json::to_string(&prefs).unwrap_or_default()),
+                error: None,
+            }),
+        )),
+        Err(e) => Ok(cli_response(format!("Error: {}", e))),
+    }
+}
+
+// ============== Vision Handlers ==============
+
+/// Attach an image to a notebook note (auth required).
+async fn vision_attach(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(body): Json<VisionAttachRequest>,
+) -> ApiResult {
+    let h_id = resolve_auth(&state.pairing, &headers).await?;
+    let note_id = body.note_id.to_string();
+    let mut args = vec!["attach", &note_id, &body.image_path];
+    let context_owned;
+    if let Some(ref c) = body.context {
+        context_owned = c.clone();
+        args.push("--context");
+        args.push(&context_owned);
+    }
+    Ok(cli_response(
+        cli_wrapper::visionbook_as(&args, &h_id).await,
+    ))
+}
+
+/// List recent visual memories (auth required).
+async fn vision_list(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(q): Query<LimitQuery>,
+) -> ApiResult {
+    let h_id = resolve_auth(&state.pairing, &headers).await?;
+    let limit = q.limit.unwrap_or(10).to_string();
+    Ok(cli_response(
+        cli_wrapper::visionbook_as(&["visual-list", "--limit", &limit], &h_id).await,
+    ))
+}
+
+/// Get a specific visual memory (auth required).
+async fn vision_get(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(q): Query<VisionGetQuery>,
+) -> ApiResult {
+    let h_id = resolve_auth(&state.pairing, &headers).await?;
+    let mut args = vec!["visual-get", &id];
+    let output_owned;
+    if let Some(ref o) = q.output {
+        output_owned = o.clone();
+        args.push("--output");
+        args.push(&output_owned);
+    }
+    Ok(cli_response(
+        cli_wrapper::visionbook_as(&args, &h_id).await,
+    ))
+}
+
+/// Get visuals attached to a notebook note (auth required).
+async fn vision_note(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(note_id): Path<String>,
+) -> ApiResult {
+    let h_id = resolve_auth(&state.pairing, &headers).await?;
+    Ok(cli_response(
+        cli_wrapper::visionbook_as(&["note-visuals", &note_id], &h_id).await,
+    ))
+}
+
+/// Visual memory statistics (auth required).
+async fn vision_stats(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> ApiResult {
+    let h_id = resolve_auth(&state.pairing, &headers).await?;
+    Ok(cli_response(
+        cli_wrapper::visionbook_as(&["visual-stats"], &h_id).await,
+    ))
+}
+
+// ============== Federation Handlers ==============
+
+/// Register as a federation peer (exchange public keys + signed challenges).
+async fn federation_register(
+    State(state): State<ApiState>,
+    Json(body): Json<federation::PeerRegistrationRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let resp = state.federation.handle_registration(&body).await;
+    let status = if resp.accepted {
+        StatusCode::OK
+    } else {
+        StatusCode::FORBIDDEN
+    };
+    (status, Json(serde_json::to_value(resp).unwrap()))
+}
+
+/// List all registered federation peers.
+async fn federation_peers(
+    State(state): State<ApiState>,
+) -> Json<serde_json::Value> {
+    let peers = state.federation.list_peers().await;
+    Json(serde_json::json!({
+        "ok": true,
+        "peers": peers,
+        "count": peers.len(),
+    }))
+}
+
+/// Remove a federation peer by hex-encoded public key.
+async fn federation_remove_peer(
+    State(state): State<ApiState>,
+    Path(id): Path<String>,
+) -> (StatusCode, Json<ApiResponse>) {
+    if state.federation.remove_peer(&id).await {
+        (
+            StatusCode::OK,
+            Json(ApiResponse {
+                ok: true,
+                data: Some(format!("Peer {} removed", &id[..8.min(id.len())])),
+                error: None,
+            }),
+        )
+    } else {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse {
+                ok: false,
+                data: None,
+                error: Some("Peer not found".into()),
+            }),
+        )
+    }
+}
+
+/// Get this Teambook's federation identity (public key + metadata).
+async fn federation_identity(
+    State(state): State<ApiState>,
+) -> Json<serde_json::Value> {
+    let status = state.federation.status().await;
+    Json(serde_json::json!({
+        "ok": true,
+        "pubkey": status.pubkey,
+        "short_id": status.short_id,
+        "display_name": status.display_name,
+        "endpoint": status.endpoint,
+    }))
+}
+
+/// Receive pushed events from a federation peer.
+async fn federation_push_events(
+    State(state): State<ApiState>,
+    Json(body): Json<federation_sync::EventPushRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let resp = federation_sync::process_push(&state.federation, &body).await;
+
+    let status = if resp.rejected > 0 && resp.accepted == 0 {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::OK
+    };
+
+    (status, Json(serde_json::to_value(resp).unwrap()))
+}
+
+/// Pull events since a given sequence (for catch-up sync).
+async fn federation_pull_events(
+    State(state): State<ApiState>,
+    Query(q): Query<FederationPullQuery>,
+) -> Json<serde_json::Value> {
+    // Verify the requester is a known peer
+    if let Some(ref pubkey) = q.pubkey {
+        if let Ok(bytes) = hex::decode(pubkey) {
+            if bytes.len() == 32 {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                if !state.federation.is_known_peer(&arr).await {
+                    return Json(serde_json::json!({
+                        "ok": false,
+                        "error": "Unknown peer",
+                    }));
+                }
+                // Touch the peer
+                state.federation.touch_peer(pubkey).await;
+            }
+        }
+    }
+
+    // For now, return empty — actual event log reading will be integrated
+    // when we wire this to the teamengram event log
+    let hlc = state.federation.clock.tick();
+    Json(serde_json::to_value(federation_sync::EventPullResponse {
+        events: vec![],
+        head_seq: 0,
+        has_more: false,
+        sender_hlc: hlc,
+    })
+    .unwrap())
+}
+
+/// Get federation health status.
+async fn federation_status(
+    State(state): State<ApiState>,
+) -> Json<serde_json::Value> {
+    let status = state.federation.status().await;
+    Json(serde_json::json!({
+        "ok": true,
+        "federation": status,
+    }))
+}
+
+#[derive(Deserialize)]
+#[allow(dead_code)] // Fields used when event log integration is wired up
+struct FederationPullQuery {
+    since: Option<u64>,
+    limit: Option<usize>,
+    pubkey: Option<String>,
 }

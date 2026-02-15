@@ -260,3 +260,8 @@ pub async fn teambook_as(args: &[&str], caller_id: &str) -> String {
 pub async fn notebook_as(args: &[&str], caller_id: &str) -> String {
     run_cli_as(&exe_name("notebook-cli"), args, caller_id).await
 }
+
+/// Run a visionbook CLI command as a specific user
+pub async fn visionbook_as(args: &[&str], caller_id: &str) -> String {
+    run_cli_as(&exe_name("visionbook"), args, caller_id).await
+}

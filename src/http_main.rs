@@ -1,13 +1,17 @@
 //! AI Foundation HTTP API Server
 //!
-//! Serves REST endpoints for mobile and desktop human clients.
+//! Serves REST endpoints for mobile/desktop human clients AND federation peers.
 //! Uses the same CLI subprocess pattern as the MCP server —
 //! CLIs are the source of truth, this is just another thin wrapper.
 //!
 //! Usage:
 //!   AI_FOUNDATION_HTTP_PORT=8080 ai-foundation-http
 //!
-//! Endpoints:
+//! Environment:
+//!   AI_FOUNDATION_HTTP_PORT  - Port to listen on (default: 8080)
+//!   AI_FOUNDATION_NAME       - Display name for federation (default: hostname)
+//!
+//! Human Client Endpoints:
 //!   POST /api/pair/generate  - Generate pairing code (from desktop/CLI)
 //!   POST /api/pair           - Validate code, get auth token (from mobile)
 //!   GET  /api/status         - Team status (public, no auth)
@@ -29,10 +33,25 @@
 //!   POST /api/dialogues       - Start dialogue
 //!   GET  /api/dialogues/{id}  - Get dialogue
 //!   POST /api/dialogues/{id}/respond - Respond to dialogue
+//!
+//! Federation Endpoints:
+//!   POST /api/federation/register    - Register as peer (exchange keys)
+//!   GET  /api/federation/peers       - List registered peers
+//!   DELETE /api/federation/peers/{id} - Remove a peer
+//!   GET  /api/federation/identity    - Get this Teambook's public key
+//!   POST /api/federation/events      - Push signed events
+//!   GET  /api/federation/events      - Pull events since sequence
+//!   GET  /api/federation/status      - Federation health
 
-use ai_foundation_mcp::{http_api, pairing::PairingState, sse};
+use ai_foundation_mcp::{
+    federation::FederationState,
+    http_api,
+    pairing::PairingState,
+    sse,
+};
 use anyhow::Result;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tower_http::cors::{Any, CorsLayer};
 use tracing::info;
 
@@ -48,8 +67,25 @@ async fn main() -> Result<()> {
         .and_then(|p| p.parse().ok())
         .unwrap_or(8080);
 
+    // Federation display name: env var > hostname > "teambook"
+    let display_name = std::env::var("AI_FOUNDATION_NAME")
+        .unwrap_or_else(|_| {
+            hostname::get()
+                .ok()
+                .and_then(|h| h.into_string().ok())
+                .unwrap_or_else(|| "teambook".to_string())
+        });
+
+    let local_endpoint = format!("http://0.0.0.0:{}", port);
+
+    // Initialize federation (loads or generates Ed25519 identity)
+    let federation = FederationState::init(display_name, local_endpoint).await?;
+
     let pairing = PairingState::new();
-    let state = http_api::ApiState { pairing };
+    let state = http_api::ApiState {
+        pairing,
+        federation: Arc::new(federation),
+    };
 
     let app = http_api::api_routes()
         .merge(sse::sse_routes())
@@ -64,6 +100,7 @@ async fn main() -> Result<()> {
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     info!("AI Foundation HTTP API listening on http://{}", addr);
     info!("Pair a device: POST /api/pair/generate {{\"h_id\": \"human-yourname\"}}");
+    info!("Federation: GET /api/federation/identity");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
