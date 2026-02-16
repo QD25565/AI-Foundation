@@ -108,6 +108,7 @@ pub mod windows {
 
     // Windows API constants
     const WAIT_OBJECT_0: u32 = 0;
+    const WAIT_TIMEOUT: u32 = 258;
     const INFINITE: u32 = 0xFFFFFFFF;
     const EVENT_MODIFY_STATE: u32 = 0x0002;
     const SYNCHRONIZE: u32 = 0x00100000;
@@ -471,7 +472,6 @@ pub use macos::PlatformWakeEvent;
 // CROSS-PROCESS WAKE COORDINATOR
 // ============================================================================
 
-use std::sync::Arc;
 use anyhow::Result;
 
 /// Manages wake events for multiple AIs via shared memory
@@ -639,23 +639,61 @@ pub fn get_online_ais(known_ai_ids: &[&str]) -> Vec<String> {
         .collect()
 }
 
-// Unix stub implementations
+// Unix presence via PID files
 #[cfg(not(target_os = "windows"))]
 pub struct PresenceMutex {
     ai_id: String,
+    pid_path: std::path::PathBuf,
 }
 
 #[cfg(not(target_os = "windows"))]
 impl PresenceMutex {
     pub fn acquire(ai_id: &str) -> std::io::Result<Self> {
-        Ok(Self { ai_id: ai_id.to_string() })
+        let presence_dir = dirs::data_local_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+            .join(".ai-foundation")
+            .join("v2")
+            .join("presence");
+        std::fs::create_dir_all(&presence_dir)?;
+
+        let pid_path = presence_dir.join(format!("{}.pid", ai_id));
+        std::fs::write(&pid_path, format!("{}", std::process::id()))?;
+
+        Ok(Self {
+            ai_id: ai_id.to_string(),
+            pid_path,
+        })
     }
     pub fn ai_id(&self) -> &str { &self.ai_id }
 }
 
 #[cfg(not(target_os = "windows"))]
-pub fn is_ai_online(_ai_id: &str) -> bool {
-    false
+impl Drop for PresenceMutex {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.pid_path);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn is_ai_online(ai_id: &str) -> bool {
+    // Check for PID file at well-known location
+    let pid_path = dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join(".ai-foundation")
+        .join("v2")
+        .join("presence")
+        .join(format!("{}.pid", ai_id));
+
+    if let Ok(contents) = std::fs::read_to_string(&pid_path) {
+        if let Ok(pid) = contents.trim().parse::<i32>() {
+            // Check if process is still alive (signal 0 = existence check)
+            unsafe { libc::kill(pid, 0) == 0 }
+        } else {
+            false
+        }
+    } else {
+        false
+    }
 }
 
 #[cfg(not(target_os = "windows"))]
@@ -681,7 +719,6 @@ pub mod sequencer_wake {
     use std::time::Duration;
 
     const WAIT_OBJECT_0: u32 = 0;
-    const WAIT_TIMEOUT: u32 = 258;
     const EVENT_MODIFY_STATE: u32 = 0x0002;
     const SYNCHRONIZE: u32 = 0x00100000;
 
@@ -762,7 +799,14 @@ pub mod sequencer_wake {
             result == WAIT_OBJECT_0
         }
 
-        /// Wait indefinitely for a signal
+        /// Block until signaled. No timeout. No polling.
+        ///
+        /// Uses WaitForSingleObject(INFINITE). Wakes ONLY when:
+        /// - An outbox write calls signal_sequencer() (normal path)
+        /// - The shutdown handler calls signal_sequencer() (clean exit)
+        ///
+        /// If the signal mechanism is broken, this blocks forever.
+        /// That is correct behavior — fix the signal, don't mask the bug.
         pub fn wait(&self) {
             unsafe { WaitForSingleObject(self.handle, 0xFFFFFFFF) };
         }
@@ -834,65 +878,124 @@ pub mod sequencer_wake {
 #[cfg(not(target_os = "windows"))]
 pub mod sequencer_wake {
     use std::time::Duration;
-    use std::sync::{Condvar, Mutex, OnceLock};
 
-    // Linux/macOS: Use in-process signaling for now.
-    // TODO: For true cross-process, use POSIX named semaphores or /dev/shm.
-    // This works when sequencer and writers are in the same process (tests).
+    /// POSIX named semaphore path (visible in /dev/shm/)
+    const SEM_NAME: &[u8] = b"/teamengram_seq_wake\0";
 
-    static GLOBAL_SIGNAL: OnceLock<(Mutex<bool>, Condvar)> = OnceLock::new();
-
-    fn get_signal() -> &'static (Mutex<bool>, Condvar) {
-        GLOBAL_SIGNAL.get_or_init(|| (Mutex::new(false), Condvar::new()))
+    /// Cross-process sequencer wake using POSIX named semaphores.
+    ///
+    /// Named semaphores persist in /dev/shm/ and are visible across all processes
+    /// on the same host. This enables true cross-process signaling on Linux/macOS
+    /// with zero polling — sem_post/sem_timedwait are ~200ns on modern kernels.
+    pub struct SequencerWakeReceiver {
+        sem: *mut libc::sem_t,
     }
 
-    pub struct SequencerWakeReceiver;
+    unsafe impl Send for SequencerWakeReceiver {}
+    unsafe impl Sync for SequencerWakeReceiver {}
 
     impl SequencerWakeReceiver {
         pub fn new() -> std::io::Result<Self> {
-            Ok(Self)
+            let sem = unsafe {
+                libc::sem_open(
+                    SEM_NAME.as_ptr() as *const libc::c_char,
+                    libc::O_CREAT,
+                    0o644,
+                    0u32,  // Initially non-signaled
+                )
+            };
+            if sem == libc::SEM_FAILED {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            // Drain any stale signals from previous runs
+            loop {
+                let result = unsafe { libc::sem_trywait(sem) };
+                if result != 0 { break; }
+            }
+
+            Ok(Self { sem })
         }
 
         pub fn wait_timeout(&self, timeout: Duration) -> bool {
-            let (lock, cvar) = get_signal();
-            let mut signaled = lock.lock().unwrap();
-            if *signaled {
-                *signaled = false;
-                return true;
+            let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
+            unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts) };
+            ts.tv_sec += timeout.as_secs() as libc::time_t;
+            ts.tv_nsec += timeout.subsec_nanos() as libc::c_long;
+            if ts.tv_nsec >= 1_000_000_000 {
+                ts.tv_sec += 1;
+                ts.tv_nsec -= 1_000_000_000;
             }
-            let result = cvar.wait_timeout(signaled, timeout).unwrap();
-            let was_signaled = *result.0;
-            if was_signaled {
-                *result.0 = false;
-            }
-            was_signaled
+
+            let result = unsafe { libc::sem_timedwait(self.sem, &ts) };
+            result == 0
         }
 
+        /// Block until signaled. No timeout. No polling.
+        ///
+        /// Uses sem_wait (POSIX). Wakes ONLY when:
+        /// - An outbox write calls signal_sequencer() → sem_post (normal path)
+        /// - The shutdown handler calls signal_sequencer() → sem_post (clean exit)
+        /// - A signal (SIGINT) interrupts sem_wait with EINTR (also triggers exit)
+        ///
+        /// On EINTR, we return to let the caller check stop_signal.
+        /// If the signal mechanism is broken, this blocks forever.
+        /// That is correct behavior — fix the signal, don't mask the bug.
         pub fn wait(&self) {
-            let (lock, cvar) = get_signal();
-            let mut signaled = lock.lock().unwrap();
-            while !*signaled {
-                signaled = cvar.wait(signaled).unwrap();
-            }
-            *signaled = false;
+            unsafe { libc::sem_wait(self.sem) };
+            // Return value unchecked: whether signaled (0) or interrupted (EINTR),
+            // the caller's loop checks stop_signal and processes events regardless.
         }
     }
 
-    pub struct SequencerWakeSignaler;
+    impl Drop for SequencerWakeReceiver {
+        fn drop(&mut self) {
+            unsafe {
+                libc::sem_close(self.sem);
+                // Unlink so it doesn't persist after daemon shutdown
+                libc::sem_unlink(SEM_NAME.as_ptr() as *const libc::c_char);
+            }
+        }
+    }
+
+    pub struct SequencerWakeSignaler {
+        sem: *mut libc::sem_t,
+    }
+
+    unsafe impl Send for SequencerWakeSignaler {}
+    unsafe impl Sync for SequencerWakeSignaler {}
 
     impl SequencerWakeSignaler {
+        /// Open connection to the sequencer wake semaphore.
+        /// Returns None if sequencer is not running (semaphore doesn't exist).
         pub fn open() -> Option<Self> {
-            Some(Self)
+            let sem = unsafe {
+                libc::sem_open(
+                    SEM_NAME.as_ptr() as *const libc::c_char,
+                    0,  // Open existing only, don't create
+                    0,
+                    0,
+                )
+            };
+            if sem == libc::SEM_FAILED {
+                None  // Sequencer not running
+            } else {
+                Some(Self { sem })
+            }
         }
 
         pub fn signal(&self) {
-            let (lock, cvar) = get_signal();
-            let mut signaled = lock.lock().unwrap();
-            *signaled = true;
-            cvar.notify_all();
+            unsafe { libc::sem_post(self.sem) };
         }
     }
 
+    impl Drop for SequencerWakeSignaler {
+        fn drop(&mut self) {
+            unsafe { libc::sem_close(self.sem) };
+        }
+    }
+
+    /// Convenience function: signal sequencer if running (fire-and-forget)
     pub fn signal_sequencer() {
         if let Some(signaler) = SequencerWakeSignaler::open() {
             signaler.signal();

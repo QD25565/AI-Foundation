@@ -129,7 +129,7 @@ fn benchmark_view_sync(data_dir: &PathBuf) {
                 0 => Event::broadcast("sage-724", "general", &format!("msg{}", i)),
                 1 => Event::direct_message("sage-724", "lyra-584", &format!("dm{}", i)),
                 2 => Event::dialogue_start("sage-724", "lyra-584", "review"),
-                3 => Event::lock_acquire("lyra-584", "file.rs", 300, "editing"),
+                3 => Event::file_action("lyra-584", "file.rs", "read"),
                 _ => Event::broadcast("cascade-230", "general", &format!("msg{}", i)),
             };
             writer.append(&event).unwrap();
@@ -161,6 +161,6 @@ fn benchmark_view_sync(data_dir: &PathBuf) {
     let stats = view.stats();
     println!("  UnreadDMs:{}", stats.unread_dms);
     println!("  Dialogues:{}", stats.active_dialogues);
-    println!("  Locks:{}", stats.my_locks);
+    println!("  Tasks:{}", stats.my_tasks);
     println!();
 }

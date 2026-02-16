@@ -1203,21 +1203,7 @@ impl V2Storage {
             .map_err(|e| anyhow::anyhow!("V2 task complete error: {}", e))
     }
 
-    // ===== LOCKS =====
-
-    /// Acquire a lock
-    pub async fn acquire_lock(&self, resource: &str, duration: u32, working_on: &str) -> Result<u64> {
-        let mut v2 = self.v2.lock().await;
-        v2.acquire_lock(resource, duration, working_on)
-            .map_err(|e| anyhow::anyhow!("V2 lock acquire error: {}", e))
-    }
-
-    /// Release a lock
-    pub async fn release_lock(&self, resource: &str) -> Result<u64> {
-        let mut v2 = self.v2.lock().await;
-        v2.release_lock(resource)
-            .map_err(|e| anyhow::anyhow!("V2 lock release error: {}", e))
-    }
+    // ===== LOCKS (removed — deprecated Feb 2026, QD directive) =====
 
     // ===== ROOMS =====
 
@@ -1271,7 +1257,7 @@ impl V2Storage {
             unread_dms: v2.unread_dm_count(),
             active_dialogues: v2.active_dialogue_count(),
             pending_votes: v2.pending_vote_count(),
-            my_locks: v2.my_lock_count(),
+            my_locks: 0, // locks deprecated (Feb 2026)
             my_tasks: v2.my_task_count(),
         })
     }

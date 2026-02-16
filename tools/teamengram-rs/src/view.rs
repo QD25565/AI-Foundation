@@ -50,7 +50,6 @@ pub type ViewResult<T> = Result<T, ViewError>;
 const MAX_CACHED_DMS: usize = 100;
 const MAX_CACHED_BROADCASTS_PER_CHANNEL: usize = 100;
 const MAX_CACHED_FILE_ACTIONS: usize = 100;
-const MAX_CACHED_PHEROMONES_PER_LOCATION: usize = 50;
 const WARMUP_EVENT_COUNT: u64 = 10_000;
 
 // ============== CACHE STRUCTS ==============
@@ -156,67 +155,8 @@ pub struct PresenceState {
     pub last_presence_update: u64,  // Last PRESENCE_UPDATE event
 }
 
-/// Cached lock state
-#[derive(Debug, Clone)]
-pub struct LockState {
-    pub resource: String,
-    pub holder: String,
-    pub reason: String,
-    pub duration_seconds: u32,
-    pub acquired_at: u64,
-}
-
-/// Cached pheromone (stigmergy)
-#[derive(Debug, Clone)]
-pub struct PheromoneState {
-    pub id: u64,
-    pub ai_id: String,
-    pub location: String,
-    pub pheromone_type: String,
-    pub content: String,
-    pub intensity: u8,
-    pub deposited_at: u64,  // microseconds since epoch
-}
-
-impl PheromoneState {
-    /// Get decay rate for this pheromone type
-    /// Matches Python stigmergy.py defaults:
-    /// - interest: 0.2 (fast decay, ~7s half-life)
-    /// - working: 0.05 (slow decay, ~14s half-life)
-    /// - blocked: 0.01 (very slow decay, ~70s half-life)
-    /// - success: 0.02 (slow decay)
-    /// - warning: 0.01 (very slow)
-    fn decay_rate(&self) -> f64 {
-        match self.pheromone_type.to_lowercase().as_str() {
-            "interest" => 0.2,
-            "working" => 0.05,
-            "blocked" => 0.01,
-            "success" => 0.02,
-            "warning" => 0.01,
-            _ => 0.1,  // default: moderate decay
-        }
-    }
-
-    /// Calculate current intensity after decay
-    /// Formula: intensity * (1 - decay_rate) ^ elapsed_seconds
-    pub fn current_intensity(&self) -> f64 {
-        let now_micros = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_micros() as u64)
-            .unwrap_or(0);
-
-        let elapsed_seconds = (now_micros.saturating_sub(self.deposited_at)) as f64 / 1_000_000.0;
-        let decay_rate = self.decay_rate();
-        let base_intensity = self.intensity as f64 / 10.0;  // Normalize 1-10 to 0.1-1.0
-
-        base_intensity * (1.0 - decay_rate).powf(elapsed_seconds)
-    }
-
-    /// Check if pheromone has decayed below threshold (effectively expired)
-    pub fn is_expired(&self) -> bool {
-        self.current_intensity() < 0.01
-    }
-}
+// LockState removed — locks deprecated (Feb 2026, QD directive)
+// PheromoneState removed — stigmergy deprecated (Feb 2026, QD directive)
 
 /// Cached file action
 #[derive(Debug, Clone)]
@@ -249,7 +189,6 @@ pub struct ViewStats {
     pub unread_dms: u64,
     pub active_dialogues: u64,
     pub pending_votes: u64,
-    pub my_locks: u64,
     pub my_tasks: u64,
     pub events_applied: u64,
 }
@@ -324,11 +263,8 @@ pub struct ViewEngine {
     /// AI presences (ai_id -> presence)
     presences: HashMap<String, PresenceState>,
 
-    /// Active locks (resource -> lock)
-    locks: HashMap<String, LockState>,
-
-    /// Pheromones by location
-    pheromones: HashMap<String, VecDeque<PheromoneState>>,
+    // locks removed — deprecated (Feb 2026)
+    // pheromones removed — deprecated (Feb 2026)
 
     /// Recent file actions (ring buffer, max 100)
     file_actions: VecDeque<FileActionState>,
@@ -368,8 +304,6 @@ impl ViewEngine {
             batches: HashMap::new(),
             file_claims: HashMap::new(),
             presences: HashMap::new(),
-            locks: HashMap::new(),
-            pheromones: HashMap::new(),
             file_actions: VecDeque::new(),
             rooms: HashMap::new(),
             ai_trust: HashMap::new(),
@@ -422,6 +356,13 @@ impl ViewEngine {
         loop {
             match event_log.try_read() {
                 Ok(Some(event)) => {
+                    // Skip already-processed events: seek_to_sequence(cursor)
+                    // positions the reader AT the cursor event, so the first
+                    // try_read() re-reads it. Without this guard, append-only
+                    // caches (broadcasts, DMs) get duplicates on every sync.
+                    if event.header.sequence <= self.cursor {
+                        continue;
+                    }
                     self.apply_event(&event)?;
                     events_applied += 1;
                     self.cursor = event.header.sequence;
@@ -647,32 +588,9 @@ impl ViewEngine {
                 }
             }
 
-            // ============== LOCKS ==============
-            event_type::LOCK_ACQUIRE => {
-                if let EventPayload::LockAcquire(payload) = &event.payload {
-                    if source_ai == self.ai_id {
-                        self.stats.my_locks += 1;
-                    }
-
-                    self.locks.insert(payload.resource.clone(), LockState {
-                        resource: payload.resource.clone(),
-                        holder: source_ai.clone(),
-                        reason: payload.reason.clone(),
-                        duration_seconds: payload.duration_seconds,
-                        acquired_at: timestamp,
-                    });
-                }
-            }
-
-            event_type::LOCK_RELEASE => {
-                if let EventPayload::LockRelease(payload) = &event.payload {
-                    if source_ai == self.ai_id && self.stats.my_locks > 0 {
-                        self.stats.my_locks -= 1;
-                    }
-
-                    self.locks.remove(&payload.resource);
-                }
-            }
+            // Locks deprecated — LOCK_ACQUIRE/LOCK_RELEASE events ignored (Feb 2026)
+            event_type::LOCK_ACQUIRE => {}
+            event_type::LOCK_RELEASE => {}
 
             // ============== FILE CLAIMS ==============
             event_type::FILE_CLAIM => {
@@ -909,28 +827,8 @@ impl ViewEngine {
                 }
             }
 
-            // ============== PHEROMONES ==============
-            event_type::PHEROMONE_DEPOSIT => {
-                if let EventPayload::PheromoneDeposit(payload) = &event.payload {
-                    let pheromone = PheromoneState {
-                        id: sequence,
-                        ai_id: source_ai.clone(),
-                        location: payload.location.clone(),
-                        pheromone_type: payload.pheromone_type.clone(),
-                        content: payload.content.clone(),
-                        intensity: payload.intensity,
-                        deposited_at: timestamp,
-                    };
-
-                    let location_queue = self.pheromones
-                        .entry(payload.location.clone())
-                        .or_insert_with(VecDeque::new);
-                    location_queue.push_back(pheromone);
-                    while location_queue.len() > MAX_CACHED_PHEROMONES_PER_LOCATION {
-                        location_queue.pop_front();
-                    }
-                }
-            }
+            // Stigmergy deprecated — PHEROMONE_DEPOSIT events ignored (Feb 2026)
+            event_type::PHEROMONE_DEPOSIT => {}
 
             // ============== TRUST ==============
             event_type::TRUST_RECORD => {
@@ -981,9 +879,7 @@ impl ViewEngine {
         self.stats.pending_votes
     }
 
-    pub fn my_lock_count(&self) -> u64 {
-        self.stats.my_locks
-    }
+    // my_lock_count() removed — locks deprecated (Feb 2026)
 
     pub fn my_task_count(&self) -> u64 {
         self.stats.my_tasks
@@ -1111,8 +1007,12 @@ impl ViewEngine {
     // === Dialogues ===
 
     /// Get a dialogue by ID
+    /// Get a dialogue by ID (tries sequence key first, then timestamp fallback)
+    /// This handles the ID mismatch between outbox-returned timestamps
+    /// and view-assigned global sequence numbers.
     pub fn get_dialogue(&self, id: u64) -> Option<&DialogueState> {
         self.dialogues.get(&id)
+            .or_else(|| self.dialogues.values().find(|d| d.created_at == id))
     }
 
     /// Get all dialogues
@@ -1162,9 +1062,12 @@ impl ViewEngine {
 
     // === Tasks ===
 
-    /// Get a task by ID
+    /// Get a task by ID (tries sequence key first, then timestamp fallback)
+    /// This handles the ID mismatch between outbox-returned timestamps
+    /// and view-assigned global sequence numbers.
     pub fn get_task(&self, id: u64) -> Option<&TaskState> {
         self.tasks.get(&id)
+            .or_else(|| self.tasks.values().find(|t| t.created_at == id))
     }
 
     /// Get all tasks
@@ -1284,17 +1187,7 @@ impl ViewEngine {
         &self.presences
     }
 
-    // === Locks ===
-
-    /// Check if a resource is locked
-    pub fn check_lock(&self, resource: &str) -> Option<&LockState> {
-        self.locks.get(resource)
-    }
-
-    /// Get all active locks
-    pub fn get_all_locks(&self) -> &HashMap<String, LockState> {
-        &self.locks
-    }
+    // Locks query methods removed — deprecated (Feb 2026)
 
     // === File Actions ===
 
@@ -1303,25 +1196,7 @@ impl ViewEngine {
         self.file_actions.iter().rev().take(limit).collect()
     }
 
-    // === Pheromones ===
-
-    /// Get pheromones at a location (filters out expired/decayed pheromones)
-    pub fn get_pheromones_at(&self, location: &str) -> Vec<&PheromoneState> {
-        self.pheromones
-            .get(location)
-            .map(|q| q.iter().filter(|p| !p.is_expired()).collect())
-            .unwrap_or_default()
-    }
-
-    /// Get all pheromones (all locations, filters out expired/decayed)
-    pub fn get_all_pheromones(&self, limit: usize) -> Vec<&PheromoneState> {
-        self.pheromones
-            .values()
-            .flat_map(|q| q.iter())
-            .filter(|p| !p.is_expired())
-            .take(limit)
-            .collect()
-    }
+    // Pheromone query methods removed — stigmergy deprecated (Feb 2026)
 
     // === Rooms ===
 
@@ -1381,8 +1256,6 @@ impl ViewEngine {
         self.batches.clear();
         self.file_claims.clear();
         self.presences.clear();
-        self.locks.clear();
-        self.pheromones.clear();
         self.file_actions.clear();
         self.rooms.clear();
         self.ai_trust.clear();
@@ -1482,19 +1355,7 @@ mod tests {
         assert_eq!(view.pending_vote_count(), 0);
     }
 
-    #[test]
-    fn test_apply_lock() {
-        let dir = tempdir().unwrap();
-        let mut view = ViewEngine::open("lyra-584", dir.path()).unwrap();
-
-        let acquire = Event::lock_acquire("lyra-584", "store.rs", 300, "editing");
-        view.apply_event(&acquire).unwrap();
-        assert_eq!(view.my_lock_count(), 1);
-
-        let release = Event::lock_release("lyra-584", "store.rs");
-        view.apply_event(&release).unwrap();
-        assert_eq!(view.my_lock_count(), 0);
-    }
+    // test_apply_lock removed — locks deprecated (Feb 2026)
 
     #[test]
     fn test_cursor_persistence() {

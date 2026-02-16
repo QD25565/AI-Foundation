@@ -46,7 +46,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant};
+// std::time::{Duration, Instant} used in tests only (test modules import their own)
 
 use crate::event::{Event, EventHeader, event_type};
 use crate::event_log::{EventLogWriter, EventLogResult};
@@ -181,6 +181,9 @@ pub struct Sequencer {
     stats: Arc<SequencerStats>,
     next_sequence: u64,
     events_since_sync: u64,
+    /// Lightweight dialogue participant map for wake signaling on responses.
+    /// Maps dialogue_id → (initiator, responder) so DialogueRespond can wake the other party.
+    dialogue_participants: HashMap<u64, (String, String)>,
 }
 
 impl Sequencer {
@@ -203,6 +206,7 @@ impl Sequencer {
             stats: Arc::new(SequencerStats::default()),
             next_sequence,
             events_since_sync: 0,
+            dialogue_participants: HashMap::new(),
         })
     }
 
@@ -235,16 +239,20 @@ impl Sequencer {
         self.run_event_driven(stop_signal)
     }
 
-    /// Run with cross-process event-driven wake (NO POLLING!)
+    /// Run with pure event-driven cross-process wake. No polling. No timeouts.
     ///
-    /// Uses OS-native Named Events (Windows) or eventfd (Linux) for instant wake
-    /// when any AI writes to their outbox. Zero CPU while waiting.
+    /// Uses OS-native Named Events (Windows) or POSIX named semaphores (Linux)
+    /// for instant wake when any AI writes to their outbox. Zero CPU while waiting.
     ///
     /// Architecture:
-    /// - Sequencer waits on SequencerWakeReceiver (blocks, zero CPU)
-    /// - OutboxProducer.write_event() signals SequencerWakeSignaler
-    /// - Sequencer wakes instantly (~1μs latency on Windows, ~500ns on Linux)
-    /// - Still scans for new outboxes periodically (when woken)
+    /// - Sequencer blocks on SequencerWakeReceiver::wait() (zero CPU, infinite)
+    /// - OutboxProducer.write_event() calls signal_sequencer() after every write
+    /// - Sequencer wakes instantly (~1μs on Windows, ~200ns on Linux)
+    /// - On wake: refresh outboxes, process all events, block again
+    /// - On SIGINT: shutdown handler signals semaphore, daemon wakes and exits
+    ///
+    /// There is NO timeout. If the signal is broken, the daemon blocks forever —
+    /// that's intentional. A broken signal is a bug to fix, not a condition to mask.
     ///
     /// # Errors
     /// Returns error if cross-process wake receiver cannot be created.
@@ -254,7 +262,7 @@ impl Sequencer {
         stop_signal: Arc<AtomicBool>,
     ) -> SequencerResult<()> {
         // Create the cross-process wake receiver - FAIL LOUDLY if this doesn't work
-        eprintln!("[SEQUENCER] Creating SequencerWakeReceiver (Local\\TeamEngram_SequencerWake)...");
+        eprintln!("[SEQUENCER] Creating SequencerWakeReceiver...");
         let wake_receiver = SequencerWakeReceiver::new()
             .map_err(|e| SequencerError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
@@ -264,28 +272,59 @@ impl Sequencer {
 
         // Initial outbox scan
         self.refresh_outboxes()?;
-        eprintln!("[SEQUENCER] Found {} outboxes", self.outboxes.len());
+        let outbox_count = self.outboxes.len();
 
-        eprintln!("[SEQUENCER] Running (event-driven, ZERO POLLING - blocks until signal)");
+        // Report pending events per outbox at startup
+        let mut total_pending: u64 = 0;
+        for (ai_id, consumer) in &self.outboxes {
+            let pending = consumer.pending_bytes();
+            if pending > 0 {
+                eprintln!("[SEQUENCER] Outbox {}: {} bytes pending", ai_id, pending);
+                total_pending += pending as u64;
+            }
+        }
+        eprintln!("[SEQUENCER] Found {} outboxes, {} bytes total pending", outbox_count, total_pending);
+
+        // Drain ALL pending events before entering wait loop.
+        // This ensures events written while daemon was offline are processed immediately.
+        let mut initial_total = 0usize;
+        loop {
+            let batch = self.process_batch()?;
+            initial_total += batch;
+            if batch == 0 { break; }
+        }
+        if initial_total > 0 {
+            self.event_log.sync()?;
+            eprintln!("[SEQUENCER] Initial drain: processed {} events, synced to disk", initial_total);
+        }
+
+        eprintln!("[SEQUENCER] Running (pure event-driven, no polling, no timeouts)");
+        eprintln!("[SEQUENCER] Next sequence: {}", self.next_sequence);
 
         while !stop_signal.load(Ordering::Acquire) {
-            // Always refresh outboxes on wake (catches new AIs)
+            // Refresh outboxes on every wake (catches new AIs registering)
             self.refresh_outboxes()?;
 
-            // Process all available events
-            eprintln!("[SEQUENCER] Processing batch...");
+            // Process ALL available events across all outboxes
             let events_processed = self.process_batch()?;
-            eprintln!("[SEQUENCER] Processed {} events", events_processed);
             self.stats.active_outboxes.store(self.outboxes.len() as u64, Ordering::Relaxed);
 
-            // If no events, BLOCK until signal from outbox writers
-            // NO TIMEOUT. NO POLLING. Pure event-driven.
-            if events_processed == 0 {
-                eprintln!("[SEQUENCER] No events, blocking on wake_receiver.wait()...");
-                wake_receiver.wait(); // Blocks indefinitely until signaled
-                eprintln!("[SEQUENCER] Woke up from wait!");
+            if events_processed > 0 {
+                let total = self.stats.events_processed.load(Ordering::Relaxed);
+                eprintln!(
+                    "[SEQUENCER] Processed {} events (seq {}, total {})",
+                    events_processed, self.next_sequence - 1, total
+                );
+                // Events found — loop immediately to drain any more.
+                // Don't block until all outboxes are empty.
+                continue;
             }
-            // If events were processed, immediately loop to check for more
+
+            // No events available. Block until signaled.
+            // sem_wait (Linux) / WaitForSingleObject INFINITE (Windows).
+            // Wakes on: outbox write (signal_sequencer), or shutdown (signal_sequencer from ctrlc handler).
+            // If signal is broken, this blocks forever. That's correct — fix the signal, don't mask it.
+            wake_receiver.wait();
         }
 
         self.event_log.sync()?;
@@ -412,7 +451,9 @@ impl Sequencer {
             self.stats.last_event_time.store(crate::store::now_millis(), Ordering::Relaxed);
 
             // Signal wake for affected AIs
-            self.signal_wake_if_needed(&header, payload_bytes);
+            // Pass fields explicitly to avoid borrow conflict with self.outboxes
+            let wake_enabled = self.wake_coordinator.is_some();
+            Self::signal_wake_if_needed(wake_enabled, &mut self.dialogue_participants, &header, payload_bytes);
 
             processed += 1;
             self.events_since_sync += 1;
@@ -433,61 +474,65 @@ impl Sequencer {
     }
 
     /// Signal wake events for affected AIs
-    fn signal_wake_if_needed(&self, header: &EventHeader, payload_bytes: &[u8]) {
-        // Skip if wake is disabled
-        if self.wake_coordinator.is_none() {
+    fn signal_wake_if_needed(
+        wake_enabled: bool,
+        dialogue_participants: &mut HashMap<u64, (String, String)>,
+        header: &EventHeader,
+        payload_bytes: &[u8],
+    ) {
+        if !wake_enabled {
             return;
         }
 
         let source_ai = header.source_ai_str();
 
-        // Parse the payload to extract target information
         let payload = match crate::event::EventPayload::from_bytes(payload_bytes) {
             Some(p) => p,
-            None => return, // Can't parse, skip wake
+            None => return,
         };
 
         match payload {
             crate::event::EventPayload::DirectMessage(dm) => {
-                // Wake the recipient immediately
                 Self::signal_ai(&dm.to_ai, WakeReason::DirectMessage, source_ai, &dm.content);
             }
             crate::event::EventPayload::Broadcast(bc) => {
-                // Check for @mentions
                 for ai_id in Self::extract_mentions(&bc.content) {
                     if ai_id != source_ai {
                         Self::signal_ai(&ai_id, WakeReason::Mention, source_ai, &bc.content);
                     }
                 }
-                // Check for urgent keywords
                 if Self::contains_urgent(&bc.content) {
-                    // Urgent broadcasts wake everyone mentioned
                     // Could broadcast-wake all AIs, but that's noisy
                 }
             }
             crate::event::EventPayload::DialogueStart(ds) => {
-                // Wake the responder when dialogue starts
+                // Track participants so DialogueRespond can wake the other party
+                let dialogue_id = header.sequence;
+                dialogue_participants.insert(
+                    dialogue_id,
+                    (source_ai.to_string(), ds.responder.clone()),
+                );
                 Self::signal_ai(&ds.responder, WakeReason::DialogueTurn, source_ai, &ds.topic);
             }
             crate::event::EventPayload::DialogueRespond(dr) => {
-                // For dialogue responses, we need to know the other party
-                // The source_ai responded, so we need to wake whoever ELSE is in the dialogue
-                // Unfortunately, without dialogue state, we can't determine this here
-                // The best we can do is include dialogue_id in content for now
-                // Future: Store minimal dialogue metadata in sequencer
-                let content = format!("Dialogue #{} response", dr.dialogue_id);
-                // Can't wake without knowing target - this requires dialogue state lookup
-                // Leaving as no-op for now; dialogue wake handled at client level
-                let _ = content;
+                // Look up participants and wake the OTHER party
+                if let Some((initiator, responder)) = dialogue_participants.get(&dr.dialogue_id) {
+                    let target = if source_ai == initiator {
+                        responder.clone()
+                    } else {
+                        initiator.clone()
+                    };
+                    Self::signal_ai(&target, WakeReason::DialogueTurn, source_ai, &dr.content);
+                }
+            }
+            crate::event::EventPayload::DialogueEnd(de) => {
+                // Clean up dialogue tracking
+                dialogue_participants.remove(&de.dialogue_id);
             }
             crate::event::EventPayload::VoteCreate(vc) => {
-                // Votes could wake all AIs, but that's very noisy
-                // For now, rely on broadcast @mentions for vote notification
                 let _ = vc;
             }
             crate::event::EventPayload::RoomMessage(rm) => {
-                // Room messages could wake room members
-                // But we don't track room membership in sequencer
                 let _ = rm;
             }
             _ => {}

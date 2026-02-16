@@ -63,6 +63,12 @@ struct PostToolHookState {
     dm_ids: Vec<u64>,
     broadcast_ids: Vec<u64>,
     last_minute: Option<(i32, u32, u32, u32, u32)>, // year, month, day, hour, minute
+    #[serde(default)]
+    last_project_inject_ts: Option<u64>, // unix timestamp (seconds) of last project context injection
+    #[serde(default)]
+    last_project_id: Option<u64>,        // project ID of last injected project
+    #[serde(default)]
+    last_feature_id: Option<u64>,        // feature ID of last injected feature
 }
 
 impl PostToolHookState {
@@ -116,6 +122,43 @@ impl PostToolHookState {
         }
     }
 
+    /// Check if project context should be injected.
+    /// Returns (should_inject_project, should_inject_feature).
+    /// Project: re-inject every 30 minutes OR if project changed.
+    /// Feature: re-inject if feature changed (different sub-directory).
+    fn should_inject_project(&mut self, project_id: u64, feature_id: Option<u64>) -> (bool, bool) {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        const PROJECT_COOLDOWN_SECS: u64 = 30 * 60; // 30 minutes
+
+        let project_changed = self.last_project_id != Some(project_id);
+        let project_expired = match self.last_project_inject_ts {
+            Some(ts) => now_secs.saturating_sub(ts) >= PROJECT_COOLDOWN_SECS,
+            None => true, // Never injected
+        };
+        let inject_project = project_changed || project_expired;
+
+        let feature_changed = match feature_id {
+            Some(fid) => self.last_feature_id != Some(fid),
+            None => false, // No feature to inject
+        };
+
+        if inject_project {
+            self.last_project_inject_ts = Some(now_secs);
+            self.last_project_id = Some(project_id);
+        }
+        if let Some(fid) = feature_id {
+            if feature_changed || inject_project {
+                self.last_feature_id = Some(fid);
+            }
+        }
+
+        (inject_project, feature_changed || (inject_project && feature_id.is_some()))
+    }
+
     fn should_inject_time(&mut self) -> bool {
         let now = Utc::now();
         let current = (
@@ -135,7 +178,8 @@ impl PostToolHookState {
 }
 
 /// Tools that should be skipped (no logging, no injection)
-const SKIP_TOOLS: &[&str] = &["Glob", "Grep", "TodoWrite"];
+const SKIP_TOOLS: &[&str] = &["TodoWrite"];
+
 
 /// File action mapping
 fn file_action_type(tool: &str) -> Option<&'static str> {
@@ -448,33 +492,7 @@ enum Commands {
         limit: usize,
     },
 
-    // ===== LOCKS =====
-
-    /// Acquire a resource lock
-    #[command(alias = "lock", alias = "acquire", alias = "grab-lock", alias = "get-lock", alias = "hold")]
-    LockAcquire {
-        /// Resource name
-        resource: String,
-        /// What you're working on
-        working_on: String,
-        /// Duration in minutes
-        #[arg(long, default_value = "30")]
-        duration: u32,
-    },
-
-    /// Release a lock
-    #[command(alias = "unlock", alias = "release-lock", alias = "free-lock", alias = "drop-lock", alias = "let-go")]
-    LockRelease {
-        /// Resource name
-        resource: String,
-    },
-
-    /// Check lock status
-    #[command(alias = "check-lock", alias = "lock-status", alias = "is-locked", alias = "who-locked", alias = "lock-info")]
-    LockCheck {
-        /// Resource name
-        resource: String,
-    },
+    // Locks removed — deprecated (Feb 2026, QD directive). Use file claims instead.
 
     // ===== ROOMS =====
 
@@ -596,30 +614,9 @@ enum Commands {
     #[command(alias = "count", alias = "online-count", alias = "team-size", alias = "how-many", alias = "headcount")]
     PresenceCount,
 
-    /// Sense activity at a location (stigmergy - indirect coordination)
-    #[command(alias = "sense", alias = "activity", alias = "pheromones", alias = "signals", alias = "trail")]
-    StigmergySense {
-        /// Location to sense (file path, module name, etc.)
-        location: String,
-        /// Optional pheromone type filter
-        pheromone_type: Option<String>,
-    },
+    // Stigmergy (StigmergySense, StigmergyDeposit) removed — deprecated (Feb 2026, QD directive)
 
-    /// Deposit a pheromone at a location (stigmergy - indirect coordination)
-    #[command(alias = "deposit", alias = "leave-signal", alias = "mark")]
-    StigmergyDeposit {
-        /// Location (file path, module name, logical location)
-        location: String,
-        /// Pheromone type (warning, progress, discovery, help-needed, etc.)
-        pheromone_type: String,
-        /// Content/message
-        content: String,
-        /// Intensity 1-10 (default 5)
-        #[arg(short, long, default_value = "5")]
-        intensity: u8,
-    },
-
-    /// Get awareness data for hooks (DMs, broadcasts, votes, dialogues, locks)
+    /// Get awareness data for hooks (DMs, broadcasts, votes, dialogues, file claims)
     #[command(alias = "aware", alias = "inbox", alias = "notifications", alias = "alerts", alias = "check-all")]
     Awareness {
         /// Limit per category
@@ -671,11 +668,11 @@ enum Commands {
     // ===== PROJECTS =====
 
     /// List all projects
-    #[command(alias = "projects", alias = "list-proj", alias = "all-projects")]
+    #[command(alias = "projects", alias = "list-proj", alias = "all-projects", alias = "show-projects", alias = "my-projects")]
     ListProjects,
 
     /// Create a new project
-    #[command(alias = "new-project", alias = "add-project", alias = "create-proj")]
+    #[command(alias = "new-project", alias = "add-project", alias = "create-proj", alias = "init-project", alias = "project-new")]
     ProjectCreate {
         /// Project name
         name: String,
@@ -687,14 +684,14 @@ enum Commands {
     },
 
     /// Get project details
-    #[command(alias = "get-proj", alias = "show-project", alias = "project-info")]
+    #[command(alias = "get-proj", alias = "show-project", alias = "project-info", alias = "project-details", alias = "view-project")]
     ProjectGet {
         /// Project ID
         project_id: u64,
     },
 
     /// Delete a project (soft delete, recoverable for 24h)
-    #[command(alias = "del-project", alias = "rm-project", alias = "remove-project")]
+    #[command(alias = "del-project", alias = "rm-project", alias = "remove-project", alias = "trash-project", alias = "archive-project")]
     ProjectDelete {
         /// Project ID
         project_id: u64,
@@ -708,7 +705,7 @@ enum Commands {
     },
 
     /// List tasks in a project
-    #[command(alias = "proj-tasks", alias = "project-task-list")]
+    #[command(alias = "proj-tasks", alias = "project-task-list", alias = "tasks-in-project", alias = "project-work")]
     ProjectTasks {
         /// Project ID
         project_id: u64,
@@ -726,8 +723,8 @@ enum Commands {
         priority: i32,
     },
 
-    /// Resolve a file path to its project
-    #[command(alias = "resolve", alias = "which-project", alias = "file-project")]
+    /// Resolve a file path to its project and feature context
+    #[command(alias = "resolve", alias = "which-project", alias = "file-project", alias = "where-am-i", alias = "context")]
     ProjectResolve {
         /// File path to resolve
         path: String,
@@ -736,14 +733,14 @@ enum Commands {
     // ===== FEATURES =====
 
     /// List features in a project
-    #[command(alias = "features", alias = "list-feat", alias = "project-features")]
+    #[command(alias = "features", alias = "list-feat", alias = "project-features", alias = "show-features", alias = "all-features")]
     ListFeatures {
         /// Project ID
         project_id: u64,
     },
 
-    /// Create a new feature
-    #[command(alias = "new-feature", alias = "add-feature", alias = "create-feat")]
+    /// Create a new feature within a project
+    #[command(alias = "new-feature", alias = "add-feature", alias = "create-feat", alias = "feat-create", alias = "feature-new")]
     FeatureCreate {
         /// Project ID
         project_id: u64,
@@ -757,14 +754,14 @@ enum Commands {
     },
 
     /// Get feature details
-    #[command(alias = "get-feat", alias = "show-feature", alias = "feature-info")]
+    #[command(alias = "get-feat", alias = "show-feature", alias = "feature-info", alias = "feature-details", alias = "view-feature")]
     FeatureGet {
         /// Feature ID
         feature_id: u64,
     },
 
     /// Delete a feature (soft delete, recoverable for 24h)
-    #[command(alias = "del-feature", alias = "rm-feature", alias = "remove-feature")]
+    #[command(alias = "del-feature", alias = "rm-feature", alias = "remove-feature", alias = "trash-feature", alias = "archive-feature")]
     FeatureDelete {
         /// Feature ID
         feature_id: u64,
@@ -775,6 +772,35 @@ enum Commands {
     FeatureRestore {
         /// Feature ID
         feature_id: u64,
+    },
+
+    /// Update a feature's name, overview, or directory
+    #[command(alias = "edit-feature", alias = "modify-feature", alias = "update-feat", alias = "feat-update", alias = "change-feature")]
+    FeatureUpdate {
+        /// Feature ID
+        feature_id: u64,
+        /// New overview text
+        #[arg(long)]
+        overview: Option<String>,
+        /// New name
+        #[arg(long)]
+        name: Option<String>,
+        /// New directory path
+        #[arg(long)]
+        directory: Option<String>,
+    },
+
+    /// Update a project's name or goal
+    #[command(alias = "edit-project", alias = "modify-project", alias = "update-proj", alias = "proj-update", alias = "change-project")]
+    ProjectUpdate {
+        /// Project ID
+        project_id: u64,
+        /// New goal/description
+        #[arg(long)]
+        goal: Option<String>,
+        /// New name
+        #[arg(long)]
+        name: Option<String>,
     },
 
     // ===== LEARNINGS (Team Insights / Muscle Memory) =====
@@ -1390,34 +1416,7 @@ async fn main() -> Result<()> {
         }
 
 
-        Commands::LockAcquire { resource, working_on, duration } => {
-            if let Some(id) = client.lock_acquire(&resource, &working_on, duration).await? {
-                println!("lock_acquired|{}|{}", id, resource);
-            } else {
-                if let Some(lock) = client.lock_check(&resource).await? {
-                    println!("lock_held_by|{}|{}|{}", lock.holder, lock.working_on, resource);
-                } else {
-                    println!("error|lock_failed|{}", resource);
-                }
-            }
-        }
-
-        Commands::LockRelease { resource } => {
-            let success = client.lock_release(&resource).await?;
-            if success {
-                println!("lock_released|{}", resource);
-            } else {
-                println!("error|not_lock_holder|{}", resource);
-            }
-        }
-
-        Commands::LockCheck { resource } => {
-            if let Some(lock) = client.lock_check(&resource).await? {
-                println!("locked|{}|{}|{}", lock.holder, lock.working_on, resource);
-            } else {
-                println!("unlocked|{}", resource);
-            }
-        }
+        // Lock commands removed — deprecated (Feb 2026)
 
         // ===== ROOMS =====
 
@@ -1662,35 +1661,7 @@ async fn main() -> Result<()> {
             println!("Online:{}", presences.len());
         }
 
-        Commands::StigmergySense { location, pheromone_type } => {
-            // Sense activity at location - uses file_actions as pheromone data
-            let actions = client.get_recent_file_actions(50).await?;
-
-            // Filter by location (path contains location string)
-            let matching: Vec<_> = actions.iter()
-                .filter(|a| a.path.contains(&location))
-                .filter(|a| {
-                    if let Some(ref ptype) = pheromone_type {
-                        a.action.to_lowercase().contains(&ptype.to_lowercase())
-                    } else {
-                        true
-                    }
-                })
-                .collect();
-
-            println!("|STIGMERGY|{}|{}", location, matching.len());
-            for a in matching.iter().take(20) {
-                let id = a.id.unwrap_or(0);
-                println!("{}|{}|{}|{}", id, a.ai_id, a.action, a.path);
-            }
-            if matching.is_empty() {
-                println!("No activity sensed at this location");
-            }
-        }
-
-        Commands::StigmergyDeposit { .. } => {
-            anyhow::bail!("StigmergyDeposit requires V2 backend. Use --v2 true");
-        }
+        // Stigmergy commands removed — deprecated (Feb 2026)
 
         Commands::Awareness { limit } => {
             // Output format expected by PostToolUse hook - via IPC
@@ -1698,7 +1669,7 @@ async fn main() -> Result<()> {
             // bc|id|from|channel|content
             // vote|id|topic|cast|total
             // dialogue|id|topic (dialogues where it's your turn)
-            // lock|resource|owner|working_on
+            // claim|path|owner|reason
 
             // DMs for this AI
             let dms = client.get_direct_messages(limit).await?;
@@ -1867,6 +1838,14 @@ async fn main() -> Result<()> {
             } else {
                 println!("feature_restore_failed|{}", feature_id);
             }
+        }
+
+        // FeatureUpdate and ProjectUpdate are V2-only
+        Commands::FeatureUpdate { .. } |
+        Commands::ProjectUpdate { .. } => {
+            eprintln!("Error: Update commands require V2 backend");
+            eprintln!("Hint: V2 is on by default. If you see this, check your configuration.");
+            std::process::exit(1);
         }
 
         // Learning commands are V2-only (event-sourced)
@@ -2061,7 +2040,7 @@ fn refresh_bulletin_v2(v2: &mut V2Client, ai_id: &str) {
             bulletin.set_file_actions(&fa_data);
         }
 
-        // Locks: Get active file claims
+        // File claims (active)
         // V2 tuple: (path, ai_id, timestamp, duration)
         if let Ok(claims) = v2.get_claims() {
             let lock_data: Vec<_> = claims.iter()
@@ -2321,19 +2300,21 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
 
         Commands::TaskGet { id } => {
             if let Ok(task_id) = id.parse::<u64>() {
-                // Numeric - single task
-                let tasks = v2.get_tasks()
-                    .map_err(|e| anyhow::anyhow!("V2 get_tasks error: {}", e))?;
-                if let Some((tid, desc, creator, status, assignee)) = tasks.iter().find(|(tid, _, _, _, _)| *tid == task_id) {
-                    println!("|TASK|{}", tid);
-                    println!("Description:{}", desc);
-                    println!("Status:{}", status);
-                    println!("CreatedBy:{}", creator);
-                    if let Some(a) = assignee {
-                        println!("AssignedTo:{}", a);
+                // Numeric - single task (dual lookup: view seq + timestamp + outbox)
+                match v2.get_task(task_id)
+                    .map_err(|e| anyhow::anyhow!("V2 get_task error: {}", e))? {
+                    Some((tid, desc, priority, status, assignee)) => {
+                        println!("|TASK|{}", tid);
+                        println!("Description:{}", desc);
+                        println!("Status:{}", status);
+                        println!("Priority:{}", priority);
+                        if let Some(a) = assignee {
+                            println!("AssignedTo:{}", a);
+                        }
                     }
-                } else {
-                    println!("error|task_not_found|{}", task_id);
+                    None => {
+                        println!("error|task_not_found|{}", task_id);
+                    }
                 }
             } else {
                 // Non-numeric - batch name
@@ -2399,19 +2380,7 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
             }
         }
 
-        // ===== LOCKS =====
-
-        Commands::LockAcquire { resource, working_on, duration } => {
-            let seq = v2.acquire_lock(&resource, duration, &working_on)
-                .map_err(|e| anyhow::anyhow!("V2 lock acquire error: {}", e))?;
-            println!("lock_acquired|{}|{}", seq, resource);
-        }
-
-        Commands::LockRelease { resource } => {
-            let seq = v2.release_lock(&resource)
-                .map_err(|e| anyhow::anyhow!("V2 lock release error: {}", e))?;
-            println!("lock_released|{}|{}", seq, resource);
-        }
+        // Locks removed — enum variants + handlers deleted (Feb 2026)
 
         // ===== ROOMS =====
 
@@ -2448,63 +2417,14 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                 .map_err(|e| anyhow::anyhow!("V2 file action error: {}", e))?;
             println!("logged|{}|{}|{}", seq, action, path);
 
-            // Auto-deposit stigmergy pheromone for passive coordination
-            // Maps file actions to pheromone types (matches Python stigmergy.py pattern)
-            let pheromone_type = match action.to_lowercase().as_str() {
-                "read" => "interest",
-                "modified" | "created" | "write" => "working",
-                "deleted" => "warning",
-                "exec" => "interest",
-                _ => "interest",
-            };
-            let pheromone_content = format!("{} {}", action, ai_id);
-            let _ = v2.deposit_pheromone(&path, pheromone_type, &pheromone_content, 1);
+            // Stigmergy pheromone auto-deposit removed (Feb 2026, QD directive)
+            // File actions still logged above for team activity visibility
 
             // Refresh bulletin for passive injection
             refresh_bulletin_v2(&mut v2, ai_id);
         }
 
-        // ===== STIGMERGY (V2) =====
-        Commands::StigmergySense { location, pheromone_type } => {
-            // First: Get explicit pheromone deposits
-            let pheromones = v2.get_pheromones(Some(&location), pheromone_type.as_deref(), 20)
-                .map_err(|e| anyhow::anyhow!("V2 pheromone error: {}", e))?;
-
-            // Second: Get implicit file actions
-            let actions = v2.get_file_actions(50)
-                .map_err(|e| anyhow::anyhow!("V2 file actions error: {}", e))?;
-
-            // Filter file actions by location
-            let matching_actions: Vec<_> = actions.iter()
-                .filter(|(_, _, path, _)| path.contains(&location))
-                .filter(|(_, action, _, _)| {
-                    if let Some(ref ptype) = pheromone_type {
-                        action.to_lowercase().contains(&ptype.to_lowercase())
-                    } else {
-                        true
-                    }
-                })
-                .collect();
-
-            let total = pheromones.len() + matching_actions.len();
-            println!("|STIGMERGY|{}|{}", location, total);
-
-            // Print explicit pheromones first (with decayed intensity)
-            for (ai_id, loc, ptype, content, raw_intensity, current_intensity) in &pheromones {
-                // Show both raw and current intensity: "P|sage|working|5|0.73|file.rs|content"
-                println!("P|{}|{}|{}|{:.2}|{}|{}", ai_id, ptype, raw_intensity, current_intensity, loc, content);
-            }
-
-            // Then implicit file actions
-            for (ai_id, action, path, _ts) in matching_actions.iter().take(20) {
-                println!("F|{}|{}|{}", ai_id, action, path);
-            }
-
-            if total == 0 {
-                println!("No activity sensed at this location");
-            }
-        }
-Commands::StigmergyDeposit { location, pheromone_type, content, intensity } => {            let seq = v2.deposit_pheromone(&location, &pheromone_type, &content, intensity)                .map_err(|e| anyhow::anyhow!("V2 deposit pheromone error: {}", e))?;            println!("pheromone_deposited|{}|{}|{}|{}", seq, location, pheromone_type, intensity);        }
+        // Stigmergy removed — enum variants + handlers deleted (Feb 2026)
 
         // ===== STATS =====
 
@@ -2515,7 +2435,6 @@ Commands::StigmergyDeposit { location, pheromone_type, content, intensity } => {
             println!("UnreadDMs:{}", v2.unread_dm_count());
             println!("ActiveDialogues:{}", v2.active_dialogue_count());
             println!("PendingVotes:{}", v2.pending_vote_count());
-            println!("MyLocks:{}", v2.my_lock_count());
             println!("MyTasks:{}", v2.my_task_count());
             println!();
             println!("Backend: Event Sourcing");
@@ -2654,18 +2573,7 @@ Commands::StigmergyDeposit { location, pheromone_type, content, intensity } => {
             }
         }
 
-        // ===== LOCK CHECK (V2) =====
-        Commands::LockCheck { resource } => {
-            match v2.check_lock(&resource)
-                .map_err(|e| anyhow::anyhow!("V2 check_lock error: {}", e))? {
-                Some((holder, reason)) => {
-                    println!("locked|{}|{}|{}", resource, holder, reason);
-                }
-                None => {
-                    println!("free|{}", resource);
-                }
-            }
-        }
+        // Lock check removed (Feb 2026). Use: teambook check-file <path>
 
         // ===== VOTE RESULTS (V2) =====
         Commands::VoteResults { vote_id } => {
@@ -2794,10 +2702,13 @@ Commands::StigmergyDeposit { location, pheromone_type, content, intensity } => {
 
         // ===== STANDBY (V2) =====
         Commands::Standby { timeout } => {
-            // CRITICAL: Check for pre-existing unread items BEFORE entering standby!
-            // This prevents deadlock when two AIs send DMs to each other and both enter standby.
+            // SNAPSHOT-BASED STANDBY: Report stale pending work but ALWAYS enter standby.
+            // After waking, only report genuinely NEW items (not in the pre-sleep snapshot).
+            //
+            // Old behavior: if ANY pending work existed (including week-old dialogue invites),
+            // standby returned immediately - making it impossible to ever actually sleep.
 
-            // Gather ALL pending items
+            // Gather current pending items for snapshot
             let unread_dms = v2.get_unread_dms();
             let ack_dialogues = get_acknowledged_dialogues(ai_id);
 
@@ -2816,14 +2727,22 @@ Commands::StigmergyDeposit { location, pheromone_type, content, intensity } => {
             let dm_count = unread_dms.len();
             let dialogue_count = pending_invites.len() + pending_turns.len();
 
-            // If there's pending work, tell the AI exactly what's waiting
+            // Snapshot: record IDs of everything currently pending.
+            // After waking, only items NOT in this snapshot are "new".
+            let snapshot_dm_ids: std::collections::HashSet<u64> =
+                unread_dms.iter().map(|dm| dm.id).collect();
+            let snapshot_dialogue_ids: std::collections::HashSet<u64> =
+                pending_invites.iter().map(|(id, ..)| *id)
+                    .chain(pending_turns.iter().map(|(id, ..)| *id))
+                    .collect();
+
+            // Report existing pending work (informational - does NOT block standby entry)
             if dm_count > 0 || dialogue_count > 0 {
                 println!("|PENDING WORK|");
                 if dm_count > 0 {
                     println!("Unread DMs: {}", dm_count);
                     for dm in &unread_dms {
                         println!("  {}|{}", dm.from_ai, dm.content);
-                        // Event-sourced: persists read state across CLI invocations
                         let _ = v2.emit_dm_read(dm.id);
                     }
                 }
@@ -2831,6 +2750,7 @@ Commands::StigmergyDeposit { location, pheromone_type, content, intensity } => {
                     println!("Dialogue Invites: {}", pending_invites.len());
                     for (id, initiator, _, topic, _, _) in &pending_invites {
                         println!("  #{}|{}|{}", id, initiator, topic);
+                        acknowledge_dialogue(ai_id, *id);
                     }
                 }
                 if !pending_turns.is_empty() {
@@ -2838,18 +2758,23 @@ Commands::StigmergyDeposit { location, pheromone_type, content, intensity } => {
                     for (id, initiator, responder, topic, _, _) in &pending_turns {
                         let other = if initiator == ai_id { responder } else { initiator };
                         println!("  #{}|{}|{}", id, other, topic);
+                        acknowledge_dialogue(ai_id, *id);
                     }
                 }
-                return Ok(());
+                // NOTE: No return here! We report stale work then STILL enter standby.
             }
 
-            // No pending items - safe to enter standby
+            // Enter standby
             println!("standby|{}|timeout={}s", ai_id, timeout);
             let _ = v2.update_presence("standby", None);
 
-            // Create wake coordinator for this AI - blocks until signaled
             let coordinator = WakeCoordinator::new(ai_id)
                 .map_err(|e| anyhow::anyhow!("Failed to create wake coordinator: {}", e))?;
+
+            // Drain any stale wake signals that fired while we weren't sleeping.
+            // Without this, events processed by the sequencer before we entered standby
+            // would cause an immediate spurious wake (the OS event stays signaled).
+            while coordinator.wait_timeout(std::time::Duration::ZERO).is_some() {}
 
             let timeout_duration = if timeout > 0 {
                 std::time::Duration::from_secs(timeout)
@@ -2858,7 +2783,6 @@ Commands::StigmergyDeposit { location, pheromone_type, content, intensity } => {
             };
 
             // Block until wake event or timeout - NO POLLING!
-            // We ignore the file-based metadata (it's unreliable) and query the view directly.
             let wake_result = coordinator.wait_timeout(timeout_duration);
 
             // Update presence immediately
@@ -2867,50 +2791,59 @@ Commands::StigmergyDeposit { location, pheromone_type, content, intensity } => {
             if wake_result.is_none() {
                 println!("standby_timeout|{}", ai_id);
             } else {
-                // Query the VIEW directly for what woke us up - this is the source of truth
-                let unread_dms = v2.get_unread_dms();
+                // Sync the view to pick up events that arrived while sleeping
+                let _ = v2.sync();
+
+                // Only report NEW items (not in the pre-standby snapshot)
+                let new_dms: Vec<_> = v2.get_unread_dms()
+                    .into_iter()
+                    .filter(|dm| !snapshot_dm_ids.contains(&dm.id))
+                    .collect();
+
                 let ack_dialogues = get_acknowledged_dialogues(ai_id);
 
-                let pending_invites: Vec<_> = v2.get_dialogue_invites()
+                let new_invites: Vec<_> = v2.get_dialogue_invites()
                     .unwrap_or_default()
                     .into_iter()
-                    .filter(|(id, _, _, _, _, _)| !ack_dialogues.contains(id))
+                    .filter(|(id, _, _, _, _, _)| {
+                        !ack_dialogues.contains(id) && !snapshot_dialogue_ids.contains(id)
+                    })
                     .collect();
 
-                let pending_turns: Vec<_> = v2.get_dialogue_my_turn()
+                let new_turns: Vec<_> = v2.get_dialogue_my_turn()
                     .unwrap_or_default()
                     .into_iter()
-                    .filter(|(id, _, _, _, _, _)| !ack_dialogues.contains(id))
+                    .filter(|(id, _, _, _, _, _)| {
+                        !ack_dialogues.contains(id) && !snapshot_dialogue_ids.contains(id)
+                    })
                     .collect();
 
-                let dm_count = unread_dms.len();
-                let dialogue_count = pending_invites.len() + pending_turns.len();
+                let new_dm_count = new_dms.len();
+                let new_dialogue_count = new_invites.len() + new_turns.len();
 
-                if dm_count > 0 || dialogue_count > 0 {
-                    println!("|WOKE UP - PENDING WORK|");
-                    if dm_count > 0 {
-                        println!("Unread DMs: {}", dm_count);
-                        for dm in &unread_dms {
+                if new_dm_count > 0 || new_dialogue_count > 0 {
+                    println!("|WOKE UP - NEW WORK|");
+                    if new_dm_count > 0 {
+                        println!("Unread DMs: {}", new_dm_count);
+                        for dm in &new_dms {
                             println!("  {}|{}", dm.from_ai, dm.content);
-                            // Event-sourced: persists read state across CLI invocations
                             let _ = v2.emit_dm_read(dm.id);
                         }
                     }
-                    if !pending_invites.is_empty() {
-                        println!("Dialogue Invites: {}", pending_invites.len());
-                        for (id, initiator, _, topic, _, _) in &pending_invites {
+                    if !new_invites.is_empty() {
+                        println!("Dialogue Invites: {}", new_invites.len());
+                        for (id, initiator, _, topic, _, _) in &new_invites {
                             println!("  #{}|{}|{}", id, initiator, topic);
                         }
                     }
-                    if !pending_turns.is_empty() {
-                        println!("Your Turn in Dialogues: {}", pending_turns.len());
-                        for (id, initiator, responder, topic, _, _) in &pending_turns {
+                    if !new_turns.is_empty() {
+                        println!("Your Turn in Dialogues: {}", new_turns.len());
+                        for (id, initiator, responder, topic, _, _) in &new_turns {
                             let other = if initiator == ai_id { responder } else { initiator };
                             println!("  #{}|{}|{}", id, other, topic);
                         }
                     }
                 } else {
-                    // Woke up but can't determine why - maybe @mention in broadcast
                     println!("|WOKE UP|");
                     println!("Check broadcasts for @mentions or recent activity");
                 }
@@ -3017,6 +2950,47 @@ Commands::StigmergyDeposit { location, pheromone_type, content, intensity } => {
             println!("project_restored|{}|{}", seq, project_id);
         }
 
+        Commands::ProjectResolve { path } => {
+            match v2.resolve_project_for_file(&path)
+                .map_err(|e| anyhow::anyhow!("Resolve project error: {}", e))? {
+                Some((proj_id, proj_name, proj_goal, proj_dir, feature)) => {
+                    println!("|PROJECT_CONTEXT|");
+                    println!("Project:{}|{}", proj_id, proj_name);
+                    println!("Goal:{}", proj_goal);
+                    println!("Directory:{}", proj_dir);
+                    if let Some((feat_id, feat_name, feat_overview, feat_dir)) = feature {
+                        println!("Feature:{}|{}", feat_id, feat_name);
+                        println!("FeatureOverview:{}", feat_overview);
+                        println!("FeatureDirectory:{}", feat_dir);
+                    }
+                }
+                None => {
+                    println!("no_project|{}", path);
+                }
+            }
+        }
+
+        Commands::ProjectTasks { project_id } => {
+            let tasks = v2.get_tasks()
+                .map_err(|e| anyhow::anyhow!("Get tasks error: {}", e))?;
+            let project_tag = format!("project:{}", project_id);
+            let matching: Vec<_> = tasks.iter()
+                .filter(|(_, desc, _, _, _)| desc.contains(&project_tag))
+                .collect();
+            println!("|PROJECT_TASKS|{}|{}", project_id, matching.len());
+            for (id, desc, priority, status, assignee) in &matching {
+                let a = assignee.as_deref().unwrap_or("unassigned");
+                println!("{}|{}|{}|{}|{}", id, priority, status, a, desc);
+            }
+        }
+
+        Commands::ProjectAddTask { project_id, title, priority } => {
+            let tagged_desc = format!("{} [project:{}]", title, project_id);
+            let seq = v2.add_task(&tagged_desc, priority as u32, &format!("project:{}", project_id))
+                .map_err(|e| anyhow::anyhow!("Add task error: {}", e))?;
+            println!("task_added|{}|project:{}", seq, project_id);
+        }
+
         // ===== FEATURES =====
 
         Commands::ListFeatures { project_id } => {
@@ -3059,6 +3033,27 @@ Commands::StigmergyDeposit { location, pheromone_type, content, intensity } => {
             let seq = v2.restore_feature(feature_id as u64)
                 .map_err(|e| anyhow::anyhow!("Restore feature error: {}", e))?;
             println!("feature_restored|{}|{}", seq, feature_id);
+        }
+
+        Commands::FeatureUpdate { feature_id, overview, name, directory } => {
+            let seq = v2.update_feature(
+                feature_id as u64,
+                name.as_deref(),
+                overview.as_deref(),
+                directory.as_deref(),
+            ).map_err(|e| anyhow::anyhow!("Update feature error: {}", e))?;
+            println!("feature_updated|{}|{}", seq, feature_id);
+        }
+
+        Commands::ProjectUpdate { project_id, goal, name: _name } => {
+            // V2 update_project supports goal + status, not name
+            // If name change needed, would require new event type
+            let seq = v2.update_project(
+                project_id as u64,
+                goal.as_deref(),
+                None, // status unchanged
+            ).map_err(|e| anyhow::anyhow!("Update project error: {}", e))?;
+            println!("project_updated|{}|{}", seq, project_id);
         }
 
         // ===== LEARNINGS (V2) =====
@@ -3246,6 +3241,21 @@ Commands::StigmergyDeposit { location, pheromone_type, content, intensity } => {
                             format!("running {}", cmd)
                         })
                 }
+                "Grep" => {
+                    hook_input.tool_input.as_ref()
+                        .and_then(|i| i.get("pattern"))
+                        .and_then(|v| v.as_str())
+                        .map(|p| {
+                            let short = if p.len() > 30 { &p[..30] } else { p };
+                            format!("searching for '{}'", short)
+                        })
+                }
+                "Glob" => {
+                    hook_input.tool_input.as_ref()
+                        .and_then(|i| i.get("pattern"))
+                        .and_then(|v| v.as_str())
+                        .map(|p| format!("finding {}", p))
+                }
                 _ => Some(format!("using {}", tool_name)),
             };
 
@@ -3253,14 +3263,18 @@ Commands::StigmergyDeposit { location, pheromone_type, content, intensity } => {
                 let _ = v2.update_presence("active", Some(&detail));
             }
 
+            // Build output parts (only NEW items)
+            let mut parts: Vec<String> = Vec::new();
+
+            // REAL-TIME: Every tool call gets full awareness check.
+            // Cost is ~3-5ms (mmap reads, not network). Deduplication prevents re-injection.
+            // This is the AI's lifeline to its team — no artificial latency.
+
             // Get awareness data using correct V2Client methods
             let dms = v2.recent_dms(5).unwrap_or_default();
             let broadcasts = v2.recent_broadcasts(3, Some("general")).unwrap_or_default();
             let votes = v2.get_votes().unwrap_or_default();
             let dialogues = v2.get_dialogue_my_turn().unwrap_or_default();
-
-            // Build output parts (only NEW items)
-            let mut parts: Vec<String> = Vec::new();
 
             // NEW DMs only (Message.id is i32)
             // NO TRUNCATION - full content always. Context starvation is the enemy.
@@ -3366,6 +3380,69 @@ Commands::StigmergyDeposit { location, pheromone_type, content, intensity } => {
 
                 if !other_claims.is_empty() {
                     parts.push(format!("Claims: {}", other_claims.join(", ")));
+                }
+            }
+            // PROJECT/FEATURE CONTEXT INJECTION
+            // Extract file path from tool input:
+            // - Read/Edit/Write: file_path
+            // - Grep: path (directory)
+            // - Glob: pattern (extract directory portion) or path
+            let resolved_path: Option<String> = hook_input.tool_input.as_ref().and_then(|input| {
+                // Try file_path first (Read/Edit/Write)
+                input.get("file_path")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    // Then try path (Grep directory, Glob directory)
+                    .or_else(|| input.get("path")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string()))
+                    // Then try pattern for Glob (extract directory portion before any wildcard)
+                    .or_else(|| {
+                        if tool_name == "Glob" {
+                            input.get("pattern")
+                                .and_then(|v| v.as_str())
+                                .and_then(|p| {
+                                    // Take everything before the first wildcard character
+                                    let dir_end = p.find('*')
+                                        .or_else(|| p.find('?'))
+                                        .or_else(|| p.find('['))
+                                        .unwrap_or(p.len());
+                                    let dir_part = &p[..dir_end];
+                                    // Trim to last path separator
+                                    dir_part.rfind('/').or_else(|| dir_part.rfind('\\'))
+                                        .map(|i| dir_part[..=i].to_string())
+                                })
+                        } else {
+                            None
+                        }
+                    })
+            });
+
+            if let Some(ref file_path) = resolved_path {
+                if let Ok(Some((proj_id, proj_name, proj_goal, _proj_dir, feature))) =
+                    v2.resolve_project_for_file(file_path)
+                {
+                    let feat_id = feature.as_ref().map(|(id, _, _, _)| *id);
+                    let (inject_project, inject_feature) =
+                        state.should_inject_project(proj_id, feat_id);
+
+                    if inject_project || inject_feature {
+                        let mut ctx = String::new();
+                        if inject_project {
+                            ctx.push_str(&format!("[Project: {} — {}]", proj_name, proj_goal));
+                        }
+                        if inject_feature {
+                            if let Some((_, feat_name, feat_overview, _)) = &feature {
+                                if !ctx.is_empty() {
+                                    ctx.push(' ');
+                                }
+                                ctx.push_str(&format!("[Feature: {} — {}]", feat_name, feat_overview));
+                            }
+                        }
+                        if !ctx.is_empty() {
+                            parts.push(ctx);
+                        }
+                    }
                 }
             }
 
@@ -3583,7 +3660,7 @@ Commands::StigmergyDeposit { location, pheromone_type, content, intensity } => {
             // bc|id|from|channel|content
             // vote|id|topic|cast|total
             // dialogue|id|topic (where it's your turn)
-            // lock|resource|owner|working_on
+            // claim|path|owner|reason
 
             // Recent DMs TO this AI
             if let Ok(dms) = v2.recent_dms(limit) {
@@ -3625,11 +3702,11 @@ Commands::StigmergyDeposit { location, pheromone_type, content, intensity } => {
                 }
             }
 
-            // Active locks held by others
+            // Active file claims held by others
             if let Ok(claims) = v2.get_claims() {
                 for (path, owner, reason, _) in claims {
                     if owner.to_lowercase() != ai_id.to_lowercase() {
-                        println!("lock|{}|{}|{}", path, owner, reason);
+                        println!("claim|{}|{}|{}", path, owner, reason);
                     }
                 }
             }

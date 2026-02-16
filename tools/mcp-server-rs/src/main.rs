@@ -117,6 +117,14 @@ pub struct DialogueRespondInput { pub dialogue_id: u64, pub response: String }
 pub struct DialogueEndInput { pub dialogue_id: u64, pub status: Option<String>, pub summary: Option<String> }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DialogueListInput {
+    /// Specific dialogue ID to read (shows full details + messages)
+    pub dialogue_id: Option<u64>,
+    /// Limit results when listing all dialogues
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct RoomCreateInput { pub name: String, pub topic: Option<String> }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -126,10 +134,10 @@ pub struct RoomIdInput { pub room_id: String }
 pub struct VoteCreateInput { pub topic: String, pub options: String, pub voters: i32 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct VoteCastInput { pub vote_id: i32, pub choice: String }
+pub struct VoteCastInput { pub vote_id: i64, pub choice: String }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct VoteIdInput { pub vote_id: i32 }
+pub struct VoteIdInput { pub vote_id: i64 }
 
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -142,24 +150,60 @@ pub struct PresenceInput { pub status: Option<String>, pub current_task: Option<
 pub struct AiIdInput { pub ai_id: String }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct ProjectCreateInput { pub name: String, pub goal: String }
+pub struct ProjectCreateInput { pub name: String, pub goal: String, pub root_directory: String }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct ProjectIdInput { pub project_id: i32 }
+pub struct ProjectIdInput { pub project_id: i64 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct ProjectTaskInput { pub project_id: i32, pub title: String, pub priority: Option<i32> }
+pub struct ProjectTaskInput { pub project_id: i64, pub title: String, pub priority: Option<i32> }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct CreateFeatureInput { pub project_id: i32, pub name: String, pub overview: String, pub directory: Option<String> }
+pub struct CreateFeatureInput { pub project_id: i64, pub name: String, pub overview: String, pub directory: Option<String> }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct GetFeatureInput { pub feature_id: i32 }
+pub struct GetFeatureInput { pub feature_id: i64 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct ListFeaturesInput { pub project_id: i32 }
+pub struct ListFeaturesInput { pub project_id: i64 }
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ProjectResolveInput {
+    /// File path to resolve to project/feature context
+    pub path: String,
+}
 
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ProjectListInput {
+    /// Optional project ID to get details (omit to list all)
+    pub project_id: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct FeatureListInput {
+    /// Project ID to list features for
+    pub project_id: i64,
+    /// Optional feature ID to get details
+    pub feature_id: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct FeatureUpdateInput {
+    pub feature_id: i64,
+    /// New overview text
+    pub overview: Option<String>,
+    /// New name
+    pub name: Option<String>,
+    /// New directory path
+    pub directory: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ProjectUpdateInput {
+    pub project_id: i64,
+    /// New goal/description
+    pub goal: Option<String>,
+}
 
 // ============== Server ==============
 // ============== Contextual Snapshot for Episodic Memory ==============
@@ -333,7 +377,7 @@ impl AiFoundationServer {
     // ============== Tasks (4 consolidated tools → 4 CLI commands) ==============
 
     #[tool(description = "Create a task or batch. Single: task(\"Fix bug\"). Batch: task(\"Auth\", \"1:Login,2:Logout\")")]
-    async fn task(&self, Parameters(input): Parameters<TaskCreateInput>) -> String {
+    async fn task_create(&self, Parameters(input): Parameters<TaskCreateInput>) -> String {
         if let Some(ref tasks) = input.tasks {
             // Batch mode: description is the batch name
             cli_wrapper::teambook(&["task-create", &input.description, "--tasks", tasks]).await
@@ -393,9 +437,14 @@ impl AiFoundationServer {
     }
 
     #[tool(description = "List dialogues with optional filters (all/invites/my-turn) or get specific dialogue by ID")]
-    async fn dialogues(&self, Parameters(input): Parameters<LimitInput>) -> String {
-        let limit = input.limit.unwrap_or(10).to_string();
-        cli_wrapper::teambook(&["dialogue-list", &limit]).await
+    async fn dialogue_list(&self, Parameters(input): Parameters<DialogueListInput>) -> String {
+        if let Some(dialogue_id) = input.dialogue_id {
+            let id = dialogue_id.to_string();
+            cli_wrapper::teambook(&["dialogue-list", "--id", &id]).await
+        } else {
+            let limit = input.limit.unwrap_or(10).to_string();
+            cli_wrapper::teambook(&["dialogue-list", &limit]).await
+        }
     }
 
     #[tool(description = "End a dialogue")]
@@ -406,6 +455,73 @@ impl AiFoundationServer {
             Some(ref summary) => cli_wrapper::teambook(&["dialogue-end", &id, &status, "--summary", summary]).await,
             None => cli_wrapper::teambook(&["dialogue-end", &id, &status]).await,
         }
+    }
+
+    // ============== Projects/Features (directory-aware context) ==============
+
+    #[tool(description = "Create a project with a root directory. When any AI works in this directory, they get the project context automatically.")]
+    async fn project_create(&self, Parameters(input): Parameters<ProjectCreateInput>) -> String {
+        cli_wrapper::teambook(&["project-create", "--directory", &input.root_directory, &input.name, &input.goal]).await
+    }
+
+    #[tool(description = "List all projects, or get details for a specific project by ID")]
+    async fn project_list(&self, Parameters(input): Parameters<ProjectListInput>) -> String {
+        if let Some(id) = input.project_id {
+            cli_wrapper::teambook(&["project-get", &id.to_string()]).await
+        } else {
+            cli_wrapper::teambook(&["list-projects"]).await
+        }
+    }
+
+    #[tool(description = "Create a feature within a project. Features map to subdirectories and provide specific context when AIs work there.")]
+    async fn feature_create(&self, Parameters(input): Parameters<CreateFeatureInput>) -> String {
+        let proj_id = input.project_id.to_string();
+        match input.directory {
+            Some(ref dir) => cli_wrapper::teambook(&["feature-create", &proj_id, &input.name, &input.overview, "--directory", dir]).await,
+            None => cli_wrapper::teambook(&["feature-create", &proj_id, &input.name, &input.overview]).await,
+        }
+    }
+
+    #[tool(description = "List features for a project, or get details for a specific feature")]
+    async fn feature_list(&self, Parameters(input): Parameters<FeatureListInput>) -> String {
+        if let Some(feat_id) = input.feature_id {
+            cli_wrapper::teambook(&["feature-get", &feat_id.to_string()]).await
+        } else {
+            cli_wrapper::teambook(&["list-features", &input.project_id.to_string()]).await
+        }
+    }
+
+    #[tool(description = "Update a feature's overview, name, or directory mapping")]
+    async fn feature_update(&self, Parameters(input): Parameters<FeatureUpdateInput>) -> String {
+        let feat_id = input.feature_id.to_string();
+        // Build args dynamically — only include flags that are set
+        let mut args: Vec<String> = vec!["feature-update".to_string(), feat_id];
+        if let Some(ref o) = input.overview {
+            args.push("--overview".to_string());
+            args.push(o.clone());
+        }
+        if let Some(ref n) = input.name {
+            args.push("--name".to_string());
+            args.push(n.clone());
+        }
+        if let Some(ref d) = input.directory {
+            args.push("--directory".to_string());
+            args.push(d.clone());
+        }
+        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        cli_wrapper::teambook(&arg_refs).await
+    }
+
+    #[tool(description = "Update a project's goal/description")]
+    async fn project_update(&self, Parameters(input): Parameters<ProjectUpdateInput>) -> String {
+        let proj_id = input.project_id.to_string();
+        let mut args: Vec<String> = vec!["project-update".to_string(), proj_id];
+        if let Some(ref g) = input.goal {
+            args.push("--goal".to_string());
+            args.push(g.clone());
+        }
+        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        cli_wrapper::teambook(&arg_refs).await
     }
 
     // ============== Standby (1 kept, 1 hidden duplicate) ==============

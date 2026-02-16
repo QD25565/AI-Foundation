@@ -17,6 +17,7 @@ use clap::{Parser, Subcommand};
 
 use teamengram::sequencer::{Sequencer, SequencerConfig};
 use teamengram::outbox::OutboxProducer;
+use teamengram::wake::signal_sequencer;
 
 #[derive(Parser)]
 #[command(name = "v2-daemon")]
@@ -113,65 +114,120 @@ fn show_status(data_dir: &PathBuf) {
     }
 }
 
-fn run_daemon(data_dir: &PathBuf) {
-    // Single-instance lock file
+/// Singleton guard — prevents multiple daemon instances.
+/// Dropping this releases the lock (process exit also releases automatically).
+struct SingletonGuard {
+    #[cfg(windows)]
+    _handle: isize, // HANDLE to Named Mutex
+    #[cfg(not(windows))]
+    _file: std::fs::File, // File with flock held
+}
+
+#[cfg(windows)]
+fn acquire_singleton(_data_dir: &PathBuf) -> SingletonGuard {
+    use windows_sys::Win32::System::Threading::CreateMutexW;
+    use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
+
+    // Named Mutex is a kernel object — survives file deletion, not tied to filesystem.
+    // Name is global to the Windows session (Local\ namespace).
+    let name: Vec<u16> = "Local\\TeamEngram_V2_Daemon_Singleton\0"
+        .encode_utf16()
+        .collect();
+
+    let handle = unsafe { CreateMutexW(std::ptr::null(), 1, name.as_ptr()) };
+    if handle == 0 {
+        eprintln!("CRITICAL: Failed to create singleton mutex");
+        std::process::exit(1);
+    }
+
+    let last_error = unsafe { GetLastError() };
+    if last_error == ERROR_ALREADY_EXISTS {
+        eprintln!("|ALREADY RUNNING|");
+        eprintln!("Hint: Another v2-daemon instance holds the singleton mutex.");
+        std::process::exit(0);
+    }
+
+    eprintln!("[SINGLETON] Acquired Named Mutex (kernel-level)");
+    SingletonGuard { _handle: handle }
+}
+
+#[cfg(not(windows))]
+fn acquire_singleton(data_dir: &PathBuf) -> SingletonGuard {
     let lock_path = data_dir.join("v2-daemon.lock");
-    let lock_file = match std::fs::OpenOptions::new()
+    let file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .open(&lock_path)
-    {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("Error: Failed to create lock file: {}", e);
+        .unwrap_or_else(|e| {
+            eprintln!("CRITICAL: Failed to open lock file: {}", e);
             std::process::exit(1);
-        }
-    };
+        });
 
-    // Try to acquire exclusive lock - if fails, another daemon is running
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::AsRawHandle;
-        use windows_sys::Win32::Storage::FileSystem::{LockFileEx, LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY};
-        use windows_sys::Win32::Foundation::HANDLE;
-        use windows_sys::Win32::System::IO::OVERLAPPED;
+    // flock is tied to the file descriptor, not the path.
+    // Deleting the lock file does NOT release the lock — the kernel tracks it by inode.
+    // Lock is automatically released when the process exits (even on crash/kill).
+    use std::os::unix::io::AsRawFd;
+    let ret = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+    if ret != 0 {
+        eprintln!("|ALREADY RUNNING|");
+        eprintln!("Hint: Another v2-daemon instance holds the file lock.");
+        std::process::exit(0);
+    }
 
-        let handle = lock_file.as_raw_handle() as HANDLE;
-        let mut overlapped: OVERLAPPED = unsafe { std::mem::zeroed() };
+    eprintln!("[SINGLETON] Acquired flock (kernel-level)");
+    SingletonGuard { _file: file }
+}
 
-        let result = unsafe {
-            LockFileEx(
-                handle,
-                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-                0,
-                1,
-                0,
-                &mut overlapped,
-            )
-        };
+fn run_daemon(data_dir: &PathBuf) {
+    // Singleton enforcement: kernel-level mutual exclusion
+    // Windows: Named Mutex (survives file deletion, kernel-managed)
+    // Linux: flock() on lock file (released automatically on process exit)
+    let _singleton_guard = acquire_singleton(data_dir);
 
-        if result == 0 {
-            // Lock failed - another daemon is running
-            eprintln!("|ALREADY RUNNING|");
-            eprintln!("Hint: Another v2-daemon instance is running. Only one needed.");
-            std::process::exit(0); // Exit cleanly, not an error
+    // Write PID to lock file (informational only — not used for locking)
+    use std::io::Write;
+    let lock_path = data_dir.join("v2-daemon.lock");
+    if let Ok(mut f) = std::fs::File::create(&lock_path) {
+        let _ = writeln!(f, "{}", std::process::id());
+    }
+
+    eprintln!("|V2 DAEMON STARTING|");
+    eprintln!("PID:{}", std::process::id());
+    eprintln!("DataDir:{}", data_dir.display());
+
+    // Report event log state
+    let log_path = data_dir.join("shared").join("events").join("master.eventlog");
+    if log_path.exists() {
+        if let Ok(meta) = std::fs::metadata(&log_path) {
+            eprintln!("EventLog:{}KB", meta.len() / 1024);
         }
     }
 
-    // Write PID to lock file
-    use std::io::Write;
-    let mut lock_file = lock_file;
-    let _ = writeln!(lock_file, "{}", std::process::id());
+    // Report outbox state
+    let outbox_dir = data_dir.join("shared").join("outbox");
+    let mut outbox_count = 0;
+    if let Ok(entries) = std::fs::read_dir(&outbox_dir) {
+        for entry in entries.flatten() {
+            if entry.path().extension().map_or(false, |e| e == "outbox") {
+                outbox_count += 1;
+                if let Some(ai_id) = entry.path().file_stem() {
+                    eprintln!("FoundOutbox:{}", ai_id.to_string_lossy());
+                }
+            }
+        }
+    }
+    eprintln!("Outboxes:{}", outbox_count);
 
-    println!("|V2 DAEMON STARTING|");
-    println!("DataDir:{}", data_dir.display());
-
-    // Set up Ctrl+C handler
+    // Set up Ctrl+C handler.
+    // MUST signal the sequencer wake semaphore after setting stop flag —
+    // the sequencer blocks on sem_wait() with no timeout, so without this
+    // signal it would never wake up to check stop_signal.
     let stop_signal = Arc::new(AtomicBool::new(false));
     let stop_clone = stop_signal.clone();
     ctrlc::set_handler(move || {
-        println!("\n|SHUTDOWN REQUESTED|");
+        eprintln!("\n|SHUTDOWN REQUESTED|");
         stop_clone.store(true, Ordering::SeqCst);
+        signal_sequencer(); // Wake the sequencer so it sees stop_signal
     }).expect("Error setting Ctrl-C handler");
 
     // Configure sequencer
@@ -181,39 +237,28 @@ fn run_daemon(data_dir: &PathBuf) {
         ..Default::default()
     };
 
-    // List existing outboxes
-    let outbox_dir = data_dir.join("shared").join("outbox");
-    if let Ok(entries) = std::fs::read_dir(&outbox_dir) {
-        for entry in entries.flatten() {
-            if entry.path().extension().map_or(false, |e| e == "outbox") {
-                if let Some(ai_id) = entry.path().file_stem() {
-                    println!("FoundOutbox:{}", ai_id.to_string_lossy());
-                }
-            }
-        }
-    }
-
     // Create and run sequencer
     let mut sequencer = match Sequencer::new(config) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("Error: Failed to create sequencer: {}", e);
+            eprintln!("CRITICAL: Failed to create sequencer: {}", e);
             std::process::exit(1);
         }
     };
 
-    println!("|RUNNING|");
+    eprintln!("|RUNNING|");
+    eprintln!("Sequence:{}", sequencer.current_sequence());
 
     // Run the sequencer (blocks until stop signal)
     match sequencer.run(stop_signal) {
         Ok(()) => {
             let stats = sequencer.stats();
-            println!("|SHUTDOWN COMPLETE|");
-            println!("EventsProcessed:{}", stats.events_processed.load(Ordering::Relaxed));
-            println!("BatchesProcessed:{}", stats.batches_processed.load(Ordering::Relaxed));
+            eprintln!("|SHUTDOWN COMPLETE|");
+            eprintln!("EventsProcessed:{}", stats.events_processed.load(Ordering::Relaxed));
+            eprintln!("BatchesProcessed:{}", stats.batches_processed.load(Ordering::Relaxed));
         }
         Err(e) => {
-            eprintln!("Error: Sequencer failed: {}", e);
+            eprintln!("CRITICAL: Sequencer failed: {}", e);
             std::process::exit(1);
         }
     }

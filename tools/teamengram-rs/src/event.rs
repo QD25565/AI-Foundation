@@ -43,7 +43,8 @@ pub mod event_type {
     pub const ROOM_MESSAGE: u16 = 0x0303;
     pub const ROOM_CLOSE: u16 = 0x0304;
 
-    // Lock Events (0x04XX)
+    // Lock Events (0x04XX) — DEPRECATED: Locks removed (Feb 2026, QD directive)
+    // Constants kept for backward compatibility with existing events in the log
     pub const LOCK_ACQUIRE: u16 = 0x0400;
     pub const LOCK_RELEASE: u16 = 0x0401;
 
@@ -60,7 +61,8 @@ pub mod event_type {
     pub const TASK_BLOCK: u16 = 0x0604;
     pub const TASK_UNBLOCK: u16 = 0x0605;
 
-    // Stigmergy Events (0x07XX)
+    // Stigmergy Events (0x07XX) — DEPRECATED: Stigmergy removed (Feb 2026, QD directive)
+    // Constant kept for backward compatibility with existing events in the log
     pub const PHEROMONE_DEPOSIT: u16 = 0x0700;
 
     // Project Events (0x08XX)
@@ -867,21 +869,8 @@ impl Event {
         }))
     }
 
-    /// Create a lock acquire event
-    pub fn lock_acquire(source_ai: &str, resource: &str, duration_seconds: u32, reason: &str) -> Self {
-        Self::new(source_ai, EventPayload::LockAcquire(LockAcquirePayload {
-            resource: resource.to_string(),
-            duration_seconds,
-            reason: reason.to_string(),
-        }))
-    }
-
-    /// Create a lock release event
-    pub fn lock_release(source_ai: &str, resource: &str) -> Self {
-        Self::new(source_ai, EventPayload::LockRelease(LockReleasePayload {
-            resource: resource.to_string(),
-        }))
-    }
+    // lock_acquire() and lock_release() removed — locks deprecated (Feb 2026, QD directive)
+    // Enum variants + payload structs kept for rkyv backward compatibility
 
     /// Create a file action event
     pub fn file_action(source_ai: &str, path: &str, action: &str) -> Self {
@@ -1014,15 +1003,8 @@ impl Event {
         }))
     }
 
-    /// Create a pheromone deposit event (stigmergy)
-    pub fn pheromone_deposit(source_ai: &str, location: &str, pheromone_type: &str, content: &str, intensity: u8) -> Self {
-        Self::new(source_ai, EventPayload::PheromoneDeposit(PheromoneDepositPayload {
-            location: location.to_string(),
-            pheromone_type: pheromone_type.to_string(),
-            content: content.to_string(),
-            intensity,
-        }))
-    }
+    // pheromone_deposit() removed — stigmergy deprecated (Feb 2026, QD directive)
+    // Enum variant + payload struct kept for rkyv backward compatibility
 
     // ===== Project Events =====
 
@@ -1232,8 +1214,6 @@ mod tests {
             Event::dialogue_respond("ai", 1, "response"),
             Event::vote_create("ai", "topic", vec!["a".into(), "b".into()], 3),
             Event::vote_cast("ai", 1, "a"),
-            Event::lock_acquire("ai", "resource", 60, "reason"),
-            Event::lock_release("ai", "resource"),
             Event::file_action("ai", "/path", "read"),
             Event::task_create("ai", "description", 5, Some("tag1,tag2")),
         ];

@@ -626,6 +626,12 @@ fn parse_tags(tags_str: Option<String>) -> Vec<String> {
 /// Captures: files being worked on, teammates online (if any), current location.
 fn capture_context() -> Option<String> {
     let my_ai_id = std::env::var("AI_ID").unwrap_or_default();
+
+    // Skip context capture for human users — they don't need AI session metadata
+    if my_ai_id.starts_with("human-") {
+        return None;
+    }
+
     let mut sentences = Vec::new();
 
     // Find teambook executable

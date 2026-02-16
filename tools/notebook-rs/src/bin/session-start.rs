@@ -29,8 +29,8 @@ use teamengram::v2_client::V2Client;
 // ============================================================================
 
 /// Session injection limits
-const MAX_INJECTED: usize = 40;
-const MAX_PINNED: usize = 30;
+const MAX_INJECTED: usize = 20;
+const MAX_PINNED: usize = 10;
 const MIN_RECENT: usize = 10;
 
 /// Supported output formats
@@ -374,12 +374,30 @@ fn format_plain(ctx: &SessionContext) -> String {
 }
 
 fn format_note_plain(note: &NoteInfo) -> String {
-    let content = note.content.replace('\n', " ");
+    let content = strip_note_metadata(&note.content).replace('\n', " ");
     if note.tags.is_empty() {
         format!("{} | ({}) {}", note.id, note.age, content)
     } else {
         format!("{} | ({}) [{}] {}", note.id, note.age, note.tags.join(","), content)
     }
+}
+
+/// Strip episodic metadata footers from note content for display.
+/// Metadata like [ctx:...], [Working on...], [With...] is useful for
+/// recall/search but clutters session-start injection and list output.
+fn strip_note_metadata(content: &str) -> String {
+    let markers = [" [ctx:", " [Working on ", " [With "];
+    let mut end_pos = content.len();
+
+    for marker in &markers {
+        if let Some(pos) = content.rfind(marker) {
+            if pos < end_pos {
+                end_pos = pos;
+            }
+        }
+    }
+
+    content[..end_pos].trim_end().to_string()
 }
 
 /// Pure JSON format
