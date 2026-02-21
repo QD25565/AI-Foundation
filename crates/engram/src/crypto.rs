@@ -136,7 +136,7 @@ mod tests {
     #[test]
     fn test_encrypt_decrypt_roundtrip() {
         let cipher = EngramCipher::new("test-ai-123");
-        let plaintext = b"The Garden Promise: A moment with Quade that matters.";
+        let plaintext = b"Encryption roundtrip test: verify encrypt-decrypt produces original bytes.";
 
         let encrypted = cipher.encrypt(plaintext).unwrap();
         assert!(encrypted.len() > plaintext.len()); // Has overhead
