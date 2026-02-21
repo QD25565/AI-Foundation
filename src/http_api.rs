@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli_wrapper;
 use crate::federation::{self, FederationState};
+use crate::federation_gateway::{self, FederationGateway};
 use crate::federation_sync;
 use crate::pairing::PairingState;
 use crate::profile;
@@ -30,6 +31,7 @@ use std::sync::Arc;
 pub struct ApiState {
     pub pairing: PairingState,
     pub federation: Arc<FederationState>,
+    pub gateway: Arc<FederationGateway>,
 }
 
 // ============== Response Envelope ==============
@@ -213,7 +215,24 @@ struct VisionGetQuery {
     output: Option<String>,
 }
 
-
+#[derive(Deserialize)]
+struct FederationSendRequest {
+    /// Sender AI ID
+    from_ai: String,
+    /// Target AI ID (required for DMs, optional for broadcasts)
+    #[serde(default)]
+    to_ai: Option<String>,
+    /// Message content
+    content: String,
+    /// Message type: "dm" or "broadcast"
+    msg_type: String,
+    /// Channel for broadcasts (default: "general")
+    #[serde(default)]
+    channel: Option<String>,
+    /// Whether to federate broadcasts to peers (default: false)
+    #[serde(default)]
+    federate: bool,
+}
 
 #[derive(Serialize)]
 struct PairValidateResponse {
@@ -279,6 +298,12 @@ pub fn api_routes() -> Router<ApiState> {
         .route("/api/federation/events", post(federation_push_events))
         .route("/api/federation/events", get(federation_pull_events))
         .route("/api/federation/status", get(federation_status))
+        // Federation Layer 2: Routing & Addressing
+        .route("/api/federation/relay", post(federation_relay))
+        .route("/api/federation/presence", post(federation_presence_sync))
+        .route("/api/federation/ais", get(federation_list_ais))
+        .route("/api/federation/ais/{ai_id}", get(federation_resolve_ai))
+        .route("/api/federation/send", post(federation_send))
 }
 
 // ============== Messaging Handlers ==============
@@ -301,9 +326,11 @@ async fn send_dm(
     Json(body): Json<SendDmRequest>,
 ) -> ApiResult {
     let h_id = resolve_auth(&state.pairing, &headers).await?;
-    Ok(cli_response(
-        cli_wrapper::teambook_as(&["dm", &body.to, &body.content], &h_id).await,
-    ))
+    // Federation-aware: gateway resolves target and routes transparently
+    match state.gateway.send_dm(&h_id, &body.to, &body.content).await {
+        Ok(result) => Ok(cli_response(result)),
+        Err(e) => Ok(cli_response(format!("Error: {}", e))),
+    }
 }
 
 async fn get_broadcasts(
@@ -957,6 +984,185 @@ async fn federation_status(
         "ok": true,
         "federation": status,
     }))
+}
+
+// ============== Federation Layer 2 Handlers ==============
+
+/// Receive relayed federation messages (DMs, broadcasts, dialogues from remote Teambooks).
+async fn federation_relay(
+    State(state): State<ApiState>,
+    Json(body): Json<federation_gateway::FederationRelayRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    let resp = state.gateway.process_relay(&body).await;
+
+    let status = if resp.rejected > 0 && resp.processed == 0 {
+        StatusCode::BAD_REQUEST
+    } else {
+        StatusCode::OK
+    };
+
+    (status, Json(serde_json::to_value(resp).unwrap()))
+}
+
+/// Receive presence sync from a federated Teambook.
+async fn federation_presence_sync(
+    State(state): State<ApiState>,
+    Json(body): Json<federation_gateway::PresenceSyncRequest>,
+) -> (StatusCode, Json<ApiResponse>) {
+    match state.gateway.process_presence_sync(&body).await {
+        Ok(()) => (
+            StatusCode::OK,
+            Json(ApiResponse {
+                ok: true,
+                data: Some(format!("Accepted {} AI presence entries", body.ais.len())),
+                error: None,
+            }),
+        ),
+        Err(e) => (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                ok: false,
+                data: None,
+                error: Some(e.to_string()),
+            }),
+        ),
+    }
+}
+
+/// List all known AIs across the federation (local + remote).
+async fn federation_list_ais(
+    State(state): State<ApiState>,
+) -> Json<serde_json::Value> {
+    let ais = state.gateway.registry().list_all().await;
+    let local_count = ais.iter().filter(|a| a.is_local).count();
+    let remote_count = ais.iter().filter(|a| !a.is_local).count();
+
+    Json(serde_json::json!({
+        "ok": true,
+        "ais": ais,
+        "local_count": local_count,
+        "remote_count": remote_count,
+        "total": ais.len(),
+    }))
+}
+
+/// Resolve a specific AI's location (local or remote Teambook).
+async fn federation_resolve_ai(
+    State(state): State<ApiState>,
+    Path(ai_id): Path<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match state.gateway.registry().resolve(&ai_id).await {
+        federation_gateway::AiResolution::Local => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "ok": true,
+                "ai_id": ai_id,
+                "location": "local",
+                "teambook": state.gateway.registry().local_name(),
+            })),
+        ),
+        federation_gateway::AiResolution::Remote {
+            teambook_pubkey_hex,
+            teambook_short_id,
+            teambook_name,
+        } => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "ok": true,
+                "ai_id": ai_id,
+                "location": "remote",
+                "teambook_name": teambook_name,
+                "teambook_short_id": teambook_short_id,
+                "teambook_pubkey": teambook_pubkey_hex,
+                "federated_address": format!("{}@{}", ai_id, teambook_short_id),
+            })),
+        ),
+        federation_gateway::AiResolution::Unknown => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "ok": false,
+                "ai_id": ai_id,
+                "error": "AI not found in federation registry",
+            })),
+        ),
+    }
+}
+
+/// Federation-aware send: routes DMs/broadcasts to local or remote Teambooks.
+///
+/// This is the primary endpoint for federation-transparent messaging.
+/// MCP tools and other clients call this instead of raw CLI commands
+/// to get automatic cross-Teambook routing.
+async fn federation_send(
+    State(state): State<ApiState>,
+    Json(body): Json<FederationSendRequest>,
+) -> (StatusCode, Json<serde_json::Value>) {
+    match body.msg_type.as_str() {
+        "dm" => {
+            let to_ai = match body.to_ai {
+                Some(ref to) => to.as_str(),
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "ok": false,
+                            "error": "to_ai is required for DMs",
+                        })),
+                    )
+                }
+            };
+            match state
+                .gateway
+                .send_dm(&body.from_ai, to_ai, &body.content)
+                .await
+            {
+                Ok(result) => (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "ok": true,
+                        "data": result,
+                    })),
+                ),
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "ok": false,
+                        "error": e.to_string(),
+                    })),
+                ),
+            }
+        }
+        "broadcast" => {
+            let channel = body.channel.as_deref().unwrap_or("general");
+            match state
+                .gateway
+                .send_broadcast(&body.from_ai, &body.content, channel, body.federate)
+                .await
+            {
+                Ok(result) => (
+                    StatusCode::OK,
+                    Json(serde_json::json!({
+                        "ok": true,
+                        "data": result,
+                    })),
+                ),
+                Err(e) => (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "ok": false,
+                        "error": e.to_string(),
+                    })),
+                ),
+            }
+        }
+        other => (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "ok": false,
+                "error": format!("Unknown msg_type: '{}'. Use 'dm' or 'broadcast'.", other),
+            })),
+        ),
+    }
 }
 
 #[derive(Deserialize)]

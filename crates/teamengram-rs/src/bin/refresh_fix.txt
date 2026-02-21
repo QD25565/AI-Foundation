@@ -1,0 +1,26 @@
+/// Refresh BulletinBoard with dialogues requiring action (invites + your turn)
+/// Called immediately after dialogue create/respond/end - NOT polling
+async fn refresh_bulletin_dialogues(store: &Arc<RwLock<TeamEngram>>, target_ai: &str) {
+    info!("refresh_bulletin_dialogues called for {}", target_ai);
+
+    match BulletinBoard::open(None) {
+        Ok(mut bulletin) => {
+            let mut s = store.write().await;
+            // Get dialogues where it is this AIs turn to respond
+            match s.get_my_turn_dialogues(target_ai, 5) {
+                Ok(dialogues) => {
+                    let detangle_data: Vec<(i64, &str)> = dialogues.iter()
+                        .map(|(id, d)| (*id as i64, d.topic.as_str()))
+                        .collect();
+                    bulletin.set_detangles(&detangle_data);
+                    match bulletin.commit() {
+                        Ok(_) => info!("Updated bulletin with {} dialogue(s) for {}", detangle_data.len(), target_ai),
+                        Err(e) => error!("Failed to commit bulletin: {}", e),
+                    }
+                }
+                Err(e) => error!("Failed to get_my_turn_dialogues for {}: {}", target_ai, e),
+            }
+        }
+        Err(e) => error!("Failed to open BulletinBoard: {}", e),
+    }
+}

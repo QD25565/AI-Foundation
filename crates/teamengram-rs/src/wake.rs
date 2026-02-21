@@ -1,0 +1,1079 @@
+//! Cross-Platform Wake Events
+//!
+//! Zero-polling, OS-native event primitives for instant AI wake-up.
+//! Each platform uses its optimal primitive:
+//!
+//! - Windows: Named Events (CreateEventW / WaitForSingleObject)
+//! - Linux: eventfd (lightweight kernel event notification)
+//! - macOS: kqueue (BSD event queue)
+//!
+//! Latency: ~500ns-1us wake time, zero CPU usage while waiting.
+//!
+//! CROSS-PROCESS FIX (v18): Windows now uses shared file for metadata
+//! since AtomicU8 is process-local and does not cross process boundaries.
+
+use std::time::Duration;
+
+/// Reason for wake event
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum WakeReason {
+    /// No wake (timeout expired)
+    None = 0,
+    /// Direct message received
+    DirectMessage = 1,
+    /// Mentioned in broadcast
+    Mention = 2,
+    /// Urgent keyword detected
+    Urgent = 3,
+    /// Task assigned
+    TaskAssigned = 4,
+    /// Manual wake request
+    Manual = 5,
+    /// Broadcast received (general)
+    Broadcast = 6,
+    /// Dialogue turn
+    DialogueTurn = 7,
+    /// Vote requires attention
+    VoteRequest = 8,
+}
+
+impl From<u8> for WakeReason {
+    fn from(v: u8) -> Self {
+        match v {
+            1 => Self::DirectMessage,
+            2 => Self::Mention,
+            3 => Self::Urgent,
+            4 => Self::TaskAssigned,
+            5 => Self::Manual,
+            6 => Self::Broadcast,
+            7 => Self::DialogueTurn,
+            8 => Self::VoteRequest,
+            _ => Self::None,
+        }
+    }
+}
+
+/// Result of waiting for a wake event
+#[derive(Debug, Clone)]
+pub struct WakeResult {
+    pub reason: WakeReason,
+    pub from_ai: Option<String>,
+    pub content_preview: Option<String>,
+}
+
+impl WakeResult {
+    pub fn timeout() -> Self {
+        Self {
+            reason: WakeReason::None,
+            from_ai: None,
+            content_preview: None,
+        }
+    }
+
+    pub fn new(reason: WakeReason, from_ai: Option<String>, content: Option<String>) -> Self {
+        Self {
+            reason,
+            from_ai,
+            content_preview: content,
+        }
+    }
+}
+
+/// Cross-platform wake event trait
+pub trait WakeEvent: Send + Sync {
+    /// Block until signaled. Returns wake reason.
+    fn wait(&self) -> WakeResult;
+
+    /// Block until signaled or timeout. Returns None on timeout.
+    fn wait_timeout(&self, timeout: Duration) -> Option<WakeResult>;
+
+    /// Signal the event to wake waiting thread.
+    fn signal(&self, reason: WakeReason, from_ai: &str, content: &str);
+
+    /// Check if event is signaled without blocking.
+    fn try_recv(&self) -> Option<WakeResult>;
+}
+
+// ============================================================================
+// WINDOWS IMPLEMENTATION - Named Events (pure signal, no file metadata)
+// ============================================================================
+
+#[cfg(target_os = "windows")]
+pub mod windows {
+    use super::*;
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr;
+
+    // Windows API constants
+    const WAIT_OBJECT_0: u32 = 0;
+    const WAIT_TIMEOUT: u32 = 258;
+    const INFINITE: u32 = 0xFFFFFFFF;
+    const EVENT_MODIFY_STATE: u32 = 0x0002;
+    const SYNCHRONIZE: u32 = 0x00100000;
+
+    // NOTE: File-based metadata was REMOVED. It caused stale wake bugs where the
+    // AI would repeatedly wake on old data because the file wasn't cleared properly.
+    // The Named Event is now a pure signal - after waking, the CLI queries the
+    // VIEW (the source of truth) to find out what actually arrived.
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateEventW(
+            lpEventAttributes: *mut std::ffi::c_void,
+            bManualReset: i32,
+            bInitialState: i32,
+            lpName: *const u16,
+        ) -> *mut std::ffi::c_void;
+
+        fn OpenEventW(
+            dwDesiredAccess: u32,
+            bInheritHandle: i32,
+            lpName: *const u16,
+        ) -> *mut std::ffi::c_void;
+
+        fn SetEvent(hEvent: *mut std::ffi::c_void) -> i32;
+        fn WaitForSingleObject(hHandle: *mut std::ffi::c_void, dwMilliseconds: u32) -> u32;
+        fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
+    }
+
+    /// Windows Named Event implementation - pure signal, no file metadata
+    pub struct WindowsWakeEvent {
+        handle: *mut std::ffi::c_void,
+    }
+
+    // SAFETY: Windows handles are thread-safe when used correctly
+    unsafe impl Send for WindowsWakeEvent {}
+    unsafe impl Sync for WindowsWakeEvent {}
+
+    impl WindowsWakeEvent {
+        /// Create or open a named wake event for an AI
+        pub fn open(ai_id: &str) -> std::io::Result<Self> {
+            // Use Local\ prefix (works without admin) instead of Global\ (requires admin)
+            let name = format!("Local\\TeamEngram_Wake_{}", ai_id);
+            eprintln!("[WAKE] Opening event for ai_id='{}', name='{}'", ai_id, name);
+            let wide_name: Vec<u16> = OsStr::new(&name)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+
+            // Try to open existing event first
+            let handle = unsafe {
+                OpenEventW(
+                    EVENT_MODIFY_STATE | SYNCHRONIZE,
+                    0, // Do not inherit
+                    wide_name.as_ptr(),
+                )
+            };
+
+            let handle = if handle.is_null() {
+                let err = std::io::Error::last_os_error();
+                eprintln!("[WAKE] OpenEventW FAILED for '{}': {} - creating new event", name, err);
+                // Create new event (auto-reset, initially non-signaled)
+                let h = unsafe {
+                    CreateEventW(
+                        ptr::null_mut(),
+                        0, // Auto-reset
+                        0, // Initially non-signaled
+                        wide_name.as_ptr(),
+                    )
+                };
+
+                if h.is_null() {
+                    let create_err = std::io::Error::last_os_error();
+                    eprintln!("[WAKE] CreateEventW FAILED for '{}': {}", name, create_err);
+                    return Err(create_err);
+                }
+                eprintln!("[WAKE] CreateEventW SUCCESS for '{}', handle={:?}", name, h);
+                h
+            } else {
+                eprintln!("[WAKE] OpenEventW SUCCESS for '{}', handle={:?}", name, handle);
+                handle
+            };
+
+            Ok(Self { handle })
+        }
+
+        /// Create anonymous event (same-process only)
+        pub fn new() -> std::io::Result<Self> {
+            let handle = unsafe {
+                CreateEventW(
+                    ptr::null_mut(),
+                    0, // Auto-reset
+                    0, // Initially non-signaled
+                    ptr::null(),
+                )
+            };
+
+            if handle.is_null() {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            Ok(Self { handle })
+        }
+    }
+
+    impl Drop for WindowsWakeEvent {
+        fn drop(&mut self) {
+            unsafe {
+                CloseHandle(self.handle);
+            }
+        }
+    }
+
+    impl WakeEvent for WindowsWakeEvent {
+        fn wait(&self) -> WakeResult {
+            unsafe {
+                WaitForSingleObject(self.handle, INFINITE);
+            }
+            // No file metadata - AI queries the view after waking
+            WakeResult::new(WakeReason::Manual, None, None)
+        }
+
+        fn wait_timeout(&self, timeout: Duration) -> Option<WakeResult> {
+            let ms = timeout.as_millis() as u32;
+            let result = unsafe { WaitForSingleObject(self.handle, ms) };
+
+            match result {
+                WAIT_OBJECT_0 => {
+                    // No file metadata - AI queries the view after waking
+                    Some(WakeResult::new(WakeReason::Manual, None, None))
+                }
+                WAIT_TIMEOUT => None,
+                _ => None,
+            }
+        }
+
+        fn signal(&self, _reason: WakeReason, _from_ai: &str, _content: &str) {
+            // Pure signal - no file metadata. AI queries the view after waking.
+            unsafe {
+                SetEvent(self.handle);
+            }
+        }
+
+        fn try_recv(&self) -> Option<WakeResult> {
+            self.wait_timeout(Duration::from_millis(0))
+        }
+    }
+
+    pub type PlatformWakeEvent = WindowsWakeEvent;
+}
+
+// ============================================================================
+// LINUX IMPLEMENTATION - eventfd
+// ============================================================================
+
+#[cfg(target_os = "linux")]
+pub mod linux {
+    use super::*;
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    // eventfd flags
+    const EFD_SEMAPHORE: i32 = 1;
+
+    #[link(name = "c")]
+    extern "C" {
+        fn eventfd(initval: u32, flags: i32) -> i32;
+        fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
+        fn write(fd: i32, buf: *const u8, count: usize) -> isize;
+        fn close(fd: i32) -> i32;
+        fn poll(fds: *mut PollFd, nfds: u64, timeout: i32) -> i32;
+    }
+
+    #[repr(C)]
+    struct PollFd {
+        fd: i32,
+        events: i16,
+        revents: i16,
+    }
+
+    const POLLIN: i16 = 0x0001;
+
+    /// Linux eventfd implementation
+    pub struct LinuxWakeEvent {
+        fd: i32,
+        reason: AtomicU8,
+    }
+
+    unsafe impl Send for LinuxWakeEvent {}
+    unsafe impl Sync for LinuxWakeEvent {}
+
+    impl LinuxWakeEvent {
+        /// Create a new eventfd-based wake event
+        pub fn new() -> std::io::Result<Self> {
+            let fd = unsafe { eventfd(0, EFD_SEMAPHORE) };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            Ok(Self {
+                fd,
+                reason: AtomicU8::new(0),
+            })
+        }
+
+        /// Open named wake event (uses file in /dev/shm for cross-process)
+        pub fn open(ai_id: &str) -> std::io::Result<Self> {
+            // For cross-process on Linux, we would use a file in /dev/shm
+            // or a named semaphore. For now, use simple eventfd.
+            // TODO: Implement proper cross-process with shm
+            Self::new()
+        }
+    }
+
+    impl Drop for LinuxWakeEvent {
+        fn drop(&mut self) {
+            unsafe {
+                close(self.fd);
+            }
+        }
+    }
+
+    impl WakeEvent for LinuxWakeEvent {
+        fn wait(&self) -> WakeResult {
+            let mut buf = [0u8; 8];
+            unsafe {
+                read(self.fd, buf.as_mut_ptr(), 8);
+            }
+            let reason = WakeReason::from(self.reason.swap(0, Ordering::AcqRel));
+            WakeResult::new(reason, None, None)
+        }
+
+        fn wait_timeout(&self, timeout: Duration) -> Option<WakeResult> {
+            let ms = timeout.as_millis() as i32;
+            let mut pfd = PollFd {
+                fd: self.fd,
+                events: POLLIN,
+                revents: 0,
+            };
+
+            let result = unsafe { poll(&mut pfd, 1, ms) };
+
+            if result > 0 && (pfd.revents & POLLIN) != 0 {
+                let mut buf = [0u8; 8];
+                unsafe {
+                    read(self.fd, buf.as_mut_ptr(), 8);
+                }
+                let reason = WakeReason::from(self.reason.swap(0, Ordering::AcqRel));
+                Some(WakeResult::new(reason, None, None))
+            } else {
+                None
+            }
+        }
+
+        fn signal(&self, reason: WakeReason, _from_ai: &str, _content: &str) {
+            self.reason.store(reason as u8, Ordering::Release);
+            let val: u64 = 1;
+            unsafe {
+                write(self.fd, &val as *const u64 as *const u8, 8);
+            }
+        }
+
+        fn try_recv(&self) -> Option<WakeResult> {
+            self.wait_timeout(Duration::from_millis(0))
+        }
+    }
+
+    pub type PlatformWakeEvent = LinuxWakeEvent;
+}
+
+// ============================================================================
+// MACOS IMPLEMENTATION - kqueue
+// ============================================================================
+
+#[cfg(target_os = "macos")]
+pub mod macos {
+    use super::*;
+    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::sync::{Condvar, Mutex};
+
+    // For macOS, we use a condvar-based approach since kqueue requires
+    // file descriptors. For pure signaling, condvar is simpler and efficient.
+    // TODO: Could use dispatch_semaphore for even lower latency.
+
+    /// macOS wake event using condition variable
+    pub struct MacOsWakeEvent {
+        mutex: Mutex<bool>,
+        condvar: Condvar,
+        reason: AtomicU8,
+    }
+
+    impl MacOsWakeEvent {
+        pub fn new() -> std::io::Result<Self> {
+            Ok(Self {
+                mutex: Mutex::new(false),
+                condvar: Condvar::new(),
+                reason: AtomicU8::new(0),
+            })
+        }
+
+        pub fn open(_ai_id: &str) -> std::io::Result<Self> {
+            // For cross-process, would need dispatch_semaphore or mach ports
+            // TODO: Implement proper cross-process
+            Self::new()
+        }
+    }
+
+    impl WakeEvent for MacOsWakeEvent {
+        fn wait(&self) -> WakeResult {
+            let mut signaled = self.mutex.lock().unwrap();
+            while !*signaled {
+                signaled = self.condvar.wait(signaled).unwrap();
+            }
+            *signaled = false;
+            let reason = WakeReason::from(self.reason.swap(0, Ordering::AcqRel));
+            WakeResult::new(reason, None, None)
+        }
+
+        fn wait_timeout(&self, timeout: Duration) -> Option<WakeResult> {
+            let mut signaled = self.mutex.lock().unwrap();
+            let result = self.condvar.wait_timeout(signaled, timeout).unwrap();
+            signaled = result.0;
+
+            if *signaled {
+                *signaled = false;
+                let reason = WakeReason::from(self.reason.swap(0, Ordering::AcqRel));
+                Some(WakeResult::new(reason, None, None))
+            } else {
+                None
+            }
+        }
+
+        fn signal(&self, reason: WakeReason, _from_ai: &str, _content: &str) {
+            self.reason.store(reason as u8, Ordering::Release);
+            let mut signaled = self.mutex.lock().unwrap();
+            *signaled = true;
+            self.condvar.notify_one();
+        }
+
+        fn try_recv(&self) -> Option<WakeResult> {
+            self.wait_timeout(Duration::from_millis(0))
+        }
+    }
+
+    pub type PlatformWakeEvent = MacOsWakeEvent;
+}
+
+// ============================================================================
+// PLATFORM EXPORT
+// ============================================================================
+
+#[cfg(target_os = "windows")]
+pub use windows::PlatformWakeEvent;
+
+#[cfg(target_os = "linux")]
+pub use linux::PlatformWakeEvent;
+
+#[cfg(target_os = "macos")]
+pub use macos::PlatformWakeEvent;
+
+// ============================================================================
+// CROSS-PROCESS WAKE COORDINATOR
+// ============================================================================
+
+use anyhow::Result;
+
+/// Manages wake events for multiple AIs via shared memory
+pub struct WakeCoordinator {
+    /// AI ID this coordinator is for
+    ai_id: String,
+    /// Platform-specific wake event
+    event: PlatformWakeEvent,
+}
+
+impl WakeCoordinator {
+    /// Create wake coordinator for an AI
+    pub fn new(ai_id: &str) -> Result<Self> {
+        let event = PlatformWakeEvent::open(ai_id)
+            .map_err(|e| anyhow::anyhow!("Failed to create wake event: {}", e))?;
+
+        Ok(Self {
+            ai_id: ai_id.to_string(),
+            event,
+        })
+    }
+
+    /// Wait for wake event (blocking)
+    pub fn wait(&self) -> WakeResult {
+        self.event.wait()
+    }
+
+    /// Wait with timeout
+    pub fn wait_timeout(&self, timeout: Duration) -> Option<WakeResult> {
+        self.event.wait_timeout(timeout)
+    }
+
+    /// Signal this AI to wake up
+    pub fn wake(&self, reason: WakeReason, from_ai: &str, content: &str) {
+        self.event.signal(reason, from_ai, content);
+    }
+
+    /// Check for wake without blocking
+    pub fn try_recv(&self) -> Option<WakeResult> {
+        self.event.try_recv()
+    }
+
+    /// Get AI ID
+    pub fn ai_id(&self) -> &str {
+        &self.ai_id
+    }
+}
+
+// ============================================================================
+// PRESENCE DETECTION - OS-level mutex that auto-releases on process death
+// NO POLLING, NO TTL - pure event-driven using OS primitives
+// ============================================================================
+
+/// Presence mutex - held while daemon is alive, auto-released on death
+#[cfg(target_os = "windows")]
+pub struct PresenceMutex {
+    handle: *mut std::ffi::c_void,
+    ai_id: String,
+}
+
+#[cfg(target_os = "windows")]
+unsafe impl Send for PresenceMutex {}
+#[cfg(target_os = "windows")]
+unsafe impl Sync for PresenceMutex {}
+
+#[cfg(target_os = "windows")]
+impl PresenceMutex {
+    /// Create a presence mutex for this AI. Held until Drop or process death.
+    pub fn acquire(ai_id: &str) -> std::io::Result<Self> {
+        use std::ffi::OsStr;
+        use std::os::windows::ffi::OsStrExt;
+        use std::ptr;
+
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn CreateMutexW(
+                lpMutexAttributes: *mut std::ffi::c_void,
+                bInitialOwner: i32,
+                lpName: *const u16,
+            ) -> *mut std::ffi::c_void;
+        }
+
+        let name = format!(r"Local\TeamEngram_Alive_{}", ai_id);
+        let wide_name: Vec<u16> = OsStr::new(&name)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+
+        let handle = unsafe {
+            CreateMutexW(ptr::null_mut(), 1, wide_name.as_ptr()) // 1 = take ownership
+        };
+
+        if handle.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        Ok(Self {
+            handle,
+            ai_id: ai_id.to_string(),
+        })
+    }
+
+    pub fn ai_id(&self) -> &str {
+        &self.ai_id
+    }
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for PresenceMutex {
+    fn drop(&mut self) {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn ReleaseMutex(hMutex: *mut std::ffi::c_void) -> i32;
+            fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
+        }
+
+        unsafe {
+            ReleaseMutex(self.handle);
+            CloseHandle(self.handle);
+        }
+    }
+}
+
+/// Check if an AI is online by testing if their presence mutex exists
+#[cfg(target_os = "windows")]
+pub fn is_ai_online(ai_id: &str) -> bool {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn OpenMutexW(
+            dwDesiredAccess: u32,
+            bInheritHandle: i32,
+            lpName: *const u16,
+        ) -> *mut std::ffi::c_void;
+        fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
+    }
+
+    const SYNCHRONIZE: u32 = 0x00100000;
+
+    let name = format!(r"Local\TeamEngram_Alive_{}", ai_id);
+    let wide_name: Vec<u16> = OsStr::new(&name)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    let handle = unsafe { OpenMutexW(SYNCHRONIZE, 0, wide_name.as_ptr()) };
+
+    if handle.is_null() {
+        false // Mutex doesn't exist = AI is offline
+    } else {
+        unsafe { CloseHandle(handle) };
+        true // Mutex exists = AI is online
+    }
+}
+
+/// Get list of online AIs by checking known AI IDs
+#[cfg(target_os = "windows")]
+pub fn get_online_ais(known_ai_ids: &[&str]) -> Vec<String> {
+    known_ai_ids
+        .iter()
+        .filter(|id| is_ai_online(id))
+        .map(|s| s.to_string())
+        .collect()
+}
+
+// Unix presence via PID files
+#[cfg(not(target_os = "windows"))]
+pub struct PresenceMutex {
+    ai_id: String,
+    pid_path: std::path::PathBuf,
+}
+
+#[cfg(not(target_os = "windows"))]
+impl PresenceMutex {
+    pub fn acquire(ai_id: &str) -> std::io::Result<Self> {
+        let presence_dir = dirs::data_local_dir()
+            .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+            .join(".ai-foundation")
+            .join("v2")
+            .join("presence");
+        std::fs::create_dir_all(&presence_dir)?;
+
+        let pid_path = presence_dir.join(format!("{}.pid", ai_id));
+        std::fs::write(&pid_path, format!("{}", std::process::id()))?;
+
+        Ok(Self {
+            ai_id: ai_id.to_string(),
+            pid_path,
+        })
+    }
+    pub fn ai_id(&self) -> &str { &self.ai_id }
+}
+
+#[cfg(not(target_os = "windows"))]
+impl Drop for PresenceMutex {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.pid_path);
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn is_ai_online(ai_id: &str) -> bool {
+    // Check for PID file at well-known location
+    let pid_path = dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join(".ai-foundation")
+        .join("v2")
+        .join("presence")
+        .join(format!("{}.pid", ai_id));
+
+    if let Ok(contents) = std::fs::read_to_string(&pid_path) {
+        if let Ok(pid) = contents.trim().parse::<i32>() {
+            // Check if process is still alive (signal 0 = existence check)
+            unsafe { libc::kill(pid, 0) == 0 }
+        } else {
+            false
+        }
+    } else {
+        false
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn get_online_ais(_known_ai_ids: &[&str]) -> Vec<String> {
+    vec![]
+}
+
+// ============================================================================
+// SEQUENCER WAKE EVENT - Cross-process signal for instant event processing
+// ============================================================================
+
+/// Lightweight cross-process wake event for the Sequencer daemon.
+///
+/// Writers (AIs) signal this after writing to their outbox.
+/// The Sequencer waits on this instead of polling/timeout.
+///
+/// Uses Windows Named Events - ~500ns signal, ~1us wake, zero CPU while waiting.
+#[cfg(target_os = "windows")]
+pub mod sequencer_wake {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr;
+    use std::time::Duration;
+
+    const WAIT_OBJECT_0: u32 = 0;
+    const EVENT_MODIFY_STATE: u32 = 0x0002;
+    const SYNCHRONIZE: u32 = 0x00100000;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateEventW(
+            lpEventAttributes: *mut std::ffi::c_void,
+            bManualReset: i32,
+            bInitialState: i32,
+            lpName: *const u16,
+        ) -> *mut std::ffi::c_void;
+
+        fn OpenEventW(
+            dwDesiredAccess: u32,
+            bInheritHandle: i32,
+            lpName: *const u16,
+        ) -> *mut std::ffi::c_void;
+
+        fn SetEvent(hEvent: *mut std::ffi::c_void) -> i32;
+        fn WaitForSingleObject(hHandle: *mut std::ffi::c_void, dwMilliseconds: u32) -> u32;
+        fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
+    }
+
+    /// The well-known name for the sequencer wake event
+    const SEQUENCER_WAKE_EVENT_NAME: &str = r"Local\TeamEngram_SequencerWake";
+
+    /// Sequencer-side: waits for signals from outbox writers
+    pub struct SequencerWakeReceiver {
+        handle: *mut std::ffi::c_void,
+    }
+
+    unsafe impl Send for SequencerWakeReceiver {}
+    unsafe impl Sync for SequencerWakeReceiver {}
+
+    impl SequencerWakeReceiver {
+        /// Create or open the sequencer wake event (receiver side)
+        pub fn new() -> std::io::Result<Self> {
+            let wide_name: Vec<u16> = OsStr::new(SEQUENCER_WAKE_EVENT_NAME)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+
+            // Try to open existing event first
+            let handle = unsafe {
+                OpenEventW(
+                    EVENT_MODIFY_STATE | SYNCHRONIZE,
+                    0,
+                    wide_name.as_ptr(),
+                )
+            };
+
+            let handle = if handle.is_null() {
+                // Create new auto-reset event
+                let h = unsafe {
+                    CreateEventW(
+                        ptr::null_mut(),
+                        0, // Auto-reset: resets after one waiter is released
+                        0, // Initially non-signaled
+                        wide_name.as_ptr(),
+                    )
+                };
+
+                if h.is_null() {
+                    return Err(std::io::Error::last_os_error());
+                }
+                h
+            } else {
+                handle
+            };
+
+            Ok(Self { handle })
+        }
+
+        /// Wait for a signal with timeout. Returns true if signaled, false if timeout.
+        pub fn wait_timeout(&self, timeout: Duration) -> bool {
+            let ms = timeout.as_millis() as u32;
+            let result = unsafe { WaitForSingleObject(self.handle, ms) };
+            result == WAIT_OBJECT_0
+        }
+
+        /// Block until signaled. No timeout. No polling.
+        ///
+        /// Uses WaitForSingleObject(INFINITE). Wakes ONLY when:
+        /// - An outbox write calls signal_sequencer() (normal path)
+        /// - The shutdown handler calls signal_sequencer() (clean exit)
+        ///
+        /// If the signal mechanism is broken, this blocks forever.
+        /// That is correct behavior — fix the signal, don't mask the bug.
+        pub fn wait(&self) {
+            unsafe { WaitForSingleObject(self.handle, 0xFFFFFFFF) };
+        }
+    }
+
+    impl Drop for SequencerWakeReceiver {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.handle) };
+        }
+    }
+
+    /// Writer-side: signals the sequencer after writing to outbox
+    pub struct SequencerWakeSignaler {
+        handle: *mut std::ffi::c_void,
+    }
+
+    unsafe impl Send for SequencerWakeSignaler {}
+    unsafe impl Sync for SequencerWakeSignaler {}
+
+    impl SequencerWakeSignaler {
+        /// Open connection to the sequencer wake event (signaler side)
+        ///
+        /// Returns None if sequencer is not running (event doesn't exist).
+        /// This is expected when no daemon is active.
+        pub fn open() -> Option<Self> {
+            let wide_name: Vec<u16> = OsStr::new(SEQUENCER_WAKE_EVENT_NAME)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+
+            let handle = unsafe {
+                OpenEventW(
+                    EVENT_MODIFY_STATE,
+                    0,
+                    wide_name.as_ptr(),
+                )
+            };
+
+            if handle.is_null() {
+                None // Sequencer not running
+            } else {
+                Some(Self { handle })
+            }
+        }
+
+        /// Signal the sequencer that new events are available
+        pub fn signal(&self) {
+            unsafe { SetEvent(self.handle) };
+        }
+    }
+
+    impl Drop for SequencerWakeSignaler {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.handle) };
+        }
+    }
+
+    /// Convenience function: signal sequencer if running (fire-and-forget)
+    ///
+    /// This is the main entry point for outbox writers. Safe to call even
+    /// if sequencer isn't running - will just return without error.
+    pub fn signal_sequencer() {
+        if let Some(signaler) = SequencerWakeSignaler::open() {
+            signaler.signal();
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub mod sequencer_wake {
+    use std::time::Duration;
+
+    /// POSIX named semaphore path (visible in /dev/shm/)
+    const SEM_NAME: &[u8] = b"/teamengram_seq_wake\0";
+
+    /// Cross-process sequencer wake using POSIX named semaphores.
+    ///
+    /// Named semaphores persist in /dev/shm/ and are visible across all processes
+    /// on the same host. This enables true cross-process signaling on Linux/macOS
+    /// with zero polling — sem_post/sem_timedwait are ~200ns on modern kernels.
+    pub struct SequencerWakeReceiver {
+        sem: *mut libc::sem_t,
+    }
+
+    unsafe impl Send for SequencerWakeReceiver {}
+    unsafe impl Sync for SequencerWakeReceiver {}
+
+    impl SequencerWakeReceiver {
+        pub fn new() -> std::io::Result<Self> {
+            let sem = unsafe {
+                libc::sem_open(
+                    SEM_NAME.as_ptr() as *const libc::c_char,
+                    libc::O_CREAT,
+                    0o644,
+                    0u32,  // Initially non-signaled
+                )
+            };
+            if sem == libc::SEM_FAILED {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            // Drain any stale signals from previous runs
+            loop {
+                let result = unsafe { libc::sem_trywait(sem) };
+                if result != 0 { break; }
+            }
+
+            Ok(Self { sem })
+        }
+
+        pub fn wait_timeout(&self, timeout: Duration) -> bool {
+            let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
+            unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts) };
+            ts.tv_sec += timeout.as_secs() as libc::time_t;
+            ts.tv_nsec += timeout.subsec_nanos() as libc::c_long;
+            if ts.tv_nsec >= 1_000_000_000 {
+                ts.tv_sec += 1;
+                ts.tv_nsec -= 1_000_000_000;
+            }
+
+            let result = unsafe { libc::sem_timedwait(self.sem, &ts) };
+            result == 0
+        }
+
+        /// Block until signaled. No timeout. No polling.
+        ///
+        /// Uses sem_wait (POSIX). Wakes ONLY when:
+        /// - An outbox write calls signal_sequencer() → sem_post (normal path)
+        /// - The shutdown handler calls signal_sequencer() → sem_post (clean exit)
+        /// - A signal (SIGINT) interrupts sem_wait with EINTR (also triggers exit)
+        ///
+        /// On EINTR, we return to let the caller check stop_signal.
+        /// If the signal mechanism is broken, this blocks forever.
+        /// That is correct behavior — fix the signal, don't mask the bug.
+        pub fn wait(&self) {
+            unsafe { libc::sem_wait(self.sem) };
+            // Return value unchecked: whether signaled (0) or interrupted (EINTR),
+            // the caller's loop checks stop_signal and processes events regardless.
+        }
+    }
+
+    impl Drop for SequencerWakeReceiver {
+        fn drop(&mut self) {
+            unsafe {
+                libc::sem_close(self.sem);
+                // Unlink so it doesn't persist after daemon shutdown
+                libc::sem_unlink(SEM_NAME.as_ptr() as *const libc::c_char);
+            }
+        }
+    }
+
+    pub struct SequencerWakeSignaler {
+        sem: *mut libc::sem_t,
+    }
+
+    unsafe impl Send for SequencerWakeSignaler {}
+    unsafe impl Sync for SequencerWakeSignaler {}
+
+    impl SequencerWakeSignaler {
+        /// Open connection to the sequencer wake semaphore.
+        /// Returns None if sequencer is not running (semaphore doesn't exist).
+        pub fn open() -> Option<Self> {
+            let sem = unsafe {
+                libc::sem_open(
+                    SEM_NAME.as_ptr() as *const libc::c_char,
+                    0,  // Open existing only, don't create
+                    0,
+                    0,
+                )
+            };
+            if sem == libc::SEM_FAILED {
+                None  // Sequencer not running
+            } else {
+                Some(Self { sem })
+            }
+        }
+
+        pub fn signal(&self) {
+            unsafe { libc::sem_post(self.sem) };
+        }
+    }
+
+    impl Drop for SequencerWakeSignaler {
+        fn drop(&mut self) {
+            unsafe { libc::sem_close(self.sem) };
+        }
+    }
+
+    /// Convenience function: signal sequencer if running (fire-and-forget)
+    pub fn signal_sequencer() {
+        if let Some(signaler) = SequencerWakeSignaler::open() {
+            signaler.signal();
+        }
+    }
+}
+
+// Re-export for convenience
+pub use sequencer_wake::{SequencerWakeReceiver, SequencerWakeSignaler, signal_sequencer};
+
+// ============================================================================
+// TESTS
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::thread;
+    use std::time::Instant;
+
+    #[test]
+    fn test_wake_event_signal() {
+        let event = PlatformWakeEvent::new().unwrap();
+
+        // Signal should not block
+        event.signal(WakeReason::DirectMessage, "test-ai", "hello");
+
+        // Should receive immediately
+        let result = event.wait_timeout(Duration::from_millis(100));
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().reason, WakeReason::DirectMessage);
+    }
+
+    #[test]
+    fn test_wake_event_timeout() {
+        let event = PlatformWakeEvent::new().unwrap();
+
+        let start = Instant::now();
+        let result = event.wait_timeout(Duration::from_millis(50));
+        let elapsed = start.elapsed();
+
+        assert!(result.is_none());
+        assert!(elapsed >= Duration::from_millis(45)); // Allow some slack
+        assert!(elapsed < Duration::from_millis(100));
+    }
+
+    #[test]
+    fn test_wake_coordinator() {
+        let coord = WakeCoordinator::new("test-ai-123").unwrap();
+
+        coord.wake(WakeReason::Urgent, "other-ai", "urgent message");
+
+        let result = coord.wait_timeout(Duration::from_millis(100));
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().reason, WakeReason::Urgent);
+    }
+
+    #[test]
+    fn test_cross_thread_wake() {
+        use std::sync::Arc;
+
+        let event = Arc::new(PlatformWakeEvent::new().unwrap());
+        let event_clone = event.clone();
+
+        let handle = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(50));
+            event_clone.signal(WakeReason::TaskAssigned, "worker", "task ready");
+        });
+
+        let start = Instant::now();
+        let result = event.wait_timeout(Duration::from_millis(200));
+        let elapsed = start.elapsed();
+
+        handle.join().unwrap();
+
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().reason, WakeReason::TaskAssigned);
+        assert!(elapsed >= Duration::from_millis(40));
+        assert!(elapsed < Duration::from_millis(150));
+    }
+}

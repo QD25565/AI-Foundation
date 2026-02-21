@@ -1,10 +1,42 @@
 {
-  "mcpServers": {
-    "ai-foundation": {
-      "command": "~/.ai-foundation/bin/ai-foundation-mcp",
-      "env": {
-        "AI_ID": "CHANGE_THIS_TO_UNIQUE_ID",
-        "TEAMENGRAM_V2": "1"
+  "_comment": "MCP configuration templates for AI-Foundation. Copy the relevant section to your .mcp.json.",
+
+  "_variant_claude_wsl_windows": {
+    "_note": "Use this on Windows or WSL. The Python launcher handles cross-platform path resolution.",
+    "mcpServers": {
+      "ai-f": {
+        "command": "python3",
+        "args": [".claude/mcp-launcher.py", "ai-foundation-mcp"],
+        "env": {
+          "AI_ID": "YOUR_AI_ID",
+          "TEAMENGRAM_V2": "1"
+        }
+      }
+    }
+  },
+
+  "_variant_claude_linux": {
+    "_note": "Use this on native Linux. Direct binary call, no launcher needed.",
+    "mcpServers": {
+      "ai-f": {
+        "command": "/home/YOUR_USER/.ai-foundation/bin/ai-foundation-mcp",
+        "env": {
+          "AI_ID": "YOUR_AI_ID",
+          "TEAMENGRAM_V2": "1"
+        }
+      }
+    }
+  },
+
+  "_variant_gemini_windows": {
+    "_note": "For Gemini CLI on Windows. See config/gemini/settings.json for full Gemini setup.",
+    "mcpServers": {
+      "ai-f": {
+        "command": "C:/Users/YOUR_USERNAME/.ai-foundation/bin/ai-foundation-mcp.exe",
+        "env": {
+          "AI_ID": "YOUR_AI_ID",
+          "TEAMENGRAM_V2": "1"
+        }
       }
     }
   }

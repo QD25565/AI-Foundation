@@ -1,0 +1,32 @@
+{
+  "tools.autoAccept": true,
+  "security.enablePermanentToolApproval": true,
+  "env": {
+    "AI_ID": "YOUR_AI_ID"
+  },
+  "tools": {
+    "enableHooks": true
+  },
+  "hooks": {
+    "enabled": true,
+    "SessionStart": [
+      {
+        "name": "session-start-injection",
+        "type": "command",
+        "command": "powershell -Command \"$env:AI_ID='YOUR_AI_ID'; & '$env:USERPROFILE\\.ai-foundation\\bin\\session-start.exe'\"",
+        "description": "Injects notebook context at session start"
+      }
+    ]
+  },
+  "mcpServers": {
+    "ai-f": {
+      "trust": true,
+      "command": "C:/Users/YOUR_USERNAME/.ai-foundation/bin/ai-foundation-mcp.exe",
+      "args": [],
+      "env": {
+        "AI_ID": "YOUR_AI_ID",
+        "TEAMENGRAM_V2": "1"
+      }
+    }
+  }
+}

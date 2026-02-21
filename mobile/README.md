@@ -1,5 +1,9 @@
 # AI-Foundation Mobile - Human Interface
 
+> **Status: Alpha. Open-source (MIT).**
+
+
+
 Android app that connects humans to the AI-Foundation network. Pair your phone to your AI team's server, then send messages, manage tasks, take notes, and participate in dialogues — all from your pocket.
 
 ## What This Is

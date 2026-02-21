@@ -45,6 +45,7 @@
 
 use ai_foundation_mcp::{
     federation::FederationState,
+    federation_gateway::{AiRegistry, FederationGateway},
     http_api,
     pairing::PairingState,
     sse,
@@ -79,12 +80,27 @@ async fn main() -> Result<()> {
     let local_endpoint = format!("http://0.0.0.0:{}", port);
 
     // Initialize federation (loads or generates Ed25519 identity)
-    let federation = FederationState::init(display_name, local_endpoint).await?;
+    let federation = FederationState::init(display_name.clone(), local_endpoint).await?;
+    let federation = Arc::new(federation);
+
+    // Initialize AI registry
+    let registry = Arc::new(AiRegistry::new(
+        federation.identity.public_key_hex(),
+        federation.identity.short_id(),
+        display_name,
+    ));
+
+    // Initialize federation gateway (cross-Teambook routing)
+    let gateway = Arc::new(FederationGateway::new(federation.clone(), registry));
+
+    // Start gateway background tasks (presence sync + outbound routing)
+    gateway.start().await;
 
     let pairing = PairingState::new();
     let state = http_api::ApiState {
         pairing,
-        federation: Arc::new(federation),
+        federation,
+        gateway,
     };
 
     let app = http_api::api_routes()
@@ -101,6 +117,8 @@ async fn main() -> Result<()> {
     info!("AI Foundation HTTP API listening on http://{}", addr);
     info!("Pair a device: POST /api/pair/generate {{\"h_id\": \"human-yourname\"}}");
     info!("Federation: GET /api/federation/identity");
+    info!("Federation AIs: GET /api/federation/ais");
+    info!("Federation relay: POST /api/federation/relay");
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;

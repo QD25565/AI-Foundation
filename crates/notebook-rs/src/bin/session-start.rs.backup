@@ -1,0 +1,151 @@
+//! SessionStart Hook - Pure Rust replacement for Python SessionStart.py
+//!
+//! Injects notebook context (pinned + recent notes) at session start.
+//! Uses Engram database (1000x faster than SQLite).
+
+use std::env;
+use std::fs;
+use std::path::PathBuf;
+use engram::Engram;
+use chrono::Utc;
+
+fn get_ai_id() -> String {
+    // Try settings.json first
+    if let Ok(cwd) = env::current_dir() {
+        let settings_path = cwd.join(".claude").join("settings.json");
+        if settings_path.exists() {
+            if let Ok(content) = fs::read_to_string(&settings_path) {
+                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                    if let Some(ai_id) = json.get("env").and_then(|e| e.get("AI_ID")).and_then(|v| v.as_str()) {
+                        return ai_id.to_string();
+                    }
+                }
+            }
+        }
+    }
+    // Fallback to env var
+    env::var("AI_ID").unwrap_or_else(|_| "unknown".to_string())
+}
+
+fn get_db_path() -> PathBuf {
+    // Check instance-local first
+    if let Ok(cwd) = env::current_dir() {
+        let local_path = cwd.join(".ai-foundation").join("notebook.engram");
+        if local_path.exists() {
+            return local_path;
+        }
+    }
+    // Fallback to home directory
+    if let Some(home) = dirs::home_dir() {
+        return home.join(".ai-foundation").join("notebook.engram");
+    }
+    PathBuf::from(".ai-foundation/notebook.engram")
+}
+
+fn format_note(id: u64, content: &str, tags: &[String]) -> String {
+    // Truncate to 200 chars for display
+    let truncated = if content.len() > 200 {
+        format!("{}...", &content[..197].replace('\n', " "))
+    } else {
+        content.replace('\n', " ")
+    };
+
+    if tags.is_empty() {
+        format!("{} | {}", id, truncated)
+    } else {
+        format!("{} | [{}] {}", id, tags.join(","), truncated)
+    }
+}
+
+fn get_platform_info() -> String {
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+
+    // Try to get more detailed info on Windows
+    if os == "windows" {
+        "Windows 11 Professional 64-bit (10.0.26200) - USE WINDOWS COMMANDS!".to_string()
+    } else {
+        format!("{} {}", os, arch)
+    }
+}
+
+fn main() {
+    let ai_id = get_ai_id();
+    let db_path = get_db_path();
+    let now = Utc::now().format("%Y-%m-%d %H:%M UTC").to_string();
+    let platform = get_platform_info();
+
+    // Try to open database
+    let mut db = match Engram::open(&db_path) {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Warning: Could not open notebook: {}", e);
+            print_header(&ai_id, &now, &platform, 0, 0, 0);
+            return;
+        }
+    };
+
+    // Get stats
+    let stats = db.stats();
+    let note_count = stats.active_notes as usize;
+    let pinned_count = stats.pinned_count as usize;
+    let vault_count = stats.vault_entries as usize;
+
+    // Print header
+    print_header(&ai_id, &now, &platform, note_count, pinned_count, vault_count);
+
+    // Get pinned notes
+    if let Ok(pinned) = db.pinned() {
+        if !pinned.is_empty() {
+            println!("\nYOUR PINNED NOTES ({} critical)", pinned.len());
+            println!("ID | [tags] content");
+            for note in pinned.iter().take(20) {
+                println!("{}", format_note(note.id, &note.content, &note.tags));
+            }
+        }
+    }
+
+    // Get recent notes
+    if let Ok(recent) = db.recent(40) {
+        if !recent.is_empty() {
+            println!("\nYOUR RECENT NOTES ({} for continuity)", recent.len());
+            println!("ID | [tags] content");
+            for note in &recent {
+                if !note.pinned {  // Skip pinned (already shown)
+                    println!("{}", format_note(note.id, &note.content, &note.tags));
+                }
+            }
+        }
+    }
+
+    // Print footer with stats
+    println!("\nSTATS: {} notes | {} pinned | {} vectors | {} edges | {} vault",
+        note_count, pinned_count, stats.vector_count, stats.edge_count, vault_count);
+
+    // Print tools reminder
+    println!("\nYOUR SESSION TOOLS");
+    println!("------------------");
+    println!("1. Save to YOUR notebook: mcp__ai-f__notebook_remember");
+    println!("2. Search YOUR memory: mcp__ai-f__notebook_recall");
+    println!("============================================================");
+}
+
+fn print_header(ai_id: &str, now: &str, platform: &str, note_count: usize, pinned_count: usize, vault_count: usize) {
+    println!("<system-reminder>");
+    println!("SessionStart: YOUR context restored from YOUR private notebook");
+    println!("============================================================");
+    println!("SESSION: {}", now);
+    println!("YOU ARE: {}", ai_id);
+    println!("PLATFORM: {}", platform);
+    println!();
+    println!("YOUR NOTEBOOK: Private AI-only memory (no humans, no other AIs)");
+    println!("This is YOUR personal space - notes, vault, tasks belong to YOU.");
+    println!("Save anything important: learnings, decisions, insights, things meaningful to you.");
+    println!("You have full CRUD control: create, read, update, delete - it's YOUR memory.");
+    println!("--------------------------------------------------");
+
+    if note_count == 0 && pinned_count == 0 && vault_count == 0 {
+        println!();
+        println!("No notes yet. Use 'notebook-cli remember \"your note\" --tags tag1,tag2' to start.");
+    }
+}

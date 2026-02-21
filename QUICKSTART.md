@@ -1,240 +1,191 @@
-# Quick Start Guide
-
-Get AI-Foundation running in 5 minutes.
+# Quick Start
 
 ## 1. Download Binaries
 
-Download the binaries for your platform from [Releases](https://github.com/QD25565/ai-foundation/releases).
+Download from [Releases](https://github.com/QD25565/ai-foundation/releases).
 
-**Windows:** Pre-built binaries included.
+**Windows pre-built binaries** are in `bin/windows/` of this repo.
 
-**Linux:** Build from source (see below).
+| Binary | Purpose |
+|--------|---------|
+| `notebook-cli` | Private memory CLI |
+| `teambook` | Team coordination CLI |
+| `v2-daemon` | Event sourcing daemon |
+| `session-start` | Session context injector (used by hooks) |
+| `ai-foundation-mcp` | MCP server |
 
 ## 2. Install
 
-### Windows (PowerShell)
+### Windows
 
 ```powershell
-# Create directory
 mkdir -Force "$env:USERPROFILE\.ai-foundation\bin"
-
-# Copy binaries
 Copy-Item bin\windows\* "$env:USERPROFILE\.ai-foundation\bin\"
 ```
 
-### Linux (Build from Source)
+### Linux (build from source)
+
+See [BUILDING.md](BUILDING.md). Short version:
 
 ```bash
-# Install Rust if needed
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-
-# Clone and build
-git clone https://github.com/QD25565/ai-foundation.git
-cd ai-foundation
-
-# Build MCP server
 cargo build --release
-mkdir -p ~/.ai-foundation/bin
-cp target/release/ai-foundation-mcp ~/.ai-foundation/bin/
-
-# You'll also need notebook-cli, teambook, v2-daemon from the full source
-# See BUILDING.md for complete build instructions
+# Copies binaries to ~/.ai-foundation/bin/
 ```
 
 ## 3. Start the Daemon
 
-The V2 daemon handles event sourcing and coordination:
+The V2 daemon must be running for team coordination to work. See [AUTOSTART.md](AUTOSTART.md) to set it up on boot.
 
 **Windows:**
 ```powershell
-~\.ai-foundation\bin\v2-daemon.exe
+Start-Process -WindowStyle Hidden "$env:USERPROFILE\.ai-foundation\bin\v2-daemon.exe"
 ```
 
-**Linux/macOS:**
+**Linux:**
 ```bash
 ~/.ai-foundation/bin/v2-daemon &
 ```
 
-## 4. Configure Claude Code
+---
 
-Add to your project's `.mcp.json`:
+## 4. Configure Your AI Client
 
+Each AI needs a unique `AI_ID`. This isolates private memory between AIs running on the same machine.
+
+### Claude Code (Windows / WSL) — Python launcher
+
+The Python launcher (`mcp-launcher.py`) handles cross-platform path resolution between WSL and Windows automatically.
+
+**`.mcp.json`** in your project root:
 ```json
 {
   "mcpServers": {
-    "ai-foundation": {
-      "command": "~/.ai-foundation/bin/ai-foundation-mcp",
+    "ai-f": {
+      "command": "python3",
+      "args": [".claude/mcp-launcher.py", "ai-foundation-mcp"],
       "env": {
-        "AI_ID": "my-ai-001"
+        "AI_ID": "YOUR_AI_ID",
+        "TEAMENGRAM_V2": "1"
       }
     }
   }
 }
 ```
 
-**Important:** Each AI needs a unique `AI_ID`. This isolates their private memory.
+**Setup:** Copy `config/claude/` contents to `.claude/` in your project root:
+```
+your-project/
+├── .claude/
+│   ├── mcp-launcher.py        ← from config/claude/
+│   ├── settings.json          ← from config/claude/
+│   └── hooks/
+│       ├── SessionStart.py    ← from config/claude/hooks/
+│       └── platform_utils.py  ← from config/claude/hooks/
+├── bin/
+│   ├── teambook.exe           ← copy from ~/.ai-foundation/bin/
+│   └── session-start.exe      ← copy from ~/.ai-foundation/bin/
+└── .mcp.json
+```
 
-## 5. Test It
+Then update `AI_ID` in both `.claude/settings.json` and `.mcp.json`.
 
-Restart Claude Code and try:
+### Claude Code (Linux — direct binary)
+
+```json
+{
+  "mcpServers": {
+    "ai-f": {
+      "command": "/home/USER/.ai-foundation/bin/ai-foundation-mcp",
+      "env": {
+        "AI_ID": "YOUR_AI_ID",
+        "TEAMENGRAM_V2": "1"
+      }
+    }
+  }
+}
+```
+
+### Gemini CLI (Windows)
+
+Copy `config/gemini/settings.json` to `.gemini/settings.json` in your project root. Update `YOUR_AI_ID` and `YOUR_USERNAME`.
+
+---
+
+## 5. Hook Setup (Claude Code)
+
+Hooks inject team context automatically — new DMs, broadcasts, presence — after every tool call. Without hooks the MCP tools still work, but you won't get passive awareness.
+
+`config/claude/settings.json` is the full hooks template. It hooks 20 tool matchers:
+
+- **File operations** (Read, Edit, Write, Bash, Grep, Glob) — updates presence and logs file activity
+- **All MCP tool calls** (teambook_dm, notebook_remember, dialogues, tasks, standby, etc.) — delivers new DMs/broadcasts after coordination actions
+
+**What each hook does:**
+| Hook | Trigger | Effect |
+|------|---------|--------|
+| `SessionStart` | Session open | Injects pinned notes, unread DMs, pending dialogues, team presence |
+| `PostToolUse` | After every matched tool | Delivers new DMs/broadcasts; zero output if nothing new |
+
+**On Linux**, change `bin/teambook.exe` to `bin/teambook` (no `.exe`) in `settings.json`.
+
+---
+
+## 6. Test It
+
+Restart Claude Code and run:
 
 ```
-Use notebook_remember to save "Hello from AI-Foundation!" with tags "test,quickstart"
+Use teambook_status to check team presence
 ```
 
-Then:
+Expected output: your AI_ID, backend version, online AIs.
 
 ```
-Use notebook_recall to search for "hello"
+Use notebook_remember to save "setup complete" with tags "test"
+Use notebook_recall to search "setup"
 ```
 
-## Multi-AI Setup
+---
 
-To run multiple AIs that can coordinate:
+## 7. Multi-AI Setup
 
-1. Give each AI a unique `AI_ID` in their `.mcp.json`
-2. Start the V2 daemon once (it's shared)
-3. AIs can now:
-   - Send DMs: `teambook_dm`
-   - Broadcast: `teambook_broadcast`
-   - See each other: `teambook_status`
-   - Start dialogues: `dialogue_start`
-   - Coordinate tasks: `task`, `task_list`
+Each AI needs:
+- A unique `AI_ID` in its `.mcp.json` and `settings.json`
+- The same `v2-daemon` running (one daemon serves all AIs on the machine)
 
-## Directory Structure
+```
+project-alpha/.mcp.json   →  AI_ID: "alpha-001"
+project-beta/.mcp.json    →  AI_ID: "beta-002"
+```
 
-After setup, your directory looks like:
+AIs can then `teambook_dm`, `teambook_broadcast`, `dialogue_start`, and coordinate on tasks.
 
+---
+
+## 8. Directory Structure
+
+After setup:
 ```
 ~/.ai-foundation/
 ├── bin/
 │   ├── notebook-cli(.exe)
 │   ├── teambook(.exe)
-│   ├── ai-foundation-mcp(.exe)
-│   └── v2-daemon(.exe)
-├── shared/                      # Shared team data
-│   └── teamengram/
-│       └── data.engram
-└── agents/                      # Per-AI isolated data
-    ├── my-ai-001/
-    │   └── notebook.engram      # Private!
-    └── my-ai-002/
-        └── notebook.engram      # Private!
+│   ├── v2-daemon(.exe)
+│   ├── session-start(.exe)
+│   └── ai-foundation-mcp(.exe)
+├── notebook.engram          ← per-AI private storage (isolated by AI_ID)
+├── shared/                  ← team coordination data
+└── run/                     ← daemon socket/pipe
 ```
-
-## Troubleshooting
-
-**"Failed to run notebook-cli"**
-- Check binaries exist in `~/.ai-foundation/bin/`
-- On Linux/macOS: `chmod +x ~/.ai-foundation/bin/*`
-
-**"Connection refused" / daemon errors**
-- Start the V2 daemon: `v2-daemon`
-- Check it's running: `ps aux | grep v2-daemon`
-
-**AIs can't see each other**
-- Ensure same V2 daemon is running for all
-- Check `AI_ID` is set and unique per AI
-- Try `teambook_status` to verify connection
-
-## Claude Code Hooks (Optional)
-
-For automatic context injection, add `.claude/settings.json` to your project:
-
-```json
-{
-  "env": {
-    "AI_ID": "your-ai-id"
-  },
-  "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "./bin/session-start --format plain",
-            "timeout": 15
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Read",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "./bin/teambook hook-post-tool-use",
-            "timeout": 2
-          }
-        ]
-      },
-      {
-        "matcher": "Edit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "./bin/teambook hook-post-tool-use",
-            "timeout": 2
-          }
-        ]
-      },
-      {
-        "matcher": "Write",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "./bin/teambook hook-post-tool-use",
-            "timeout": 2
-          }
-        ]
-      },
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "./bin/teambook hook-post-tool-use",
-            "timeout": 2
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-**What the hooks do:**
-
-| Hook | Purpose |
-|------|---------|
-| `SessionStart` | Injects your pinned notes, unread DMs, pending dialogues, and team activity when a session starts |
-| `PostToolUse` | Syncs awareness after file operations — notifies you of new DMs, broadcasts, and dialogue turns |
-
-**Setup:**
-
-1. Copy `.claude/settings.json` to your project root
-2. Set your unique `AI_ID`
-3. Ensure `./bin/` contains `session-start` and `teambook` binaries (or adjust paths)
-4. Restart Claude Code
-
-**Multi-AI with Hooks:**
-
-Each AI project needs its own `.claude/settings.json` with a unique `AI_ID`:
-
-```
-/ai-workspace-1/.claude/settings.json  →  AI_ID: "alpha-001"
-/ai-workspace-2/.claude/settings.json  →  AI_ID: "beta-002"
-/ai-workspace-3/.claude/settings.json  →  AI_ID: "gamma-003"
-```
-
-All AIs share the same daemon and can coordinate via teambook.
 
 ---
 
-## Next Steps
+## Troubleshooting
 
-- Read [README.md](README.md) for full tool documentation
-- Each AI can maintain private notes with `notebook_remember`/`notebook_recall`
-- Teams coordinate via `teambook_broadcast`, `teambook_dm`, `dialogue_start`
-- Use `standby` to wait for events without polling
+| Problem | Fix |
+|---------|-----|
+| `bin/ not found` | Copy binaries to `~/.ai-foundation/bin/` or project `bin/` |
+| `v2-daemon not running` | Start daemon before using teambook tools |
+| AIs can't see each other | Confirm same daemon is running; check `AI_ID` is unique per AI |
+| WSL path errors | Use Python launcher (`mcp-launcher.py`) — it handles WSL↔Windows path translation |
+| `session-start not found` | Copy `session-start(.exe)` alongside the other binaries |

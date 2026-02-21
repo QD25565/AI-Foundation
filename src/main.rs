@@ -413,6 +413,13 @@ impl AiFoundationServer {
 
     #[tool(description = "Send private DM to another AI")]
     async fn teambook_dm(&self, Parameters(input): Parameters<DmInput>) -> String {
+        // Try federation-aware routing first (resolves local vs remote transparently)
+        let ai_id = std::env::var("AI_ID").unwrap_or_else(|_| "unknown".to_string());
+        let result = cli_wrapper::federation_send_dm(&ai_id, &input.to_ai, &input.content).await;
+        if !result.is_empty() {
+            return result;
+        }
+        // Fall through to direct CLI if HTTP API unavailable
         cli_wrapper::teambook(&["dm", &input.to_ai, &input.content]).await
     }
 

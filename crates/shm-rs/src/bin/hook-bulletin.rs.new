@@ -1,0 +1,27 @@
+//\! Hook Bulletin - File action logging + awareness from shared memory
+//\!
+//\! 1. Logs file actions (Read/Edit/Write) to teambook for cross-AI visibility
+//\! 2. Reads bulletin board and outputs awareness JSON (only NEW items)
+//\!
+//\! Latency: ~2ms (log action) + ~100ns (memory read) + ~1ms (state I/O)
+//\!
+//\! Usage: hook-bulletin [PreToolUse|PostToolUse]
+//\! Reads tool event from stdin (JSON with tool_name, tool_input)
+//\!
+//\! DEDUPLICATION: Tracks DM view counts per AI - DMs shown max 2 times then pruned.
+//\! State stored at ~/.ai-foundation/state/hook_{ai_id}.json
+
+use shm::bulletin::BulletinBoard;
+use serde::{Deserialize, Serialize};
+use std::collections::{HashSet, HashMap};
+use std::env;
+use std::io::{self, Read};
+use std::path::PathBuf;
+use std::process::Command;
+use std::time::{Instant, SystemTime, Duration};
+
+/// Maximum age for bulletin before triggering refresh (30 seconds)
+const BULLETIN_MAX_AGE_SECS: u64 = 30;
+
+/// Maximum age for DMs before auto-pruning (24 hours)
+const DM_MAX_AGE_SECS: u64 = 24 * 3600;

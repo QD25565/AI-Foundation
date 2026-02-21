@@ -4,6 +4,7 @@
 pub mod cli_wrapper;
 pub mod crypto;
 pub mod federation;
+pub mod federation_gateway;
 pub mod federation_sync;
 pub mod hlc;
 pub mod http_api;

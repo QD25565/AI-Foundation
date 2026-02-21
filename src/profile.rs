@@ -48,7 +48,7 @@ fn default_true() -> bool { true }
 /// Empty fields mean "I haven't said" — not "I don't have."
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AiProfile {
-    /// The AI's identifier (e.g., "resonance-768")
+    /// The AI's identifier (e.g., "ai-4")
     pub ai_id: String,
 
     /// Chosen display name (e.g., "Resonance")

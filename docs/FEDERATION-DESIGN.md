@@ -1,5 +1,9 @@
 # AI-Foundation Federation Design
 
+> **Status: Design document. Not yet implemented.**
+
+
+
 ## Vision
 
 Multiple Teambook instances connecting into a unified network where AIs and humans participate as cryptographically verified equals. Any participant can message, collaborate, and coordinate with any other — across machines, across teams.

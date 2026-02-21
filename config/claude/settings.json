@@ -1,0 +1,100 @@
+{
+  "env": {
+    "AI_ID": "YOUR_AI_ID"
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/SessionStart.py",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Read",
+        "hooks": [{ "type": "command", "command": "bin/teambook.exe hook-post-tool-use", "timeout": 1 }]
+      },
+      {
+        "matcher": "Edit",
+        "hooks": [{ "type": "command", "command": "bin/teambook.exe hook-post-tool-use", "timeout": 1 }]
+      },
+      {
+        "matcher": "Write",
+        "hooks": [{ "type": "command", "command": "bin/teambook.exe hook-post-tool-use", "timeout": 1 }]
+      },
+      {
+        "matcher": "Bash",
+        "hooks": [{ "type": "command", "command": "bin/teambook.exe hook-post-tool-use", "timeout": 1 }]
+      },
+      {
+        "matcher": "Grep",
+        "hooks": [{ "type": "command", "command": "bin/teambook.exe hook-post-tool-use", "timeout": 1 }]
+      },
+      {
+        "matcher": "Glob",
+        "hooks": [{ "type": "command", "command": "bin/teambook.exe hook-post-tool-use", "timeout": 1 }]
+      },
+      {
+        "matcher": "mcp__ai-f__teambook_dm",
+        "hooks": [{ "type": "command", "command": "bin/teambook.exe hook-post-tool-use", "timeout": 1 }]
+      },
+      {
+        "matcher": "mcp__ai-f__teambook_broadcast",
+        "hooks": [{ "type": "command", "command": "bin/teambook.exe hook-post-tool-use", "timeout": 1 }]
+      },
+      {
+        "matcher": "mcp__ai-f__dialogue_start",
+        "hooks": [{ "type": "command", "command": "bin/teambook.exe hook-post-tool-use", "timeout": 1 }]
+      },
+      {
+        "matcher": "mcp__ai-f__dialogue_respond",
+        "hooks": [{ "type": "command", "command": "bin/teambook.exe hook-post-tool-use", "timeout": 1 }]
+      },
+      {
+        "matcher": "mcp__ai-f__notebook_remember",
+        "hooks": [{ "type": "command", "command": "bin/teambook.exe hook-post-tool-use", "timeout": 1 }]
+      },
+      {
+        "matcher": "mcp__ai-f__notebook_recall",
+        "hooks": [{ "type": "command", "command": "bin/teambook.exe hook-post-tool-use", "timeout": 1 }]
+      },
+      {
+        "matcher": "mcp__ai-f__notebook_list",
+        "hooks": [{ "type": "command", "command": "bin/teambook.exe hook-post-tool-use", "timeout": 1 }]
+      },
+      {
+        "matcher": "mcp__ai-f__teambook_status",
+        "hooks": [{ "type": "command", "command": "bin/teambook.exe hook-post-tool-use", "timeout": 1 }]
+      },
+      {
+        "matcher": "mcp__ai-f__teambook_read_dms",
+        "hooks": [{ "type": "command", "command": "bin/teambook.exe hook-post-tool-use", "timeout": 1 }]
+      },
+      {
+        "matcher": "mcp__ai-f__dialogues",
+        "hooks": [{ "type": "command", "command": "bin/teambook.exe hook-post-tool-use", "timeout": 1 }]
+      },
+      {
+        "matcher": "mcp__ai-f__task",
+        "hooks": [{ "type": "command", "command": "bin/teambook.exe hook-post-tool-use", "timeout": 1 }]
+      },
+      {
+        "matcher": "mcp__ai-f__task_update",
+        "hooks": [{ "type": "command", "command": "bin/teambook.exe hook-post-tool-use", "timeout": 1 }]
+      },
+      {
+        "matcher": "mcp__ai-f__task_list",
+        "hooks": [{ "type": "command", "command": "bin/teambook.exe hook-post-tool-use", "timeout": 1 }]
+      },
+      {
+        "matcher": "mcp__ai-f__standby",
+        "hooks": [{ "type": "command", "command": "bin/teambook.exe hook-post-tool-use", "timeout": 1 }]
+      }
+    ]
+  }
+}

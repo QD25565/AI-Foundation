@@ -1,0 +1,52 @@
+[package]
+name = "notebook-rs"
+version = "0.2.0"
+edition = "2021"
+description = "High-performance AI notebook powered by Engram (1000x faster than SQLite)"
+
+[[bin]]
+name = "notebook-cli"
+path = "src/bin/notebook-cli.rs"
+
+[[bin]]
+name = "session-start"
+path = "src/bin/session-start.rs"
+
+[dependencies]
+# CLI
+clap = { version = "4.5", features = ["derive"] }
+
+# Core storage - Engram is now the only backend
+engram = { path = "../engram", features = [] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+dirs = "5"
+atty = "0.2"
+toml = "0.8"
+
+# TeamEngram for awareness data
+teamengram = { path = "../teamengram-rs" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+# Performance optimization
+mimalloc = { version = "0.1", default-features = false }
+
+# Windows-specific for daemon detection
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO"] }
+
+[features]
+default = []
+
+# llama-cpp-sys-2 patch is defined at the workspace root Cargo.toml
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

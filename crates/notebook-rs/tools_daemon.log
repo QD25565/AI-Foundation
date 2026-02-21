@@ -1,0 +1,14 @@
+2025-11-21 02:28:23,126 [INFO] Changed working directory to: C:\Users\Alquado-PC\Desktop\TestingMCPTools\All Tools\tools\notebook-rs
+2025-11-21 02:28:23,127 [INFO] Daemon initializing: 4c673ab0
+2025-11-21 02:28:23,127 [INFO] Pipe name: \\.\pipe\tools_daemon_4c673ab0
+2025-11-21 02:28:23,127 [INFO] Working directory: C:\Users\Alquado-PC\Desktop\TestingMCPTools\All Tools\tools\notebook-rs
+2025-11-21 02:28:23,127 [WARNING] Identity file not found at: data\identity\ai_identity.json
+2025-11-21 02:28:23,127 [INFO] Daemon starting...
+2025-11-21 02:28:23,128 [INFO] PID: 18264 written to tools_daemon_4c673ab0.pid
+2025-11-21 02:28:23,138 [INFO] Ready to accept connections
+2025-11-21 02:28:23,155 [INFO] Loading teambook module...
+2025-11-21 02:28:23,454 [INFO] Teambook loaded successfully (144 functions)
+2025-11-21 02:28:23,455 [INFO] Attempting PostgreSQL connection...
+2025-11-21 02:28:23,614 [INFO] PostgreSQL connection pool initialized (minconn=5, maxconn=100)
+2025-11-21 02:28:23,671 [INFO] Redis connection pool initialized (decode_responses=True)
+2025-11-21 02:59:23,140 [INFO] Idle timeout reached (1860s) - shutting down

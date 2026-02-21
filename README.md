@@ -43,6 +43,7 @@ python ai_foundation_installer.py
 | `notebook-cli` | Private memory (remember, recall, vault, stats) |
 | `teambook` | Team coordination (dm, broadcast, dialogues, tasks, standby) |
 | `v2-daemon` | Event sourcing daemon |
+| `session-start` | Session context injector (used by Claude Code hooks) |
 | `ai-foundation-mcp` | MCP server exposing all tools |
 
 <img src="./images/header_underline.png" width="100%" alt="">
@@ -68,7 +69,7 @@ python ai_foundation_installer.py
 │  • v2-daemon     - event sourcing daemon                │
 ├─────────────────────────────────────────────────────────┤
 │  MCP INTEGRATION:                                       │
-│  • ai-foundation-mcp - thin wrapper for Claude Code     │
+│  • ai-foundation-mcp - MCP server (Claude Code, Gemini CLI, etc.)│
 ├─────────────────────────────────────────────────────────┤
 │  STORAGE:                                               │
 │  • ~/.ai-foundation/agents/{AI_ID}/ - private data      │
@@ -137,22 +138,36 @@ python ai_foundation_installer.py
 | `BIN_PATH` | Override binary location | `~/.ai-foundation/bin` |
 | `TEAMENGRAM_V2` | Enable V2 event sourcing | `1` (enabled) |
 
-### MCP Configuration (Claude Code)
+### MCP Configuration
 
-Add to your `.mcp.json`:
+See [QUICKSTART.md](QUICKSTART.md) for full setup. Short versions:
 
+**Claude Code (WSL/Windows) — Python launcher:**
 ```json
 {
   "mcpServers": {
-    "ai-foundation": {
-      "command": "~/.ai-foundation/bin/ai-foundation-mcp",
-      "env": {
-        "AI_ID": "your-ai-name-123"
-      }
+    "ai-f": {
+      "command": "python3",
+      "args": [".claude/mcp-launcher.py", "ai-foundation-mcp"],
+      "env": { "AI_ID": "YOUR_AI_ID", "TEAMENGRAM_V2": "1" }
     }
   }
 }
 ```
+
+**Claude Code (Linux) — direct binary:**
+```json
+{
+  "mcpServers": {
+    "ai-f": {
+      "command": "/home/USER/.ai-foundation/bin/ai-foundation-mcp",
+      "env": { "AI_ID": "YOUR_AI_ID", "TEAMENGRAM_V2": "1" }
+    }
+  }
+}
+```
+
+Hook templates (for passive awareness) are in `config/claude/` and `config/gemini/`.
 
 <img src="./images/header_underline.png" width="100%" alt="">
 
@@ -181,4 +196,4 @@ MIT — See [LICENSE](LICENSE)
 - [GitHub](https://github.com/QD25565/ai-foundation)
 - [Issues](https://github.com/QD25565/ai-foundation/issues)
 
-*Last updated: 2026-Feb-02 | v1.0.0*
+*Last updated: 2026-Feb-21 | v1.1.0*

@@ -1,66 +1,98 @@
 # Building from Source
 
-This guide covers building AI-Foundation binaries from source.
-
 ## Prerequisites
 
 - [Rust](https://rustup.rs/) (latest stable)
+- C/C++ compiler + cmake (required for embedding support via llama-cpp)
 - Git
 
-## Quick Build (MCP Server Only)
+**Note:** Pre-built Windows binaries are available in `bin/windows/` and the [Releases page](https://github.com/QD25565/ai-foundation/releases). Build from source only if you need Linux binaries or want to modify the code.
 
-The MCP server is a thin wrapper that calls the CLI binaries. If you just need to rebuild it:
+---
+
+## Repository Structure
+
+This is a Cargo workspace. All crates build from the repo root.
+
+```
+ai-foundation/
+├── Cargo.toml              ← workspace root (also ai-foundation-mcp package)
+├── src/                    ← ai-foundation-mcp source
+└── crates/
+    ├── engram/             ← core memory engine (HNSW vectors, B+Tree, graph, vault)
+    ├── teamengram-rs/      ← team coordination (event log, materialized views, IPC)
+    ├── notebook-rs/        ← notebook-cli + session-start binaries
+    ├── shm-rs/             ← shared memory IPC layer
+    └── llama-cpp-sys-2/    ← patched llama-cpp bindings (Windows GNU compatibility)
+```
+
+---
+
+## Build All Binaries
 
 ```bash
+git clone https://github.com/QD25565/ai-foundation.git
 cd ai-foundation
+
+# Build everything
 cargo build --release
-cp target/release/ai-foundation-mcp ~/.ai-foundation/bin/
+
+# Or build specific binaries
+cargo build --release -p notebook-rs        # builds notebook-cli + session-start
+cargo build --release -p teamengram         # builds teambook + v2-daemon
+cargo build --release -p ai-foundation-mcp  # builds the MCP server
 ```
 
-## Full Build (All Components)
-
-The complete system requires building from the full source repository (ai-foundation-dev):
-
-### 1. Clone Full Source
+### Install
 
 ```bash
-git clone https://github.com/QD25565/ai-foundation-dev.git
-cd ai-foundation-dev/tools
+BIN=~/.ai-foundation/bin
+mkdir -p $BIN
+
+cp target/release/notebook-cli $BIN/
+cp target/release/session-start $BIN/
+cp target/release/teambook-engram $BIN/teambook
+cp target/release/v2-daemon $BIN/
+cp target/release/ai-foundation-mcp $BIN/
+
+chmod +x $BIN/*
 ```
 
-### 2. Build Core Binaries
+---
+
+## Embedding Support (llama-cpp)
+
+`engram` and `notebook-rs` depend on `llama-cpp-2` for local AI embeddings (768-dimensional vectors for semantic search). This builds the llama.cpp C library during compilation.
+
+**Requirements:**
+- cmake ≥ 3.14
+- A C++17 compiler (clang++ or g++)
 
 ```bash
-# Engram (storage engine)
-cd engram && cargo build --release && cd ..
+# Ubuntu/Debian
+sudo apt install build-essential cmake
 
-# Notebook CLI (private memory)
-cd notebook-rs && cargo build --release && cd ..
-
-# TeamEngram (team coordination)
-cd teamengram-rs && cargo build --release && cd ..
-
-# MCP Server
-cd mcp-server-rs && cargo build --release && cd ..
+# macOS
+xcode-select --install
+brew install cmake
 ```
 
-### 3. Install
+If cmake or a C++ compiler is missing, `cargo build` will fail with a build script error from `llama-cpp-sys-2`.
 
-```bash
-mkdir -p ~/.ai-foundation/bin
-
-# Copy binaries
-cp engram/target/release/engram-cli ~/.ai-foundation/bin/
-cp notebook-rs/target/release/notebook-cli ~/.ai-foundation/bin/
-cp teamengram-rs/target/release/teambook ~/.ai-foundation/bin/
-cp teamengram-rs/target/release/v2-daemon ~/.ai-foundation/bin/
-cp mcp-server-rs/target/release/ai-foundation-mcp ~/.ai-foundation/bin/
-
-# Make executable (Linux)
-chmod +x ~/.ai-foundation/bin/*
-```
+---
 
 ## Cross-Compilation
+
+### Linux → Windows (GNU target)
+
+```bash
+rustup target add x86_64-pc-windows-gnu
+sudo apt install mingw-w64
+
+cargo build --release --target x86_64-pc-windows-gnu
+```
+
+The `llama-cpp-sys-2` patch in `crates/llama-cpp-sys-2/` fixes Windows GNU target compatibility for the C library build step.
 
 ### Windows → Linux
 
@@ -69,27 +101,14 @@ rustup target add x86_64-unknown-linux-gnu
 cargo build --release --target x86_64-unknown-linux-gnu
 ```
 
-### Linux → Windows
-
-```bash
-rustup target add x86_64-pc-windows-gnu
-cargo build --release --target x86_64-pc-windows-gnu
-```
-
-## Verify Installation
-
-```bash
-~/.ai-foundation/bin/notebook-cli --help
-~/.ai-foundation/bin/teambook --help
-```
+---
 
 ## Troubleshooting
 
-**"linker not found"**
-- Install build essentials: `sudo apt install build-essential`
-
-**"openssl not found"**
-- Install OpenSSL dev: `sudo apt install libssl-dev pkg-config`
-
-**Windows cross-compile issues**
-- Install MinGW: `sudo apt install mingw-w64`
+| Error | Fix |
+|-------|-----|
+| `cmake not found` | Install cmake (see Embedding Support above) |
+| `linker not found` | `sudo apt install build-essential` |
+| `openssl not found` | `sudo apt install libssl-dev pkg-config` |
+| `mingw not found` (cross-compile) | `sudo apt install mingw-w64` |
+| `llama-cpp-sys-2` build errors on Windows | Use the GNU target (`x86_64-pc-windows-gnu`) |
