@@ -3,6 +3,12 @@ target/
 *.pdb
 .cargo/
 
+# Android build outputs
+mobile/app/build/
+mobile/.gradle/
+*.apk
+*.aab
+
 # IDE
 .idea/
 .vscode/
