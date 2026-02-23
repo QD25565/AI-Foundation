@@ -9,17 +9,20 @@ import retrofit2.converter.gson.GsonConverterFactory
 import java.util.concurrent.TimeUnit
 
 /**
- * Network client for the AI-Foundation HTTP API (ai-foundation-http).
- * Adds Bearer token authentication via interceptor.
+ * Network client for ai-foundation-mobile-api (default port 8081).
+ *
+ * Two OkHttpClient flavours:
+ *  - Standard (30s timeout) — for all REST calls
+ *  - SSE (no read timeout) — for GET /api/events streaming connection
  */
 object TeambookClient {
 
     private const val DEFAULT_TIMEOUT = 30L
 
-    // Default to emulator localhost on port 8080 (ai-foundation-http default)
-    private var baseUrl = "http://10.0.2.2:8080/"
+    // Default to emulator localhost on port 8081 (ai-foundation-mobile-api default)
+    private var baseUrl = "http://10.0.2.2:8081/"
 
-    // Auth token from pairing - set after successful pairing
+    // Bearer token from pairing — set after successful pairing, cleared on unpair
     private var authToken: String? = null
 
     private val loggingInterceptor = HttpLoggingInterceptor().apply {
@@ -36,28 +39,26 @@ object TeambookClient {
     }
 
     private var okHttpClient = buildOkHttpClient()
-
     private var retrofit: Retrofit = buildRetrofit()
     private var _api: TeambookApi = retrofit.create(TeambookApi::class.java)
+
     val api: TeambookApi get() = _api
 
-    private fun buildOkHttpClient(): OkHttpClient {
-        return OkHttpClient.Builder()
+    private fun buildOkHttpClient(): OkHttpClient =
+        OkHttpClient.Builder()
             .addInterceptor(authInterceptor)
             .addInterceptor(loggingInterceptor)
             .connectTimeout(DEFAULT_TIMEOUT, TimeUnit.SECONDS)
             .readTimeout(DEFAULT_TIMEOUT, TimeUnit.SECONDS)
             .writeTimeout(DEFAULT_TIMEOUT, TimeUnit.SECONDS)
             .build()
-    }
 
-    private fun buildRetrofit(): Retrofit {
-        return Retrofit.Builder()
+    private fun buildRetrofit(): Retrofit =
+        Retrofit.Builder()
             .baseUrl(baseUrl)
             .client(okHttpClient)
             .addConverterFactory(GsonConverterFactory.create())
             .build()
-    }
 
     private fun rebuild() {
         okHttpClient = buildOkHttpClient()
@@ -66,24 +67,29 @@ object TeambookClient {
     }
 
     /**
-     * Set the server URL (e.g., "http://192.168.1.100:8080")
+     * OkHttpClient for SSE connections. No read timeout — the connection
+     * intentionally stays open until the app closes it.
      */
+    fun sseOkHttpClient(): OkHttpClient =
+        OkHttpClient.Builder()
+            .addInterceptor(authInterceptor)
+            .connectTimeout(DEFAULT_TIMEOUT, TimeUnit.SECONDS)
+            .readTimeout(0, TimeUnit.SECONDS)   // no timeout — SSE is streaming
+            .writeTimeout(DEFAULT_TIMEOUT, TimeUnit.SECONDS)
+            .build()
+
     fun setServerUrl(url: String) {
-        val normalizedUrl = if (url.endsWith("/")) url else "$url/"
-        if (normalizedUrl != baseUrl) {
-            baseUrl = normalizedUrl
+        val normalised = if (url.endsWith("/")) url else "$url/"
+        if (normalised != baseUrl) {
+            baseUrl = normalised
             rebuild()
         }
     }
 
     fun getServerUrl(): String = baseUrl
 
-    /**
-     * Set the auth token (from pairing or saved preferences)
-     */
     fun setAuthToken(token: String?) {
         authToken = token
-        // Rebuild client to pick up the new token in interceptor closure
         rebuild()
     }
 

@@ -44,7 +44,7 @@ use once_cell::sync::Lazy;
 use std::sync::Mutex;
 
 use teamengram::{
-    TeamEngram, TaskPriority, RecordData, JoinRoomResult, VoteStatus, now_millis,
+    TeamEngram, TaskPriority, RecordData, JoinRoomResult, VoteStatus,
     ShmNotifyCallback,
     wake::{WakeCoordinator, WakeReason, PresenceMutex, is_ai_online},
 };
@@ -62,9 +62,7 @@ use teamengram::shm_rs::bulletin::BulletinBoard;
 
 // Using our own pipe implementation (direct Windows API, not tokio's broken abstraction)
 #[cfg(windows)]
-use teamengram::pipe::windows::{PipeServer, PipeClient};
-#[cfg(windows)]
-use std::io::{Read, Write};
+use teamengram::pipe::windows::PipeServer;
 
 // ============================================================================
 // JSON-RPC 2.0 PROTOCOL
@@ -498,7 +496,7 @@ impl TeamEngramDaemon {
 /// This runs in a std::thread with its own tokio runtime for async store operations
 #[cfg(windows)]
 fn handle_client_sync(
-    mut pipe: PipeServer,
+    pipe: PipeServer,
     shared_store: Arc<RwLock<TeamEngram>>,
     private_store: Arc<RwLock<TeamEngram>>,
     stats: Arc<RwLock<DaemonStats>>,

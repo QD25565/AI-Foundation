@@ -259,7 +259,7 @@ impl<'a> QueryExecutor<'a> {
             Query::Closure { node, edge_types } => {
                 self.execute_closure(node, edge_types)
             }
-            Query::Infer { max_iterations } => {
+            Query::Infer { .. } => {
                 // Inference requires mutable graph, return error
                 QueryResult::Error("Inference requires mutable graph access".to_string())
             }

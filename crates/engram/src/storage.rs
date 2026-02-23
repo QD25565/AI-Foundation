@@ -97,6 +97,7 @@ impl NoteCache {
         self.entries.len()
     }
 
+    #[allow(dead_code)]
     fn hits(&self) -> usize {
         self.entries.len()
     }
@@ -163,6 +164,7 @@ pub struct Engram {
     recall_config: RecallConfig,
 
     /// AI ID for vault key derivation
+    #[allow(dead_code)]
     ai_id: String,
 
     /// Encryption cipher for note content
@@ -667,7 +669,6 @@ impl Engram {
 
         // Update indexes
         self.note_index.remove(&id);
-        let had_pin = self.pinned.contains(&id);
         self.pinned.retain(|&pid| pid != id);
         self.temporal_index.retain(|(_, nid)| *nid != id);
 

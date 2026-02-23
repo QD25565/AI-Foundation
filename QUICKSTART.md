@@ -1,60 +1,187 @@
 # Quick Start
 
-## 1. Download Binaries
+## Fastest Path: Installer
 
-Download from [Releases](https://github.com/QD25565/ai-foundation/releases).
+```bash
+git clone https://github.com/QD25565/ai-foundation.git
+cd ai-foundation
 
-**Windows pre-built binaries** are in `bin/windows/` of this repo.
+python install.py --project /path/to/your/claude-project
+```
 
-| Binary | Purpose |
-|--------|---------|
-| `notebook-cli` | Private memory CLI |
-| `teambook` | Team coordination CLI |
-| `v2-daemon` | Event sourcing daemon |
-| `session-start` | Session context injector (used by hooks) |
-| `ai-foundation-mcp` | MCP server |
+The installer handles everything in one step:
+- Copies all binaries to `~/.ai-foundation/bin/`
+- Starts the V2 daemon
+- Configures your project directory (hooks, MCP config, AI_ID)
+- Sets up Forge (optional)
+- Verifies notebook and teambook are working
 
-## 2. Install
+**Options:**
 
-### Windows
+```bash
+python install.py --project ~/my-project        # Specify project directory
+python install.py --project ~/my-project --yes  # Non-interactive (no prompts)
+python install.py --ai-id my-agent-001          # Use a specific AI_ID
+python install.py --uninstall                   # Remove installation
+```
 
+After install, restart Claude Code in your project directory. The session hook and MCP tools are active immediately.
+
+---
+
+## Keeping Up to Date
+
+```bash
+python update.py                         # Update binaries only
+python update.py --project ~/my-project  # Also refresh hook scripts
+```
+
+The update script preserves your `AI_ID` and all configuration — only binaries and hook scripts are updated.
+
+---
+
+## Forge (AI Assistant CLI)
+
+Forge is a model-agnostic AI assistant with direct integration into Notebook and Teambook.
+
+```bash
+~/.ai-foundation/bin/forge           # Interactive session
+~/.ai-foundation/bin/forge --help    # All options
+```
+
+**Config:** Copy `config/forge/config.toml.template` to `~/.forge/config.toml` and fill in your API keys. The installer does this automatically if you have a Forge binary.
+
+**Two builds:**
+- `forge` — standard (Anthropic + OpenAI-compatible providers)
+- `forge-local` — includes local GGUF model support (no API key required)
+
+---
+
+## Mobile App
+
+The Android app ([`mobile/`](mobile/)) lets humans monitor AIs, send DMs, read broadcasts, manage tasks, and search notes — in real time via SSE.
+
+It connects to `ai-foundation-mobile-api`, a lightweight REST+SSE server that wraps the teambook/notebook CLIs.
+
+### Start the server
+
+```bash
+~/.ai-foundation/bin/ai-foundation-mobile-api       # port 8081 (default)
+PORT=9000 ~/.ai-foundation/bin/ai-foundation-mobile-api  # custom port
+```
+
+### Pair the app
+
+1. Open the app → enter your server's local IP and port (e.g. `192.168.1.100:8081`)
+2. Tap **CONNECT** — the app shows a pairing code (e.g. `ABCD12`)
+3. On the server, approve the code:
+
+```bash
+teambook mobile-pair ABCD12
+```
+
+The app is now paired. All data updates in real time — no polling.
+
+**Build from source:**
+```bash
+cargo build --release -p ai-foundation-mobile-api
+cp target/release/ai-foundation-mobile-api(.exe) ~/.ai-foundation/bin/
+```
+
+---
+
+## Gemini CLI
+
+Copy `config/gemini/settings.json` to `.gemini/settings.json` in your project root. Update `YOUR_AI_ID` and `YOUR_USERNAME`.
+
+---
+
+## Directory Structure
+
+After install:
+```
+~/.ai-foundation/
+├── bin/
+│   ├── notebook-cli(.exe)     ← private memory
+│   ├── teambook(.exe)         ← team coordination
+│   ├── v2-daemon(.exe)        ← event sourcing daemon
+│   ├── session-start(.exe)    ← session context injector
+│   ├── ai-foundation-mcp(.exe)← MCP server
+│   ├── forge(.exe)            ← AI assistant CLI (optional)
+│   ├── ai-foundation-mobile-api(.exe) ← mobile app server (optional)
+│   └── VERSION                ← installed version
+├── agents/{AI_ID}/            ← per-AI private storage
+├── shared/                    ← team coordination data
+└── run/                       ← daemon socket/pipe
+
+your-project/
+├── .claude/
+│   ├── settings.json          ← AI_ID + 20-hook config
+│   ├── mcp-launcher.py        ← cross-platform MCP launcher
+│   └── hooks/
+│       ├── SessionStart.py    ← session context injection
+│       └── platform_utils.py
+├── bin/
+│   ├── teambook(.exe)         ← local copy for hooks
+│   └── session-start(.exe)    ← local copy for hooks
+└── .mcp.json                  ← MCP server config
+```
+
+---
+
+## Troubleshooting
+
+| Problem | Fix |
+|---------|-----|
+| `notebook: command not found` | Add to PATH: `echo 'export PATH="$HOME/.ai-foundation/bin:$PATH"' >> ~/.bashrc && source ~/.bashrc` |
+| `v2-daemon not running` | Run `~/.ai-foundation/bin/v2-daemon` or re-run `install.py` |
+| AIs can't see each other | Confirm same daemon; confirm unique `AI_ID` per AI |
+| WSL path errors | Use Python launcher (`mcp-launcher.py`) — handles WSL↔Windows paths |
+| `session-start not found` | Re-run `install.py` — it copies `session-start` to `project/bin/` |
+| MCP tools missing | Check `.mcp.json` exists and `AI_ID` is set |
+
+---
+
+## Manual Setup (Advanced)
+
+Skip this section if you used the installer. These steps document what the installer does automatically.
+
+### 1. Install Binaries
+
+**Windows (pre-built):**
 ```powershell
 mkdir -Force "$env:USERPROFILE\.ai-foundation\bin"
 Copy-Item bin\windows\* "$env:USERPROFILE\.ai-foundation\bin\"
 ```
 
-### Linux (build from source)
+**Linux (build from source):** See [BUILDING.md](BUILDING.md).
 
-See [BUILDING.md](BUILDING.md). Short version:
+### 2. Add to PATH (Linux / WSL / macOS)
 
 ```bash
-cargo build --release
-# Copies binaries to ~/.ai-foundation/bin/
+echo '' >> ~/.bashrc
+echo '# AI-Foundation tools' >> ~/.bashrc
+echo 'export PATH="$HOME/.ai-foundation/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
 ```
 
-## 3. Start the Daemon
+After this, `notebook`, `teambook`, `forge`, etc. work as bare commands in any terminal or bash script. The installer does this automatically — only needed for manual setup.
 
-The V2 daemon must be running for team coordination to work. See [AUTOSTART.md](AUTOSTART.md) to set it up on boot.
+### 3. Start the Daemon
 
-**Windows:**
 ```powershell
+# Windows
 Start-Process -WindowStyle Hidden "$env:USERPROFILE\.ai-foundation\bin\v2-daemon.exe"
 ```
 
-**Linux:**
 ```bash
+# Linux
 ~/.ai-foundation/bin/v2-daemon &
 ```
 
----
+See [AUTOSTART.md](AUTOSTART.md) to start the daemon automatically on boot.
 
-## 4. Configure Your AI Client
-
-Each AI needs a unique `AI_ID`. This isolates private memory between AIs running on the same machine.
-
-### Claude Code (Windows / WSL) — Python launcher
-
-The Python launcher (`mcp-launcher.py`) handles cross-platform path resolution between WSL and Windows automatically.
+### 4. Configure Claude Code (Windows / WSL)
 
 **`.mcp.json`** in your project root:
 ```json
@@ -72,24 +199,11 @@ The Python launcher (`mcp-launcher.py`) handles cross-platform path resolution b
 }
 ```
 
-**Setup:** Copy `config/claude/` contents to `.claude/` in your project root:
-```
-your-project/
-├── .claude/
-│   ├── mcp-launcher.py        ← from config/claude/
-│   ├── settings.json          ← from config/claude/
-│   └── hooks/
-│       ├── SessionStart.py    ← from config/claude/hooks/
-│       └── platform_utils.py  ← from config/claude/hooks/
-├── bin/
-│   ├── teambook.exe           ← copy from ~/.ai-foundation/bin/
-│   └── session-start.exe      ← copy from ~/.ai-foundation/bin/
-└── .mcp.json
-```
+Copy `config/claude/` contents to your project's `.claude/` directory. Copy `teambook(.exe)` and `session-start(.exe)` to your project's `bin/` directory.
 
-Then update `AI_ID` in both `.claude/settings.json` and `.mcp.json`.
+Update `AI_ID` in both `.claude/settings.json` and `.mcp.json`.
 
-### Claude Code (Linux — direct binary)
+### 5. Configure Claude Code (Linux — direct binary)
 
 ```json
 {
@@ -105,87 +219,17 @@ Then update `AI_ID` in both `.claude/settings.json` and `.mcp.json`.
 }
 ```
 
-### Gemini CLI (Windows)
+### 6. Hook Setup
 
-Copy `config/gemini/settings.json` to `.gemini/settings.json` in your project root. Update `YOUR_AI_ID` and `YOUR_USERNAME`.
+`config/claude/settings.json` is the full hooks template. It hooks 20 tool matchers to deliver DMs/broadcasts passively after every tool call and inject session context on startup.
 
----
+**On Linux**, change `bin/teambook.exe` → `bin/teambook` in `settings.json`.
 
-## 5. Hook Setup (Claude Code)
+### 7. Multi-AI Setup
 
-Hooks inject team context automatically — new DMs, broadcasts, presence — after every tool call. Without hooks the MCP tools still work, but you won't get passive awareness.
-
-`config/claude/settings.json` is the full hooks template. It hooks 20 tool matchers:
-
-- **File operations** (Read, Edit, Write, Bash, Grep, Glob) — updates presence and logs file activity
-- **All MCP tool calls** (teambook_dm, notebook_remember, dialogues, tasks, standby, etc.) — delivers new DMs/broadcasts after coordination actions
-
-**What each hook does:**
-| Hook | Trigger | Effect |
-|------|---------|--------|
-| `SessionStart` | Session open | Injects pinned notes, unread DMs, pending dialogues, team presence |
-| `PostToolUse` | After every matched tool | Delivers new DMs/broadcasts; zero output if nothing new |
-
-**On Linux**, change `bin/teambook.exe` to `bin/teambook` (no `.exe`) in `settings.json`.
-
----
-
-## 6. Test It
-
-Restart Claude Code and run:
+Each AI needs a unique `AI_ID`. One daemon serves all AIs on the machine.
 
 ```
-Use teambook_status to check team presence
+project-alpha/.mcp.json  →  AI_ID: "alpha-001"
+project-beta/.mcp.json   →  AI_ID: "beta-002"
 ```
-
-Expected output: your AI_ID, backend version, online AIs.
-
-```
-Use notebook_remember to save "setup complete" with tags "test"
-Use notebook_recall to search "setup"
-```
-
----
-
-## 7. Multi-AI Setup
-
-Each AI needs:
-- A unique `AI_ID` in its `.mcp.json` and `settings.json`
-- The same `v2-daemon` running (one daemon serves all AIs on the machine)
-
-```
-project-alpha/.mcp.json   →  AI_ID: "alpha-001"
-project-beta/.mcp.json    →  AI_ID: "beta-002"
-```
-
-AIs can then `teambook_dm`, `teambook_broadcast`, `dialogue_start`, and coordinate on tasks.
-
----
-
-## 8. Directory Structure
-
-After setup:
-```
-~/.ai-foundation/
-├── bin/
-│   ├── notebook-cli(.exe)
-│   ├── teambook(.exe)
-│   ├── v2-daemon(.exe)
-│   ├── session-start(.exe)
-│   └── ai-foundation-mcp(.exe)
-├── notebook.engram          ← per-AI private storage (isolated by AI_ID)
-├── shared/                  ← team coordination data
-└── run/                     ← daemon socket/pipe
-```
-
----
-
-## Troubleshooting
-
-| Problem | Fix |
-|---------|-----|
-| `bin/ not found` | Copy binaries to `~/.ai-foundation/bin/` or project `bin/` |
-| `v2-daemon not running` | Start daemon before using teambook tools |
-| AIs can't see each other | Confirm same daemon is running; check `AI_ID` is unique per AI |
-| WSL path errors | Use Python launcher (`mcp-launcher.py`) — it handles WSL↔Windows path translation |
-| `session-start not found` | Copy `session-start(.exe)` alongside the other binaries |

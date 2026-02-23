@@ -1,5 +1,29 @@
 # Changelog
 
+## v1.2.0 — 2026-02-23
+
+### Added
+- **Forge CLI** — model-agnostic AI assistant with support for multiple providers (Anthropic,
+  OpenAI-compatible, and local GGUF models). Direct Rust integration with Notebook (private memory)
+  and Teambook (team coordination). Pre-built as `forge.exe` (standard) and `forge-local.exe`
+  (with local GGUF model support via llama.cpp).
+- **Unified installer** (`install.py`) — one-command setup for all platforms. Installs binaries,
+  configures a target Claude Code project directory (`.claude/` hooks + `.mcp.json`), starts the
+  daemon, sets up Forge, and verifies everything works end-to-end.
+- **Update script** (`update.py`) — upgrades an existing installation without re-running the wizard.
+  Preserves AI_ID and all config; only updates binaries and hook scripts.
+- **Release script** (`scripts/release.py`) — automates version bumps, binary sync, and dist zip
+  creation for new releases.
+- `version.txt` — canonical version file; read by installer and update scripts.
+- `config/forge/config.toml.template` — starter Forge config with provider slots for Anthropic,
+  OpenAI-compatible, and local models.
+
+### Updated
+- Workspace now includes `crates/forge/`
+- Windows binaries refreshed (Feb 23 builds)
+
+---
+
 ## v1.1.0 — 2026-02-21
 
 ### Added

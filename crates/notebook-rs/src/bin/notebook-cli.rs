@@ -912,7 +912,6 @@ fn main() -> Result<()> {
                 // Try full hybrid recall (vector + keyword + graph + recency)
                 // When embeddings feature is enabled and model is available, this
                 // automatically does semantic search for much better results
-                #[cfg(feature = "embeddings")]
                 let results = {
                     use engram::embedding::{EmbeddingGenerator, EmbeddingConfig};
 
@@ -931,9 +930,6 @@ fn main() -> Result<()> {
                         db.recall_by_keyword(&q, final_limit)?
                     }
                 };
-
-                #[cfg(not(feature = "embeddings"))]
-                let results = db.recall_by_keyword(&q, final_limit)?;
 
                 if results.is_empty() {
                     // Try tag search
@@ -1268,8 +1264,7 @@ Commands::Delete { note_id_positional, note_id } => {
                 }
             };
 
-            // Try to load embedding generator
-            #[cfg(feature = "embeddings")]
+            // Load embedding generator
             {
                 use engram::embedding::{EmbeddingGenerator, EmbeddingConfig};
 
@@ -1289,19 +1284,11 @@ Commands::Delete { note_id_positional, note_id } => {
 
                 println!("embedded|{}|{}d|{:.3}s", nid, embedding.len(), elapsed.as_secs_f64());
             }
-
-            #[cfg(not(feature = "embeddings"))]
-            {
-                let _ = (note, model_path);
-                eprintln!("Error: Embedding support not compiled.");
-                eprintln!("Hint: Build notebook-cli with --features embeddings");
-            }
         }
 
         Commands::GenerateEmbeddings { limit_positional, limit, model_path, skip_existing } => {
             let final_limit = limit_positional.or(limit).unwrap_or(usize::MAX);
 
-            #[cfg(feature = "embeddings")]
             {
                 use engram::embedding::{EmbeddingGenerator, EmbeddingConfig};
 
@@ -1356,12 +1343,6 @@ Commands::Delete { note_id_positional, note_id } => {
                     processed, skipped, embedded, errors, elapsed.as_secs_f64());
             }
 
-            #[cfg(not(feature = "embeddings"))]
-            {
-                let _ = (final_limit, model_path, skip_existing);
-                eprintln!("Error: Embedding support not compiled.");
-                eprintln!("Hint: Build notebook-cli with --features embeddings");
-            }
         }
 
         // ===== GRAPH MEMORY COMMANDS =====

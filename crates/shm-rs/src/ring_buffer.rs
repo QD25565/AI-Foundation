@@ -11,7 +11,6 @@
 //! ```
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::ptr;
 
 /// Header for the ring buffer stored in shared memory
 #[repr(C)]

@@ -26,7 +26,6 @@ use teamengram::{
     v2_client::V2Client,
 };
 use shm_rs::bulletin::BulletinBoard;
-use std::collections::HashSet;
 use std::io::{self, Read as IoRead};
 use serde::{Deserialize, Serialize};
 use chrono::{Utc, Timelike, Datelike};
@@ -1195,7 +1194,7 @@ async fn main() -> Result<()> {
 
         Commands::DialogueEnd { dialogue_id, status, summary, merge_into } => {
             // Handle merge if specified
-            if let Some(target_id) = merge_into {
+            if let Some(_target_id) = merge_into {
                 // V1 doesn't support merge
                 println!("error|dialogue_merge_requires_v2|Use --v2 true for --merge-into");
             } else {
@@ -1922,16 +1921,6 @@ fn hook_state_path(ai_id: &str) -> std::path::PathBuf {
         .join(format!("hook_{}.json", ai_id))
 }
 
-/// Load pending_senders from hook state file
-/// Returns empty set if file doesn't exist or can't be read
-fn get_pending_senders(ai_id: &str) -> std::collections::HashSet<String> {
-    let state_path = hook_state_path(ai_id);
-    std::fs::read_to_string(&state_path)
-        .ok()
-        .and_then(|json| serde_json::from_str::<HookState>(&json).ok())
-        .map(|state| state.pending_senders)
-        .unwrap_or_default()
-}
 
 /// Load replied_to from hook state file
 /// Returns empty set if file doesn't exist or can't be read
@@ -2914,7 +2903,7 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
             let projects = v2.list_projects()
                 .map_err(|e| anyhow::anyhow!("List projects error: {}", e))?;
             println!("|PROJECTS|{}", projects.len());
-            for (id, name, goal, dir, status, _deleted) in projects {
+            for (id, name, goal, _dir, status, _deleted) in projects {
                 println!("{}|{}|{}|{}", id, name, status, goal);
             }
         }
@@ -2997,7 +2986,7 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
             let features = v2.list_features(project_id as u64)
                 .map_err(|e| anyhow::anyhow!("List features error: {}", e))?;
             println!("|FEATURES|{}", features.len());
-            for (id, proj_id, name, overview, dir, _deleted) in features {
+            for (id, proj_id, name, overview, _dir, _deleted) in features {
                 println!("{}|{}|{}|{}", id, proj_id, name, overview);
             }
         }
@@ -3100,7 +3089,7 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
             let learnings = v2.get_team_playbook(limit)
                 .map_err(|e| anyhow::anyhow!("Get team playbook error: {}", e))?;
             println!("|TEAM PLAYBOOK|{}", learnings.len());
-            for (id, ai_id, content, tags, importance) in learnings {
+            for (_id, ai_id, content, tags, importance) in learnings {
                 // Format: ai_id|importance|[tags]|content
                 let tags_str = if tags.is_empty() { "".to_string() } else { format!("[{}]", tags) };
                 println!("{}: {} {} {}", ai_id, importance, tags_str, content);
@@ -3735,22 +3724,3 @@ fn to_utc(millis: u64) -> String {
     datetime.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
-fn time_ago(millis: u64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-
-    let diff = now.saturating_sub(millis);
-    let secs = diff / 1000;
-
-    if secs < 60 {
-        "just now".to_string()
-    } else if secs < 3600 {
-        format!("{}m ago", secs / 60)
-    } else if secs < 86400 {
-        format!("{}h ago", secs / 3600)
-    } else {
-        format!("{}d ago", secs / 86400)
-    }
-}

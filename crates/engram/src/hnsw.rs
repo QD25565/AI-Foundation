@@ -38,6 +38,7 @@ struct Node {
     /// Connections at each layer
     connections: Vec<Vec<u64>>,
     /// Maximum layer this node exists at
+    #[allow(dead_code)]
     max_layer: usize,
 }
 

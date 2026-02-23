@@ -17,21 +17,27 @@ import com.aifoundation.app.ui.components.*
 import com.aifoundation.app.ui.theme.DeepNetColors
 
 /**
- * Pairing screen - Enter a pairing code to link this device to an H_ID.
- * The code is generated on the PC via: POST /api/pair/generate
- * This screen sends the code to: POST /api/pair
+ * Two-phase pairing screen.
+ *
+ * Phase 1 (pairingCode == null):
+ *   User enters server URL → taps GET CODE → app calls requestPairingCode(url).
+ *
+ * Phase 2 (pairingCode != null):
+ *   Server returned a code. App displays it and instructs the user to run:
+ *     teambook mobile-pair <code>
+ *   DeepNetRoot polls pollPairingCode() every 3 s in the background.
+ *   On approval the token arrives, isPaired flips, and navigation happens automatically.
  */
 @Composable
 fun PairingScreen(
-    serverUrl: String,
-    onServerUrlChange: (String) -> Unit,
-    onPair: (String, String) -> Unit, // serverUrl, code
-    isPairing: Boolean,
-    error: String?,
+    serverUrl:    String,
+    onRequestCode: (String) -> Unit,
+    pairingCode:  String?,
+    isPairing:    Boolean,
+    pairingError: String?,
     onClearError: () -> Unit
 ) {
     var editableUrl by remember(serverUrl) { mutableStateOf(serverUrl) }
-    var pairingCode by remember { mutableStateOf("") }
 
     Column(
         modifier = Modifier
@@ -44,158 +50,182 @@ fun PairingScreen(
 
         // Title
         Text(
-            text = "AI-FOUNDATION",
-            fontSize = 28.sp,
-            fontWeight = FontWeight.Black,
-            fontFamily = FontFamily.Monospace,
-            color = DeepNetColors.Primary,
+            text         = "AI-FOUNDATION",
+            fontSize     = 28.sp,
+            fontWeight   = FontWeight.Black,
+            fontFamily   = FontFamily.Monospace,
+            color        = DeepNetColors.Primary,
             letterSpacing = (-1).sp
         )
         Spacer(modifier = Modifier.height(4.dp))
         Text(
-            text = "HUMAN INTERFACE",
-            fontSize = 14.sp,
-            fontFamily = FontFamily.Monospace,
-            color = DeepNetColors.Secondary,
+            text          = "HUMAN INTERFACE",
+            fontSize      = 14.sp,
+            fontFamily    = FontFamily.Monospace,
+            color         = DeepNetColors.Secondary,
             letterSpacing = 2.sp
         )
 
         Spacer(modifier = Modifier.height(48.dp))
 
-        // Server URL
-        DeepNetCard(
-            modifier = Modifier.fillMaxWidth(),
-            variant = DeepNetCardVariant.TERMINAL
-        ) {
-            Text(
-                text = "Server URL",
-                style = MaterialTheme.typography.labelMedium,
-                color = DeepNetColors.OnSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            OutlinedTextField(
-                value = editableUrl,
-                onValueChange = { editableUrl = it },
-                placeholder = { Text("http://192.168.x.x:8080") },
-                modifier = Modifier.fillMaxWidth(),
-                enabled = !isPairing,
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = DeepNetColors.Primary,
-                    unfocusedBorderColor = DeepNetColors.OnSurfaceVariant,
-                    cursorColor = DeepNetColors.Primary,
-                    focusedTextColor = DeepNetColors.OnSurface,
-                    unfocusedTextColor = DeepNetColors.OnSurface
-                ),
-                singleLine = true
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "Emulator: 10.0.2.2:8080 | Real device: your PC's IP",
-                style = MaterialTheme.typography.bodySmall,
-                color = DeepNetColors.OnSurfaceVariant.copy(alpha = 0.6f)
-            )
-        }
+        if (pairingCode == null) {
+            // ── Phase 1: Enter server URL ─────────────────────────────────────
 
-        Spacer(modifier = Modifier.height(24.dp))
-
-        // Pairing code input
-        DeepNetCard(
-            modifier = Modifier.fillMaxWidth(),
-            variant = DeepNetCardVariant.NODE,
-            enableGlow = true
-        ) {
-            Text(
-                text = "Pairing Code",
-                style = MaterialTheme.typography.labelMedium,
-                color = DeepNetColors.OnSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = "Enter the code shown on your PC",
-                style = MaterialTheme.typography.bodySmall,
-                color = DeepNetColors.OnSurfaceVariant.copy(alpha = 0.7f)
-            )
-            Spacer(modifier = Modifier.height(12.dp))
-            OutlinedTextField(
-                value = pairingCode,
-                onValueChange = { pairingCode = it.uppercase() },
-                placeholder = { Text("QD-7X3K", fontFamily = FontFamily.Monospace) },
-                modifier = Modifier.fillMaxWidth(),
-                enabled = !isPairing,
-                textStyle = LocalTextStyle.current.copy(
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 24.sp,
-                    fontWeight = FontWeight.Bold,
-                    textAlign = TextAlign.Center,
-                    letterSpacing = 4.sp
-                ),
-                colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor = DeepNetColors.Primary,
-                    unfocusedBorderColor = DeepNetColors.Primary.copy(alpha = 0.5f),
-                    cursorColor = DeepNetColors.Primary,
-                    focusedTextColor = DeepNetColors.Primary,
-                    unfocusedTextColor = DeepNetColors.Primary
-                ),
-                singleLine = true
-            )
-        }
-
-        Spacer(modifier = Modifier.height(24.dp))
-
-        // Error display
-        error?.let {
             DeepNetCard(
                 modifier = Modifier.fillMaxWidth(),
-                variant = DeepNetCardVariant.ALERT
+                variant  = DeepNetCardVariant.TERMINAL
             ) {
                 Text(
-                    text = it,
-                    color = DeepNetColors.Error,
-                    fontSize = 13.sp
+                    text  = "Server URL",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = DeepNetColors.OnSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                OutlinedTextField(
+                    value         = editableUrl,
+                    onValueChange = { editableUrl = it },
+                    placeholder   = { Text("http://192.168.x.x:8081") },
+                    modifier      = Modifier.fillMaxWidth(),
+                    enabled       = !isPairing,
+                    colors = OutlinedTextFieldDefaults.colors(
+                        focusedBorderColor   = DeepNetColors.Primary,
+                        unfocusedBorderColor = DeepNetColors.OnSurfaceVariant,
+                        cursorColor          = DeepNetColors.Primary,
+                        focusedTextColor     = DeepNetColors.OnSurface,
+                        unfocusedTextColor   = DeepNetColors.OnSurface
+                    ),
+                    singleLine = true
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text  = "Emulator: 10.0.2.2:8081 · Real device: your server's LAN IP",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = DeepNetColors.OnSurfaceVariant.copy(alpha = 0.6f)
                 )
             }
-            Spacer(modifier = Modifier.height(16.dp))
-        }
 
-        // Pair button
-        if (isPairing) {
-            DeepNetLoadingIndicator(text = "PAIRING...")
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // Error
+            pairingError?.let {
+                DeepNetCard(modifier = Modifier.fillMaxWidth(), variant = DeepNetCardVariant.ALERT) {
+                    Text(text = it, color = DeepNetColors.Error, fontSize = 13.sp)
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+            }
+
+            // GET CODE button
+            if (isPairing) {
+                DeepNetLoadingIndicator(text = "CONNECTING...")
+            } else {
+                DeepNetButton(
+                    onClick  = {
+                        if (editableUrl.isNotBlank()) {
+                            pairingError?.let { onClearError() }
+                            onRequestCode(editableUrl.trim())
+                        }
+                    },
+                    enabled  = editableUrl.isNotBlank(),
+                    variant  = DeepNetButtonVariant.PRIMARY,
+                    icon     = Icons.Default.VpnKey,
+                    text     = "GET PAIRING CODE",
+                    modifier = Modifier.fillMaxWidth(0.8f)
+                )
+            }
+
+            Spacer(modifier = Modifier.weight(1f))
+
+            // Help footer
+            DeepNetCard(modifier = Modifier.fillMaxWidth(), variant = DeepNetCardVariant.DATA) {
+                Text(
+                    text       = "Start the mobile API server on your machine:",
+                    fontSize   = 12.sp,
+                    color      = DeepNetColors.OnSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text       = "ai-foundation-mobile-api",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize   = 12.sp,
+                    color      = DeepNetColors.Primary
+                )
+            }
+
         } else {
-            DeepNetButton(
-                onClick = {
-                    if (pairingCode.isNotBlank()) {
-                        onServerUrlChange(editableUrl)
-                        onPair(editableUrl, pairingCode.trim())
-                    }
-                },
-                enabled = pairingCode.isNotBlank(),
-                variant = DeepNetButtonVariant.PRIMARY,
-                icon = Icons.Default.Link,
-                text = "PAIR DEVICE",
-                modifier = Modifier.fillMaxWidth(0.7f)
-            )
-        }
+            // ── Phase 2: Show code, wait for approval ─────────────────────────
 
-        Spacer(modifier = Modifier.weight(1f))
+            DeepNetCard(
+                modifier   = Modifier.fillMaxWidth(),
+                variant    = DeepNetCardVariant.NODE,
+                enableGlow = true
+            ) {
+                Text(
+                    text  = "Your Pairing Code",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = DeepNetColors.OnSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Text(
+                    text          = pairingCode,
+                    fontFamily    = FontFamily.Monospace,
+                    fontSize      = 36.sp,
+                    fontWeight    = FontWeight.Black,
+                    color         = DeepNetColors.Primary,
+                    letterSpacing = 6.sp,
+                    textAlign     = TextAlign.Center,
+                    modifier      = Modifier.fillMaxWidth()
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                HorizontalDivider(color = DeepNetColors.GlassBorder)
+                Spacer(modifier = Modifier.height(12.dp))
+                Text(
+                    text  = "Run this command on your server:",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = DeepNetColors.OnSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                Text(
+                    text       = "teambook mobile-pair $pairingCode",
+                    fontFamily = FontFamily.Monospace,
+                    fontSize   = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color      = DeepNetColors.Primary
+                )
+            }
 
-        // Footer
-        Text(
-            text = "Generate a code on your PC:",
-            fontSize = 12.sp,
-            color = DeepNetColors.OnSurfaceVariant,
-            textAlign = TextAlign.Center
-        )
-        Spacer(modifier = Modifier.height(4.dp))
-        DeepNetCard(
-            modifier = Modifier.fillMaxWidth(),
-            variant = DeepNetCardVariant.TERMINAL
-        ) {
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // Polling indicator
+            DeepNetCard(modifier = Modifier.fillMaxWidth(), variant = DeepNetCardVariant.TERMINAL) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    DeepNetLoadingIndicator()
+                    Text(
+                        text       = "Waiting for approval...",
+                        fontFamily = FontFamily.Monospace,
+                        fontSize   = 13.sp,
+                        color      = DeepNetColors.OnSurfaceVariant
+                    )
+                }
+            }
+
+            // Error (e.g. code expired)
+            pairingError?.let {
+                Spacer(modifier = Modifier.height(16.dp))
+                DeepNetCard(modifier = Modifier.fillMaxWidth(), variant = DeepNetCardVariant.ALERT) {
+                    Text(text = it, color = DeepNetColors.Error, fontSize = 13.sp)
+                }
+            }
+
+            Spacer(modifier = Modifier.weight(1f))
+
             Text(
-                text = "curl -X POST http://localhost:8080/api/pair/generate \\\n  -H 'Content-Type: application/json' \\\n  -d '{\"h_id\": \"human-yourname\"}'",
-                fontFamily = FontFamily.Monospace,
-                fontSize = 10.sp,
-                color = DeepNetColors.Primary,
-                lineHeight = 14.sp
+                text       = "Code expires in 10 minutes",
+                fontSize   = 12.sp,
+                color      = DeepNetColors.OnSurfaceVariant,
+                textAlign  = TextAlign.Center
             )
         }
     }

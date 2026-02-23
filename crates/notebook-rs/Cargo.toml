@@ -46,7 +46,3 @@ default = []
 
 # llama-cpp-sys-2 patch is defined at the workspace root Cargo.toml
 
-[profile.release]
-opt-level = 3
-lto = true
-codegen-units = 1

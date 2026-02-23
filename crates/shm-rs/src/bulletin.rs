@@ -6,7 +6,7 @@
 //! Latency: ~100ns (memory read) vs ~150ms (subprocess + HTTP)
 
 use memmap2::{MmapMut, MmapOptions};
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::{Context, Result};
@@ -431,6 +431,7 @@ const fn bulletin_size() -> usize {
 /// The bulletin board - shared memory for awareness data
 pub struct BulletinBoard {
     mmap: MmapMut,
+    #[allow(dead_code)]
     path: PathBuf,
 }
 

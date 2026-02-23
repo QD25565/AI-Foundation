@@ -5,6 +5,8 @@ members = [
     "crates/teamengram-rs",
     "crates/notebook-rs",
     "crates/shm-rs",
+    "crates/forge",
+    "mobile-api",
 ]
 resolver = "2"
 
@@ -66,3 +68,26 @@ opt-level = "z"
 lto = true
 codegen-units = 1
 strip = true
+panic = "abort"
+
+# Speed-critical crates override opt-level to 3 (inference, shared-memory, LLM).
+# lto/codegen-units/strip/panic are workspace-wide and cannot be per-package.
+[profile.release.package.notebook-rs]
+opt-level = 3
+
+[profile.release.package.shm-rs]
+opt-level = 3
+
+[profile.release.package.forge]
+opt-level = 3
+
+[profile.release.package.engram]
+opt-level = 3
+
+[profile.release.package.teamengram]
+opt-level = 3
+
+# Bench profile: thin LTO for accurate benchmark results.
+[profile.bench]
+opt-level = 3
+lto = "thin"

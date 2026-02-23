@@ -27,6 +27,7 @@ pub use crate::compat_types::{Message, Presence, Note, Task, Vote, VoteStatus, V
 /// TeamEngram storage adapter - implements PostgresStorage-compatible interface
 /// All method signatures match teambook_rs::PostgresStorage exactly
 pub struct TeamEngramStorage {
+    #[allow(dead_code)]
     client: Arc<Mutex<Option<TeamEngramClient>>>,
     ai_id: String,
 }
@@ -52,6 +53,7 @@ impl TeamEngramStorage {
     }
 
     /// Ensure we have a valid connection, reconnecting if necessary
+    #[allow(dead_code)]
     async fn ensure_connected(&self) -> Result<()> {
         let mut guard = self.client.lock().await;
         if guard.is_none() {

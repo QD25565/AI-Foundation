@@ -18,7 +18,7 @@ use std::env;
 use std::io::{self, Read};
 use std::path::PathBuf;
 use std::process::Command;
-use std::time::{Instant, SystemTime, Duration};
+use std::time::{Instant, SystemTime};
 
 /// Maximum age for bulletin before triggering refresh (30 seconds)
 const BULLETIN_MAX_AGE_SECS: u64 = 30;

@@ -20,10 +20,6 @@ android {
             useSupportLibrary = true
         }
 
-        // NDK configuration for Rust native libraries
-        ndk {
-            abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
-        }
     }
 
     buildTypes {
@@ -52,12 +48,6 @@ android {
         }
     }
 
-    // Source sets for native libraries
-    sourceSets {
-        getByName("main") {
-            jniLibs.srcDirs("src/main/jniLibs")
-        }
-    }
 }
 
 dependencies {
@@ -75,9 +65,6 @@ dependencies {
     // Explicit compose-runtime to fix inline method issue
     implementation("androidx.compose.runtime:runtime")
 
-    // JNA for UniFFI Rust bindings
-    implementation("net.java.dev.jna:jna:5.14.0@aar")
-
     // Navigation for multi-screen app
     implementation("androidx.navigation:navigation-compose:2.7.7")
 
@@ -92,6 +79,7 @@ dependencies {
     implementation("com.squareup.retrofit2:converter-gson:2.9.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
+    implementation("com.squareup.okhttp3:okhttp-sse:4.12.0")
 
     // Coroutines for async operations
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")

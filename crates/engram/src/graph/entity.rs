@@ -498,6 +498,7 @@ pub struct AutoLinker {
     index: EntityIndex,
 
     /// Minimum shared entities to create a link
+    #[allow(dead_code)]
     min_shared_entities: usize,
 
     /// Minimum confidence for entity to count

@@ -4,13 +4,13 @@
 //! can attach to for ultra-low-latency communication.
 
 use memmap2::{MmapMut, MmapOptions};
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 
 use crate::ring_buffer::RingBufferHeader;
 use crate::mailbox::{Mailbox, MailboxMeta};
-use crate::{MAGIC, VERSION, MAX_MAILBOXES, DEFAULT_REGION_SIZE};
+use crate::{MAGIC, VERSION, MAX_MAILBOXES};
 
 /// Header at the start of shared memory region
 #[repr(C)]
@@ -42,6 +42,7 @@ impl RegionHeader {
 /// Shared memory region for AI communication
 pub struct SharedRegion {
     mmap: MmapMut,
+    #[allow(dead_code)]
     path: PathBuf,
     mailbox_buffer_size: usize,
 }

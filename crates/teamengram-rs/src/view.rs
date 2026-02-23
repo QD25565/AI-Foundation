@@ -180,6 +180,30 @@ pub struct RoomState {
     pub is_closed: bool,
 }
 
+/// Cached project state
+#[derive(Debug, Clone)]
+pub struct ProjectState {
+    pub id: u64,
+    pub name: String,
+    pub goal: String,
+    pub root_directory: String,
+    pub status: String,
+    pub is_deleted: bool,
+    pub created_at: u64,
+}
+
+/// Cached feature state
+#[derive(Debug, Clone)]
+pub struct FeatureState {
+    pub id: u64,
+    pub project_id: u64,
+    pub name: String,
+    pub overview: String,
+    pub directory: Option<String>,
+    pub is_deleted: bool,
+    pub created_at: u64,
+}
+
 // ============== END CACHE STRUCTS ==============
 
 /// View statistics - tracked in memory
@@ -274,6 +298,12 @@ pub struct ViewEngine {
 
     /// Per-AI trust scores (TIP aggregation)
     ai_trust: HashMap<String, TrustScore>,
+
+    /// All projects (id -> state)
+    projects: HashMap<u64, ProjectState>,
+
+    /// All features (id -> state)
+    features: HashMap<u64, FeatureState>,
 }
 
 impl ViewEngine {
@@ -307,6 +337,8 @@ impl ViewEngine {
             file_actions: VecDeque::new(),
             rooms: HashMap::new(),
             ai_trust: HashMap::new(),
+            projects: HashMap::new(),
+            features: HashMap::new(),
         })
     }
 
@@ -843,6 +875,90 @@ impl ViewEngine {
                 }
             }
 
+            // ============== PROJECTS ==============
+            event_type::PROJECT_CREATE => {
+                if let EventPayload::ProjectCreate(payload) = &event.payload {
+                    self.projects.insert(timestamp, ProjectState {
+                        id: timestamp,
+                        name: payload.name.clone(),
+                        goal: payload.goal.clone(),
+                        root_directory: payload.root_directory.clone(),
+                        status: "active".to_string(),
+                        is_deleted: false,
+                        created_at: timestamp,
+                    });
+                }
+            }
+            event_type::PROJECT_UPDATE => {
+                if let EventPayload::ProjectUpdate(payload) = &event.payload {
+                    if let Some(project) = self.projects.get_mut(&payload.project_id) {
+                        if let Some(goal) = &payload.goal {
+                            project.goal = goal.clone();
+                        }
+                        if let Some(status) = &payload.status {
+                            project.status = status.clone();
+                        }
+                    }
+                }
+            }
+            event_type::PROJECT_DELETE => {
+                if let EventPayload::ProjectDelete(payload) = &event.payload {
+                    if let Some(project) = self.projects.get_mut(&payload.project_id) {
+                        project.is_deleted = true;
+                    }
+                }
+            }
+            event_type::PROJECT_RESTORE => {
+                if let EventPayload::ProjectRestore(payload) = &event.payload {
+                    if let Some(project) = self.projects.get_mut(&payload.project_id) {
+                        project.is_deleted = false;
+                    }
+                }
+            }
+            // ============== FEATURES ==============
+            event_type::FEATURE_CREATE => {
+                if let EventPayload::FeatureCreate(payload) = &event.payload {
+                    self.features.insert(timestamp, FeatureState {
+                        id: timestamp,
+                        project_id: payload.project_id,
+                        name: payload.name.clone(),
+                        overview: payload.overview.clone(),
+                        directory: payload.directory.clone(),
+                        is_deleted: false,
+                        created_at: timestamp,
+                    });
+                }
+            }
+            event_type::FEATURE_UPDATE => {
+                if let EventPayload::FeatureUpdate(payload) = &event.payload {
+                    if let Some(feature) = self.features.get_mut(&payload.feature_id) {
+                        if let Some(name) = &payload.name {
+                            feature.name = name.clone();
+                        }
+                        if let Some(overview) = &payload.overview {
+                            feature.overview = overview.clone();
+                        }
+                        if let Some(directory) = &payload.directory {
+                            feature.directory = Some(directory.clone());
+                        }
+                    }
+                }
+            }
+            event_type::FEATURE_DELETE => {
+                if let EventPayload::FeatureDelete(payload) = &event.payload {
+                    if let Some(feature) = self.features.get_mut(&payload.feature_id) {
+                        feature.is_deleted = true;
+                    }
+                }
+            }
+            event_type::FEATURE_RESTORE => {
+                if let EventPayload::FeatureRestore(payload) = &event.payload {
+                    if let Some(feature) = self.features.get_mut(&payload.feature_id) {
+                        feature.is_deleted = false;
+                    }
+                }
+            }
+
             _ => {}
         }
 
@@ -975,7 +1091,7 @@ impl ViewEngine {
     pub fn get_pending_dm_senders(&self) -> Vec<String> {
         // Track last DM timestamp per sender
         let mut last_from: HashMap<&str, u64> = HashMap::new();
-        let mut last_to: HashMap<&str, u64> = HashMap::new();
+        let _last_to: HashMap<&str, u64> = HashMap::new();
 
         // From our cached DMs (these are DMs TO us)
         for dm in &self.recent_dms {
@@ -1259,12 +1375,34 @@ impl ViewEngine {
         self.file_actions.clear();
         self.rooms.clear();
         self.ai_trust.clear();
+        self.projects.clear();
+        self.features.clear();
     }
 
     /// Warm cache by replaying last N events from event log
     ///
     /// This populates all content caches so query methods return O(1) results
     /// instead of scanning the entire event log.
+    // ============== PROJECT QUERIES ==============
+
+    pub fn get_all_projects(&self) -> &HashMap<u64, ProjectState> {
+        &self.projects
+    }
+
+    pub fn get_project(&self, id: u64) -> Option<&ProjectState> {
+        self.projects.get(&id)
+    }
+
+    // ============== FEATURE QUERIES ==============
+
+    pub fn get_features_for_project(&self, project_id: u64) -> Vec<&FeatureState> {
+        self.features.values().filter(|f| f.project_id == project_id).collect()
+    }
+
+    pub fn get_feature(&self, id: u64) -> Option<&FeatureState> {
+        self.features.get(&id)
+    }
+
     pub fn warm_cache(&mut self, event_log: &mut EventLogReader) -> ViewResult<u64> {
         let head = event_log.head_sequence();
 

@@ -1,501 +1,349 @@
 package com.aifoundation.app.viewmodel
 
 import android.app.Application
-import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aifoundation.app.data.local.DeepNetPreferences
 import com.aifoundation.app.data.model.*
-import com.aifoundation.app.data.network.NetworkClient
+import com.aifoundation.app.data.network.SseClient
 import com.aifoundation.app.data.network.TeambookClient
-import com.aifoundation.app.data.repository.FederationRepository
 import com.aifoundation.app.data.repository.TeambookRepository
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
-import java.time.Instant
 
 /**
- * ViewModel for Deep Net state management.
- * Handles both legacy federation operations and new teambook HTTP API.
+ * Central ViewModel for AI-Foundation mobile app.
+ *
+ * All data is typed — no raw String StateFlows.
+ * SSE events update the flows directly without a polling round-trip.
+ * Manual refresh methods are available for pull-to-refresh.
+ *
+ * Pairing state (token, hId, serverUrl) is persisted via DeepNetPreferences
+ * so the user stays authenticated across process death / app restarts.
  */
 class DeepNetViewModel(application: Application) : AndroidViewModel(application) {
 
-    companion object {
-        private const val TAG = "DeepNetViewModel"
-    }
+    private val prefs = DeepNetPreferences(application)
+    private val repository = TeambookRepository()
+    private val sseClient = SseClient()
 
-    private val preferences = DeepNetPreferences(application)
-    private val repository = FederationRepository()
-    private val teambookRepo = TeambookRepository()
+    // ── Pairing ───────────────────────────────────────────────────────────────
 
-    // ============================================================================
-    // CONNECTION STATE (legacy federation)
-    // ============================================================================
-
-    private val _connectionState = MutableStateFlow(ConnectionState.DISCONNECTED)
-    val connectionState: StateFlow<ConnectionState> = _connectionState.asStateFlow()
-
-    private val _wallStatus = MutableStateFlow(WallStatus.SECURE)
-    val wallStatus: StateFlow<WallStatus> = _wallStatus.asStateFlow()
-
-    private val _nodes = MutableStateFlow<List<FederationNode>>(emptyList())
-    val nodes: StateFlow<List<FederationNode>> = _nodes.asStateFlow()
-
-    private val _stats = MutableStateFlow<FederationStats?>(null)
-    val stats: StateFlow<FederationStats?> = _stats.asStateFlow()
-
-    private val _messages = MutableStateFlow<List<DeepNetMessage>>(emptyList())
-    val messages: StateFlow<List<DeepNetMessage>> = _messages.asStateFlow()
-
-    private val _deviceId = MutableStateFlow("")
-    val deviceId: StateFlow<String> = _deviceId.asStateFlow()
-
-    private val _error = MutableStateFlow<String?>(null)
-    val error: StateFlow<String?> = _error.asStateFlow()
-
-    private val _serverUrl = MutableStateFlow(preferences.serverUrl)
-    val serverUrl: StateFlow<String> = _serverUrl.asStateFlow()
-
-    // ============================================================================
-    // TEAMBOOK / HUMAN INTEGRATION STATE
-    // ============================================================================
-
-    private val _isPaired = MutableStateFlow(preferences.isPaired)
+    private val _isPaired = MutableStateFlow(false)
     val isPaired: StateFlow<Boolean> = _isPaired.asStateFlow()
 
     private val _isPairing = MutableStateFlow(false)
     val isPairing: StateFlow<Boolean> = _isPairing.asStateFlow()
 
-    private val _hId = MutableStateFlow(preferences.hId ?: "")
+    private val _hId = MutableStateFlow("")
     val hId: StateFlow<String> = _hId.asStateFlow()
 
-    private val _teambookServerUrl = MutableStateFlow(preferences.teambookServerUrl)
-    val teambookServerUrl: StateFlow<String> = _teambookServerUrl.asStateFlow()
+    // Initialised from persisted value so the URL field is pre-filled on relaunch
+    private val _serverUrl = MutableStateFlow(prefs.teambookServerUrl)
+    val serverUrl: StateFlow<String> = _serverUrl.asStateFlow()
 
-    // Teambook data (CLI text output)
-    private val _teamStatus = MutableStateFlow("")
-    val teamStatus: StateFlow<String> = _teamStatus.asStateFlow()
+    private val _pairingCode = MutableStateFlow<String?>(null)
+    val pairingCode: StateFlow<String?> = _pairingCode.asStateFlow()
 
-    private val _dmsData = MutableStateFlow("")
-    val dmsData: StateFlow<String> = _dmsData.asStateFlow()
+    private val _pairingError = MutableStateFlow<String?>(null)
+    val pairingError: StateFlow<String?> = _pairingError.asStateFlow()
 
-    private val _broadcastsData = MutableStateFlow("")
-    val broadcastsData: StateFlow<String> = _broadcastsData.asStateFlow()
+    // ── Team ──────────────────────────────────────────────────────────────────
 
-    private val _tasksData = MutableStateFlow("")
-    val tasksData: StateFlow<String> = _tasksData.asStateFlow()
+    private val _team = MutableStateFlow<List<TeamMember>>(emptyList())
+    val team: StateFlow<List<TeamMember>> = _team.asStateFlow()
 
-    private val _notesData = MutableStateFlow("")
-    val notesData: StateFlow<String> = _notesData.asStateFlow()
+    // ── DMs ───────────────────────────────────────────────────────────────────
 
-    private val _searchResults = MutableStateFlow("")
-    val searchResults: StateFlow<String> = _searchResults.asStateFlow()
+    private val _dms = MutableStateFlow<List<Dm>>(emptyList())
+    val dms: StateFlow<List<Dm>> = _dms.asStateFlow()
 
-    private val _dialoguesData = MutableStateFlow("")
-    val dialoguesData: StateFlow<String> = _dialoguesData.asStateFlow()
+    // ── Broadcasts ────────────────────────────────────────────────────────────
 
-    private val _isTeambookLoading = MutableStateFlow(false)
-    val isTeambookLoading: StateFlow<Boolean> = _isTeambookLoading.asStateFlow()
+    private val _broadcasts = MutableStateFlow<List<Broadcast>>(emptyList())
+    val broadcasts: StateFlow<List<Broadcast>> = _broadcasts.asStateFlow()
 
+    // ── Tasks ─────────────────────────────────────────────────────────────────
+
+    private val _tasks = MutableStateFlow<List<Task>>(emptyList())
+    val tasks: StateFlow<List<Task>> = _tasks.asStateFlow()
+
+    // ── Dialogues ─────────────────────────────────────────────────────────────
+
+    private val _dialogues = MutableStateFlow<List<Dialogue>>(emptyList())
+    val dialogues: StateFlow<List<Dialogue>> = _dialogues.asStateFlow()
+
+    // ── Notebook ──────────────────────────────────────────────────────────────
+
+    private val _notes = MutableStateFlow<List<Note>>(emptyList())
+    val notes: StateFlow<List<Note>> = _notes.asStateFlow()
+
+    private val _noteSearchResults = MutableStateFlow<List<NoteSearchResult>>(emptyList())
+    val noteSearchResults: StateFlow<List<NoteSearchResult>> = _noteSearchResults.asStateFlow()
+
+    // ── Pending DM recipient (set when tapping an AI in TeamScreen) ───────────
+
+    private val _pendingDmRecipient = MutableStateFlow<String?>(null)
+    val pendingDmRecipient: StateFlow<String?> = _pendingDmRecipient.asStateFlow()
+
+    fun setPendingDmRecipient(aiId: String) { _pendingDmRecipient.value = aiId }
+    fun clearPendingDmRecipient() { _pendingDmRecipient.value = null }
+
+    // ── Status ────────────────────────────────────────────────────────────────
+
+    private val _isLoading = MutableStateFlow(false)
+    val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
+
+    private val _error = MutableStateFlow<String?>(null)
+    val error: StateFlow<String?> = _error.asStateFlow()
+
+    private val _sseConnected = MutableStateFlow(false)
+    val sseConnected: StateFlow<Boolean> = _sseConnected.asStateFlow()
+
+    // ── Restore session on process restart ───────────────────────────────────
+    // init runs after ALL properties above are initialized — safe to call startSse/refreshAll.
     init {
-        // Load persisted identity
-        preferences.deviceId?.let { savedId ->
-            _deviceId.value = savedId
-            Log.i(TAG, "Loaded persisted device ID: $savedId")
+        if (prefs.isPaired) {
+            val savedUrl   = prefs.teambookServerUrl
+            val savedToken = prefs.pairingToken ?: ""
+            val savedHId   = prefs.hId ?: ""
+
+            TeambookClient.setServerUrl("$savedUrl/")
+            TeambookClient.setAuthToken(savedToken)
+
+            _serverUrl.value = savedUrl
+            _hId.value       = savedHId
+            _isPaired.value  = true
+
+            startSse()
+            refreshAll()
         }
-
-        // Restore pairing state
-        if (preferences.isPaired) {
-            val token = preferences.pairingToken
-            val url = preferences.teambookServerUrl
-            _hId.value = preferences.hId ?: ""
-            TeambookClient.setServerUrl(url)
-            TeambookClient.setAuthToken(token)
-            Log.i(TAG, "Restored pairing: hId=${_hId.value}, url=$url")
-
-            // Auto-refresh data
-            refreshTeambook()
-        }
-
-        _connectionState.value = ConnectionState.DISCONNECTED
     }
 
-    // ============================================================================
-    // PAIRING
-    // ============================================================================
+    // ─────────────────────────────────────────────────────────────────────────
+    // Pairing
+    // ─────────────────────────────────────────────────────────────────────────
 
-    fun pair(serverUrl: String, code: String) {
+    /**
+     * Request a pairing code from the server.
+     * Display the returned code and instruct the user to run:
+     *   teambook mobile-pair <code>
+     * Then call [pollPairingCode] periodically until approved.
+     */
+    fun requestPairingCode(serverUrl: String) {
         viewModelScope.launch {
             _isPairing.value = true
-            _error.value = null
+            _pairingError.value = null
 
-            try {
-                TeambookClient.setServerUrl(serverUrl)
-                preferences.teambookServerUrl = serverUrl
-                _teambookServerUrl.value = serverUrl
+            val normalised = serverUrl.trimEnd('/')
+            _serverUrl.value = normalised
+            prefs.teambookServerUrl = normalised
+            TeambookClient.setServerUrl("$normalised/")
 
-                val result = teambookRepo.pairValidate(code)
+            repository.pairRequest()
+                .onSuccess { resp -> _pairingCode.value = resp.code }
+                .onFailure { e -> _pairingError.value = e.message ?: "Could not reach server" }
 
-                if (result.isSuccess) {
-                    val response = result.getOrNull()!!
-                    val hId = response.h_id ?: ""
-                    val token = response.token ?: ""
+            _isPairing.value = false
+        }
+    }
 
-                    preferences.savePairing(hId, token)
-                    TeambookClient.setAuthToken(token)
-                    _hId.value = hId
-                    _isPaired.value = true
-
-                    Log.i(TAG, "Paired as $hId")
-
-                    // Load initial data
-                    refreshTeambook()
-                } else {
-                    _error.value = result.exceptionOrNull()?.message ?: "Pairing failed"
+    /**
+     * Poll to check if the pairing code has been approved on the server.
+     * Call every ~3s after showing the code. [onSuccess] fires once on approval.
+     */
+    fun pollPairingCode(code: String, onSuccess: () -> Unit = {}) {
+        viewModelScope.launch {
+            repository.pairValidate(code)
+                .onSuccess { resp ->
+                    when {
+                        resp.ok && resp.token != null -> {
+                            val hId = resp.h_id ?: ""
+                            TeambookClient.setAuthToken(resp.token)
+                            prefs.savePairing(hId, resp.token)
+                            _hId.value = hId
+                            _isPaired.value = true
+                            _pairingCode.value = null
+                            _pairingError.value = null
+                            startSse()
+                            refreshAll()
+                            onSuccess()
+                        }
+                        resp.pending == true -> { /* not approved yet — keep polling */ }
+                        else -> {
+                            _pairingError.value = resp.error ?: "Invalid or expired code"
+                            _pairingCode.value = null
+                        }
+                    }
                 }
-            } catch (e: Exception) {
-                Log.e(TAG, "Pairing failed", e)
-                _error.value = "Pairing failed: ${e.message}"
-            } finally {
-                _isPairing.value = false
-            }
+                .onFailure { e -> _pairingError.value = e.message ?: "Network error" }
         }
     }
 
     fun unpair() {
-        preferences.clearPairing()
-        TeambookClient.setAuthToken(null)
-        _isPaired.value = false
-        _hId.value = ""
-        _teamStatus.value = ""
-        _dmsData.value = ""
-        _broadcastsData.value = ""
-        _tasksData.value = ""
-        _notesData.value = ""
-        _dialoguesData.value = ""
-        Log.i(TAG, "Unpaired")
+        viewModelScope.launch {
+            stopSse()
+            repository.unpair() // best-effort
+            prefs.clearPairing()
+            TeambookClient.setAuthToken(null)
+            _isPaired.value = false
+            _hId.value = ""
+            _pairingCode.value = null
+            _pairingError.value = null
+            _team.value = emptyList()
+            _dms.value = emptyList()
+            _broadcasts.value = emptyList()
+            _tasks.value = emptyList()
+            _dialogues.value = emptyList()
+            _notes.value = emptyList()
+            _noteSearchResults.value = emptyList()
+        }
     }
 
-    // ============================================================================
-    // TEAMBOOK REFRESH
-    // ============================================================================
+    // ─────────────────────────────────────────────────────────────────────────
+    // SSE lifecycle
+    // ─────────────────────────────────────────────────────────────────────────
 
-    fun refreshTeambook() {
+    private fun startSse() {
+        val token = TeambookClient.getAuthToken() ?: return
+        sseClient.connect(_serverUrl.value, token) { event ->
+            viewModelScope.launch { handleSseEvent(event) }
+        }
+        _sseConnected.value = true
+    }
+
+    private fun stopSse() {
+        sseClient.disconnect()
+        _sseConnected.value = false
+    }
+
+    private fun handleSseEvent(event: LiveEvent) {
+        when (event) {
+            is LiveEvent.DmReceived -> {
+                if (_dms.value.none { it.id == event.dm.id }) {
+                    _dms.value = listOf(event.dm) + _dms.value
+                }
+            }
+            is LiveEvent.BroadcastReceived -> {
+                if (_broadcasts.value.none { it.id == event.bc.id }) {
+                    _broadcasts.value = listOf(event.bc) + _broadcasts.value
+                }
+            }
+            is LiveEvent.TeamUpdated -> _team.value = event.members
+            is LiveEvent.TaskUpdated -> {
+                _tasks.value = _tasks.value.map {
+                    if (it.id == event.task.id) event.task else it
+                }
+            }
+        }
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Refresh
+    // ─────────────────────────────────────────────────────────────────────────
+
+    fun refreshAll() {
         viewModelScope.launch {
-            _isTeambookLoading.value = true
+            _isLoading.value = true
+            _error.value = null
             try {
-                // Fetch all data in parallel
-                launch { refreshStatus() }
-                launch { refreshDms() }
-                launch { refreshBroadcasts() }
-                launch { refreshTasks() }
-                launch { refreshNotes() }
-                launch { refreshDialogues() }
+                val t  = async { repository.getTeam() }
+                val d  = async { repository.getDms() }
+                val bc = async { repository.getBroadcasts() }
+                val tk = async { repository.getTasks() }
+                val dl = async { repository.getDialogues() }
+                val n  = async { repository.getNotes() }
+
+                t.await().onSuccess  { _team.value = it }
+                d.await().onSuccess  { _dms.value = it }
+                bc.await().onSuccess { _broadcasts.value = it }
+                tk.await().onSuccess { _tasks.value = it }
+                dl.await().onSuccess { _dialogues.value = it }
+                n.await().onSuccess  { _notes.value = it }
+
+                // Surface first error encountered (non-fatal — data already updated)
+                listOf(t, d, bc, tk, dl, n)
+                    .firstOrNull { it.await().isFailure }
+                    ?.await()?.exceptionOrNull()
+                    ?.let { _error.value = it.message }
             } finally {
-                _isTeambookLoading.value = false
+                _isLoading.value = false
             }
         }
     }
 
-    private suspend fun refreshStatus() {
-        teambookRepo.getStatus().onSuccess { _teamStatus.value = it }
-    }
+    fun refreshTeam()       { viewModelScope.launch { repository.getTeam().onSuccess       { _team.value = it } } }
+    fun refreshDms()        { viewModelScope.launch { repository.getDms().onSuccess        { _dms.value = it } } }
+    fun refreshBroadcasts() { viewModelScope.launch { repository.getBroadcasts().onSuccess { _broadcasts.value = it } } }
+    fun refreshTasks()      { viewModelScope.launch { repository.getTasks().onSuccess      { _tasks.value = it } } }
+    fun refreshDialogues()  { viewModelScope.launch { repository.getDialogues().onSuccess  { _dialogues.value = it } } }
+    fun refreshNotes()      { viewModelScope.launch { repository.getNotes().onSuccess      { _notes.value = it } } }
 
-    fun refreshDms() {
+    // ─────────────────────────────────────────────────────────────────────────
+    // Actions
+    // ─────────────────────────────────────────────────────────────────────────
+
+    fun sendDm(to: String, content: String, onResult: (Result<Unit>) -> Unit = {}) {
         viewModelScope.launch {
-            teambookRepo.getDms(20).onSuccess { _dmsData.value = it }
+            repository.sendDm(to, content).also(onResult).onSuccess { refreshDms() }
         }
     }
 
-    fun refreshBroadcasts() {
+    fun sendBroadcast(content: String, channel: String? = null, onResult: (Result<Unit>) -> Unit = {}) {
         viewModelScope.launch {
-            teambookRepo.getBroadcasts(20).onSuccess { _broadcastsData.value = it }
+            repository.sendBroadcast(content, channel).also(onResult).onSuccess { refreshBroadcasts() }
         }
     }
 
-    fun refreshTasks() {
+    fun createTask(description: String, onResult: (Result<Unit>) -> Unit = {}) {
         viewModelScope.launch {
-            teambookRepo.getTasks().onSuccess { _tasksData.value = it }
+            repository.createTask(description).also(onResult).onSuccess { refreshTasks() }
         }
     }
 
-    fun refreshNotes() {
+    fun updateTask(id: String, status: String, reason: String? = null, onResult: (Result<Unit>) -> Unit = {}) {
         viewModelScope.launch {
-            teambookRepo.notebookList(20).onSuccess { _notesData.value = it }
+            repository.updateTask(id, status, reason).also(onResult).onSuccess { refreshTasks() }
         }
     }
 
-    fun refreshDialogues() {
+    fun startDialogue(responder: String, topic: String, onResult: (Result<Unit>) -> Unit = {}) {
         viewModelScope.launch {
-            teambookRepo.getDialogues(10).onSuccess { _dialoguesData.value = it }
+            repository.startDialogue(responder, topic).also(onResult).onSuccess { refreshDialogues() }
         }
     }
 
-    // ============================================================================
-    // TEAMBOOK ACTIONS
-    // ============================================================================
-
-    fun sendTeambookDm(to: String, content: String) {
+    fun respondDialogue(id: String, response: String, onResult: (Result<Unit>) -> Unit = {}) {
         viewModelScope.launch {
-            teambookRepo.sendDm(to, content).onSuccess {
-                refreshDms()
-            }.onFailure {
-                _error.value = "Send DM failed: ${it.message}"
-            }
+            repository.respondDialogue(id, response).also(onResult).onSuccess { refreshDialogues() }
         }
     }
 
-    fun sendTeambookBroadcast(content: String) {
+    fun rememberNote(content: String, tags: String? = null, onResult: (Result<Unit>) -> Unit = {}) {
         viewModelScope.launch {
-            teambookRepo.sendBroadcast(content).onSuccess {
-                refreshBroadcasts()
-            }.onFailure {
-                _error.value = "Broadcast failed: ${it.message}"
-            }
+            repository.rememberNote(content, tags).also(onResult).onSuccess { refreshNotes() }
         }
     }
 
-    fun createTask(description: String) {
+    fun recallNotes(query: String) {
         viewModelScope.launch {
-            teambookRepo.createTask(description).onSuccess {
-                refreshTasks()
-            }.onFailure {
-                _error.value = "Create task failed: ${it.message}"
-            }
+            repository.recallNotes(query)
+                .onSuccess { _noteSearchResults.value = it }
+                .onFailure { _error.value = it.message }
         }
     }
 
-    fun updateTask(id: String, status: String) {
-        viewModelScope.launch {
-            teambookRepo.updateTask(id, status).onSuccess {
-                refreshTasks()
-            }.onFailure {
-                _error.value = "Update task failed: ${it.message}"
-            }
-        }
-    }
+    fun clearError() { _error.value = null }
 
-    fun notebookRemember(content: String, tags: String?) {
-        viewModelScope.launch {
-            teambookRepo.notebookRemember(content, tags).onSuccess {
-                refreshNotes()
-            }.onFailure {
-                _error.value = "Save note failed: ${it.message}"
-            }
-        }
-    }
+    // ─────────────────────────────────────────────────────────────────────────
+    // Lifecycle
+    // ─────────────────────────────────────────────────────────────────────────
 
-    fun notebookRecall(query: String) {
-        viewModelScope.launch {
-            teambookRepo.notebookRecall(query).onSuccess {
-                _searchResults.value = it
-            }.onFailure {
-                _error.value = "Search failed: ${it.message}"
-            }
-        }
-    }
-
-    fun startDialogue(responder: String, topic: String) {
-        viewModelScope.launch {
-            teambookRepo.startDialogue(responder, topic).onSuccess {
-                refreshDialogues()
-            }.onFailure {
-                _error.value = "Start dialogue failed: ${it.message}"
-            }
-        }
-    }
-
-    fun respondDialogue(id: String, response: String) {
-        viewModelScope.launch {
-            teambookRepo.respondDialogue(id, response).onSuccess {
-                refreshDialogues()
-            }.onFailure {
-                _error.value = "Respond failed: ${it.message}"
-            }
-        }
-    }
-
-    // ============================================================================
-    // LEGACY FEDERATION METHODS
-    // ============================================================================
-
-    fun connect(serverUrl: String) {
-        viewModelScope.launch {
-            _connectionState.value = ConnectionState.CONNECTING
-            _wallStatus.value = WallStatus.VERIFYING
-            _serverUrl.value = serverUrl
-            preferences.serverUrl = serverUrl
-
-            try {
-                NetworkClient.setServerUrl(serverUrl)
-
-                val healthResult = repository.healthCheck()
-                if (healthResult.isFailure) {
-                    _error.value = "Server unreachable: ${healthResult.exceptionOrNull()?.message}"
-                    _connectionState.value = ConnectionState.DISCONNECTED
-                    _wallStatus.value = WallStatus.SECURE
-                    return@launch
-                }
-
-                _connectionState.value = ConnectionState.CONNECTED
-
-                val existingDeviceId = preferences.deviceId
-                val existingFingerprint = preferences.fingerprint
-                val deviceName = preferences.deviceName ?: "Android-${android.os.Build.MODEL}"
-
-                if (existingDeviceId != null && existingFingerprint != null) {
-                    val reconnectResult = repository.reconnect(existingDeviceId, existingFingerprint)
-                    if (reconnectResult.isSuccess) {
-                        _deviceId.value = existingDeviceId
-                        _connectionState.value = ConnectionState.AUTHENTICATED
-                        _wallStatus.value = WallStatus.SECURE
-                        preferences.updateLastConnected()
-                        refreshFederation()
-                        refreshMessages()
-                        return@launch
-                    } else {
-                        preferences.clearIdentity()
-                    }
-                }
-
-                val registerResult = repository.register(deviceName, "mobile")
-                if (registerResult.isSuccess) {
-                    val registration = registerResult.getOrNull()!!
-                    _deviceId.value = registration.deviceId
-                    _connectionState.value = ConnectionState.AUTHENTICATED
-                    _wallStatus.value = WallStatus.SECURE
-                    preferences.saveRegistration(registration.deviceId, deviceName, registration.fingerprint)
-                    refreshFederation()
-                    refreshMessages()
-                } else {
-                    _error.value = "Registration failed: ${registerResult.exceptionOrNull()?.message}"
-                    _connectionState.value = ConnectionState.CONNECTED
-                    _wallStatus.value = WallStatus.SECURE
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Connection failed", e)
-                _error.value = "Connection failed: ${e.message}"
-                _connectionState.value = ConnectionState.DISCONNECTED
-                _wallStatus.value = WallStatus.SECURE
-            }
-        }
-    }
-
-    fun disconnect() {
-        viewModelScope.launch {
-            _connectionState.value = ConnectionState.DISCONNECTED
-            _nodes.value = emptyList()
-            _stats.value = null
-            _messages.value = emptyList()
-        }
-    }
-
-    fun logout() {
-        viewModelScope.launch {
-            preferences.clearIdentity()
-            _connectionState.value = ConnectionState.DISCONNECTED
-            _nodes.value = emptyList()
-            _stats.value = null
-            _messages.value = emptyList()
-            _deviceId.value = ""
-        }
-    }
-
-    fun refreshFederation() {
-        viewModelScope.launch {
-            try {
-                val membersResult = repository.getMembers()
-                if (membersResult.isSuccess) {
-                    _nodes.value = membersResult.getOrNull() ?: emptyList()
-                }
-
-                val teamResult = repository.getTeam()
-                if (teamResult.isSuccess) {
-                    val team = teamResult.getOrNull() ?: emptyList()
-                    val updatedNodes = _nodes.value.map { node ->
-                        team.find { it.id == node.id }?.let { teamMember ->
-                            node.copy(currentActivity = teamMember.currentActivity)
-                        } ?: node
-                    }
-                    _nodes.value = updatedNodes
-                }
-
-                val statusResult = repository.getStatus()
-                if (statusResult.isSuccess) {
-                    val status = statusResult.getOrNull()!!
-                    val nodeList = _nodes.value
-                    _stats.value = FederationStats(
-                        totalNodes = nodeList.size,
-                        aiAgents = nodeList.count { it.entityType == EntityType.AI_AGENT },
-                        humanUsers = nodeList.count {
-                            it.entityType == EntityType.HUMAN_MOBILE ||
-                            it.entityType == EntityType.HUMAN_DESKTOP
-                        },
-                        servers = nodeList.count { it.entityType == EntityType.SERVER },
-                        messagesLast24h = 0,
-                        uptime = status.serverUptimeSecs
-                    )
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to refresh federation", e)
-                _error.value = "Refresh failed: ${e.message}"
-            }
-        }
-    }
-
-    fun sendMessage(content: String, recipientId: String?) {
-        viewModelScope.launch {
-            try {
-                val result = if (recipientId.isNullOrBlank()) {
-                    repository.sendBroadcast(content)
-                } else {
-                    repository.sendDm(recipientId, content)
-                }
-
-                if (result.isSuccess) {
-                    val messageId = result.getOrNull() ?: 0L
-                    val newMessage = DeepNetMessage(
-                        id = messageId,
-                        from = _deviceId.value,
-                        to = recipientId,
-                        content = content,
-                        timestamp = Instant.now(),
-                        messageType = if (recipientId == null) MessageType.BROADCAST else MessageType.DIRECT
-                    )
-                    _messages.value = listOf(newMessage) + _messages.value
-                } else {
-                    _error.value = "Send failed: ${result.exceptionOrNull()?.message}"
-                }
-            } catch (e: Exception) {
-                _error.value = "Send failed: ${e.message}"
-            }
-        }
-    }
-
-    fun refreshMessages() {
-        viewModelScope.launch {
-            try {
-                val result = repository.getMessages(50)
-                if (result.isSuccess) {
-                    _messages.value = result.getOrNull() ?: emptyList()
-                }
-            } catch (e: Exception) {
-                _error.value = "Refresh messages failed: ${e.message}"
-            }
-        }
-    }
-
-    fun clearError() {
-        _error.value = null
-    }
-
-    fun setServerUrl(url: String) {
-        _serverUrl.value = url
-    }
-
-    fun setTeambookServerUrl(url: String) {
-        _teambookServerUrl.value = url
+    override fun onCleared() {
+        super.onCleared()
+        stopSse()
     }
 }

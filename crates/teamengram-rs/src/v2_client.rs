@@ -20,7 +20,6 @@ use crate::outbox::{OutboxProducer, OutboxConsumer};
 use crate::event_log::{EventLogReader, EventLogWriter};
 use crate::view::ViewEngine;
 use crate::compat_types::{Message, MessageType};
-use crate::is_ai_online;
 
 /// V2 Client error types
 #[derive(Debug)]
@@ -1060,133 +1059,20 @@ impl V2Client {
     pub fn list_projects(&mut self) -> V2Result<Vec<(u64, String, String, String, String, bool)>> {
         // Returns: (project_id, name, goal, root_directory, status, is_deleted)
         self.sync()?;
-
-        use std::collections::HashMap;
-        // Key = timestamp (canonical ID). Value = (name, goal, root_directory, status, is_deleted)
-        let mut projects: HashMap<u64, (String, String, String, String, bool)> = HashMap::new();
-        // Backward compat: sequence → timestamp for old events that used sequence as project_id
-        let mut seq_to_ts: HashMap<u64, u64> = HashMap::new();
-
-        let mut temp_reader = EventLogReader::open(Some(&self.base_dir))
-            .map_err(|e| V2Error::EventLog(e.to_string()))?;
-
-        loop {
-            match temp_reader.try_read() {
-                Ok(Some(event)) => {
-                    match event.header.event_type {
-                        event_type::PROJECT_CREATE => {
-                            if let EventPayload::ProjectCreate(payload) = &event.payload {
-                                let id = event.header.timestamp;
-                                seq_to_ts.insert(event.header.sequence, id);
-                                projects.insert(id, (
-                                    payload.name.clone(),
-                                    payload.goal.clone(),
-                                    payload.root_directory.clone(),
-                                    "active".to_string(),
-                                    false,
-                                ));
-                            }
-                        }
-                        event_type::PROJECT_UPDATE => {
-                            if let EventPayload::ProjectUpdate(payload) = &event.payload {
-                                // Resolve: payload.project_id could be timestamp (new) or sequence (old)
-                                let canonical_id = seq_to_ts.get(&payload.project_id)
-                                    .copied()
-                                    .unwrap_or(payload.project_id);
-                                if let Some(p) = projects.get_mut(&canonical_id) {
-                                    if let Some(ref g) = payload.goal { p.1 = g.clone(); }
-                                    if let Some(ref s) = payload.status { p.3 = s.clone(); }
-                                }
-                            }
-                        }
-                        event_type::PROJECT_DELETE => {
-                            if let EventPayload::ProjectDelete(payload) = &event.payload {
-                                let canonical_id = seq_to_ts.get(&payload.project_id)
-                                    .copied()
-                                    .unwrap_or(payload.project_id);
-                                if let Some(p) = projects.get_mut(&canonical_id) {
-                                    p.4 = true;
-                                }
-                            }
-                        }
-                        event_type::PROJECT_RESTORE => {
-                            if let EventPayload::ProjectRestore(payload) = &event.payload {
-                                let canonical_id = seq_to_ts.get(&payload.project_id)
-                                    .copied()
-                                    .unwrap_or(payload.project_id);
-                                if let Some(p) = projects.get_mut(&canonical_id) {
-                                    p.4 = false;
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                Ok(None) => break,
-                Err(_) => continue,
-            }
-        }
-
-        // Read-your-own-writes: scan outbox for pending PROJECT_CREATE events
-        if let Ok(consumer) = OutboxConsumer::open(&self.ai_id, Some(&self.base_dir)) {
-            for event_result in consumer.peek_all_pending() {
-                if let Ok(event) = event_result {
-                    if event.header.event_type == event_type::PROJECT_CREATE {
-                        if let EventPayload::ProjectCreate(payload) = &event.payload {
-                            let id = event.header.timestamp;
-                            if !projects.contains_key(&id) {
-                                projects.insert(id, (
-                                    payload.name.clone(),
-                                    payload.goal.clone(),
-                                    payload.root_directory.clone(),
-                                    "active".to_string(),
-                                    false,
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Return only non-deleted projects
-        let result: Vec<_> = projects.into_iter()
-            .filter(|(_, (_, _, _, _, deleted))| !deleted)
-            .map(|(id, (name, goal, dir, status, deleted))| (id, name, goal, dir, status, deleted))
+        let result = self.view.get_all_projects()
+            .values()
+            .filter(|p| !p.is_deleted)
+            .map(|p| (p.id, p.name.clone(), p.goal.clone(), p.root_directory.clone(), p.status.clone(), p.is_deleted))
             .collect();
-
         Ok(result)
     }
 
-    /// Get a specific project by ID (accepts either timestamp or legacy sequence)
+    /// Get a specific project by ID
     pub fn get_project(&mut self, project_id: u64) -> V2Result<Option<(u64, String, String, String, String, bool)>> {
-        let projects = self.list_projects()?;
-
-        // Direct match — works for timestamps (canonical ID going forward)
-        if let Some(p) = projects.iter().find(|(id, ..)| *id == project_id).cloned() {
-            return Ok(Some(p));
-        }
-
-        // Backward compat: project_id might be a legacy sequence number
-        // Quick scan to resolve sequence → timestamp
-        let mut temp_reader = EventLogReader::open(Some(&self.base_dir))
-            .map_err(|e| V2Error::EventLog(e.to_string()))?;
-        loop {
-            match temp_reader.try_read() {
-                Ok(Some(event)) => {
-                    if event.header.event_type == event_type::PROJECT_CREATE
-                        && event.header.sequence == project_id
-                    {
-                        let ts = event.header.timestamp;
-                        return Ok(projects.into_iter().find(|(id, ..)| *id == ts));
-                    }
-                }
-                Ok(None) => break,
-                Err(_) => continue,
-            }
-        }
-
-        Ok(None)
+        self.sync()?;
+        Ok(self.view.get_project(project_id)
+            .filter(|p| !p.is_deleted)
+            .map(|p| (p.id, p.name.clone(), p.goal.clone(), p.root_directory.clone(), p.status.clone(), p.is_deleted)))
     }
 
     // ===== Feature Methods =====
@@ -1228,263 +1114,23 @@ impl V2Client {
     }
 
     /// List features for a project
-    ///
-    /// CANONICAL ID = timestamp. Accepts project_id as either timestamp or legacy sequence.
-    /// Builds sequence→timestamp maps for both projects and features so old events
-    /// that reference entities by sequence number still resolve correctly.
-    /// Also scans the outbox for pending events (read-your-own-writes).
     pub fn list_features(&mut self, project_id: u64) -> V2Result<Vec<(u64, u64, String, String, Option<String>, bool)>> {
         // Returns: (feature_id, project_id, name, overview, directory, is_deleted)
         self.sync()?;
-
-        use std::collections::HashMap;
-        // Backward compat maps: sequence → timestamp
-        let mut project_seq_to_ts: HashMap<u64, u64> = HashMap::new();
-        let mut feature_seq_to_ts: HashMap<u64, u64> = HashMap::new();
-        // Key = timestamp (canonical). Value = (project_id, name, overview, directory, is_deleted)
-        let mut features: HashMap<u64, (u64, String, String, Option<String>, bool)> = HashMap::new();
-        // Resolve input project_id: might be a legacy sequence number
-        let mut resolved_project_id = project_id;
-
-        let mut temp_reader = EventLogReader::open(Some(&self.base_dir))
-            .map_err(|e| V2Error::EventLog(e.to_string()))?;
-
-        loop {
-            match temp_reader.try_read() {
-                Ok(Some(event)) => {
-                    match event.header.event_type {
-                        event_type::PROJECT_CREATE => {
-                            // Build seq→ts map for resolving feature payload.project_id
-                            project_seq_to_ts.insert(event.header.sequence, event.header.timestamp);
-                            // If input project_id matches this project's sequence, resolve to timestamp
-                            if event.header.sequence == project_id && event.header.timestamp != project_id {
-                                resolved_project_id = event.header.timestamp;
-                            }
-                        }
-                        event_type::FEATURE_CREATE => {
-                            if let EventPayload::FeatureCreate(payload) = &event.payload {
-                                // Resolve payload.project_id: could be timestamp (new) or sequence (old)
-                                let canonical_proj_id = project_seq_to_ts.get(&payload.project_id)
-                                    .copied()
-                                    .unwrap_or(payload.project_id);
-
-                                if canonical_proj_id == resolved_project_id {
-                                    let id = event.header.timestamp;
-                                    feature_seq_to_ts.insert(event.header.sequence, id);
-                                    features.insert(id, (
-                                        resolved_project_id,
-                                        payload.name.clone(),
-                                        payload.overview.clone(),
-                                        payload.directory.clone(),
-                                        false,
-                                    ));
-                                }
-                            }
-                        }
-                        event_type::FEATURE_UPDATE => {
-                            if let EventPayload::FeatureUpdate(payload) = &event.payload {
-                                // Resolve feature_id: could be timestamp (new) or sequence (old)
-                                let canonical_feat_id = feature_seq_to_ts.get(&payload.feature_id)
-                                    .copied()
-                                    .unwrap_or(payload.feature_id);
-                                if let Some(f) = features.get_mut(&canonical_feat_id) {
-                                    if let Some(ref n) = payload.name { f.1 = n.clone(); }
-                                    if let Some(ref o) = payload.overview { f.2 = o.clone(); }
-                                    if payload.directory.is_some() { f.3 = payload.directory.clone(); }
-                                }
-                            }
-                        }
-                        event_type::FEATURE_DELETE => {
-                            if let EventPayload::FeatureDelete(payload) = &event.payload {
-                                let canonical_feat_id = feature_seq_to_ts.get(&payload.feature_id)
-                                    .copied()
-                                    .unwrap_or(payload.feature_id);
-                                if let Some(f) = features.get_mut(&canonical_feat_id) {
-                                    f.4 = true;
-                                }
-                            }
-                        }
-                        event_type::FEATURE_RESTORE => {
-                            if let EventPayload::FeatureRestore(payload) = &event.payload {
-                                let canonical_feat_id = feature_seq_to_ts.get(&payload.feature_id)
-                                    .copied()
-                                    .unwrap_or(payload.feature_id);
-                                if let Some(f) = features.get_mut(&canonical_feat_id) {
-                                    f.4 = false;
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                Ok(None) => break,
-                Err(_) => continue,
-            }
-        }
-
-        // Read-your-own-writes: scan outbox for pending FEATURE_CREATE events
-        if let Ok(consumer) = OutboxConsumer::open(&self.ai_id, Some(&self.base_dir)) {
-            for event_result in consumer.peek_all_pending() {
-                if let Ok(event) = event_result {
-                    if event.header.event_type == event_type::FEATURE_CREATE {
-                        if let EventPayload::FeatureCreate(payload) = &event.payload {
-                            // Resolve payload.project_id through the map
-                            let canonical_proj_id = project_seq_to_ts.get(&payload.project_id)
-                                .copied()
-                                .unwrap_or(payload.project_id);
-                            if canonical_proj_id == resolved_project_id {
-                                let id = event.header.timestamp;
-                                if !features.contains_key(&id) {
-                                    features.insert(id, (
-                                        resolved_project_id,
-                                        payload.name.clone(),
-                                        payload.overview.clone(),
-                                        payload.directory.clone(),
-                                        false,
-                                    ));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Return only non-deleted features
-        let result: Vec<_> = features.into_iter()
-            .filter(|(_, (_, _, _, _, deleted))| !deleted)
-            .map(|(id, (proj_id, name, overview, dir, deleted))| (id, proj_id, name, overview, dir, deleted))
+        let result = self.view.get_features_for_project(project_id)
+            .into_iter()
+            .filter(|f| !f.is_deleted)
+            .map(|f| (f.id, f.project_id, f.name.clone(), f.overview.clone(), f.directory.clone(), f.is_deleted))
             .collect();
-
         Ok(result)
     }
 
-    /// Get a specific feature by ID (accepts either timestamp or legacy sequence)
-    ///
-    /// CANONICAL ID = timestamp. Builds sequence→timestamp maps for backward compat.
-    /// Also scans outbox for pending events (read-your-own-writes).
+    /// Get a specific feature by ID
     pub fn get_feature(&mut self, feature_id: u64) -> V2Result<Option<(u64, u64, String, String, Option<String>, bool)>> {
-        // Need to scan all features since we don't know the project_id
         self.sync()?;
-
-        use std::collections::HashMap;
-        let mut project_seq_to_ts: HashMap<u64, u64> = HashMap::new();
-        let mut feature_seq_to_ts: HashMap<u64, u64> = HashMap::new();
-        let mut feature: Option<(u64, u64, String, String, Option<String>, bool)> = None;
-        // Track the canonical feature_id (resolved from sequence if needed)
-        let mut canonical_feature_id = feature_id;
-
-        let mut temp_reader = EventLogReader::open(Some(&self.base_dir))
-            .map_err(|e| V2Error::EventLog(e.to_string()))?;
-
-        loop {
-            match temp_reader.try_read() {
-                Ok(Some(event)) => {
-                    match event.header.event_type {
-                        event_type::PROJECT_CREATE => {
-                            project_seq_to_ts.insert(event.header.sequence, event.header.timestamp);
-                        }
-                        event_type::FEATURE_CREATE => {
-                            if let EventPayload::FeatureCreate(payload) = &event.payload {
-                                let ts = event.header.timestamp;
-                                feature_seq_to_ts.insert(event.header.sequence, ts);
-                                // Match by timestamp (canonical) or sequence (legacy)
-                                if ts == feature_id || event.header.sequence == feature_id {
-                                    canonical_feature_id = ts;
-                                    // Resolve project_id to canonical timestamp
-                                    let canonical_proj_id = project_seq_to_ts.get(&payload.project_id)
-                                        .copied()
-                                        .unwrap_or(payload.project_id);
-                                    feature = Some((
-                                        ts,
-                                        canonical_proj_id,
-                                        payload.name.clone(),
-                                        payload.overview.clone(),
-                                        payload.directory.clone(),
-                                        false,
-                                    ));
-                                }
-                            }
-                        }
-                        event_type::FEATURE_UPDATE => {
-                            if let EventPayload::FeatureUpdate(payload) = &event.payload {
-                                let canonical_feat_id = feature_seq_to_ts.get(&payload.feature_id)
-                                    .copied()
-                                    .unwrap_or(payload.feature_id);
-                                if canonical_feat_id == canonical_feature_id {
-                                    if let Some(ref mut f) = feature {
-                                        if let Some(ref n) = payload.name { f.2 = n.clone(); }
-                                        if let Some(ref o) = payload.overview { f.3 = o.clone(); }
-                                        if payload.directory.is_some() { f.4 = payload.directory.clone(); }
-                                    }
-                                }
-                            }
-                        }
-                        event_type::FEATURE_DELETE => {
-                            if let EventPayload::FeatureDelete(payload) = &event.payload {
-                                let canonical_feat_id = feature_seq_to_ts.get(&payload.feature_id)
-                                    .copied()
-                                    .unwrap_or(payload.feature_id);
-                                if canonical_feat_id == canonical_feature_id {
-                                    if let Some(ref mut f) = feature {
-                                        f.5 = true;
-                                    }
-                                }
-                            }
-                        }
-                        event_type::FEATURE_RESTORE => {
-                            if let EventPayload::FeatureRestore(payload) = &event.payload {
-                                let canonical_feat_id = feature_seq_to_ts.get(&payload.feature_id)
-                                    .copied()
-                                    .unwrap_or(payload.feature_id);
-                                if canonical_feat_id == canonical_feature_id {
-                                    if let Some(ref mut f) = feature {
-                                        f.5 = false;
-                                    }
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                Ok(None) => break,
-                Err(_) => continue,
-            }
-        }
-
-        // Read-your-own-writes: scan outbox for pending FEATURE_CREATE
-        if feature.is_none() {
-            if let Ok(consumer) = OutboxConsumer::open(&self.ai_id, Some(&self.base_dir)) {
-                for event_result in consumer.peek_all_pending() {
-                    if let Ok(event) = event_result {
-                        if event.header.event_type == event_type::FEATURE_CREATE
-                            && event.header.timestamp == feature_id
-                        {
-                            if let EventPayload::FeatureCreate(payload) = &event.payload {
-                                let canonical_proj_id = project_seq_to_ts.get(&payload.project_id)
-                                    .copied()
-                                    .unwrap_or(payload.project_id);
-                                feature = Some((
-                                    event.header.timestamp,
-                                    canonical_proj_id,
-                                    payload.name.clone(),
-                                    payload.overview.clone(),
-                                    payload.directory.clone(),
-                                    false,
-                                ));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Return None if deleted
-        if let Some(ref f) = feature {
-            if f.5 { return Ok(None); }
-        }
-
-        Ok(feature)
+        Ok(self.view.get_feature(feature_id)
+            .filter(|f| !f.is_deleted)
+            .map(|f| (f.id, f.project_id, f.name.clone(), f.overview.clone(), f.directory.clone(), f.is_deleted)))
     }
 
     // ===== Project Resolution =====

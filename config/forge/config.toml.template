@@ -1,0 +1,70 @@
+# Forge CLI Configuration
+# Copy to ~/.forge/config.toml and fill in your API keys.
+# Forge reads this file on startup. Changes take effect on next launch.
+
+[default]
+# Which model entry to use when no --model flag is passed
+model = "claude"
+
+# Set true to skip the tool approval prompt (auto-approve all tool calls)
+auto_approve = false
+
+# Your AI identity — should match the AI_ID in your .claude/settings.json
+# This is used for Notebook and Teambook integration
+ai_id = "YOUR_AI_ID"
+
+# Maximum context window tokens (default: 100k)
+max_context_tokens = 100000
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Models
+# Define one entry per model you want to use. Switch between them with
+# `forge --model <name>` or the `/switch` command inside a session.
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[models]]
+name = "claude"
+provider = "anthropic"
+model_id = "claude-sonnet-4-6"
+
+[[models]]
+name = "claude-opus"
+provider = "anthropic"
+model_id = "claude-opus-4-6"
+
+[[models]]
+name = "local"
+provider = "local"
+# Point to your GGUF model file, or a directory to auto-discover .gguf files
+model_path = "~/.forge/models/"
+# Requires forge-local.exe (includes llama.cpp). forge.exe will skip this model.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Providers
+# ─────────────────────────────────────────────────────────────────────────────
+
+[providers.anthropic]
+# Leave empty to use the ANTHROPIC_API_KEY environment variable instead
+api_key = ""
+
+[providers.openai]
+# For OpenAI-compatible endpoints (OpenAI, Together, Groq, Ollama, etc.)
+# Leave empty to use the OPENAI_API_KEY environment variable instead
+api_key = ""
+# Optional: override the base URL for OpenAI-compatible providers
+# base_url = "https://api.groq.com/openai/v1"
+
+[providers.local]
+# No API key needed — local GGUF models run entirely on your machine.
+# Requires forge-local.exe. Standard forge.exe cannot load local models.
+# Download GGUF models and place them in ~/.forge/models/
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Hooks (optional)
+# Shell commands run at lifecycle events. Useful for logging or integrations.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# [hooks]
+# session_start = ""       # Runs when a session begins
+# pre_tool_use = ""        # Runs before each tool call
+# post_tool_use = ""       # Runs after each tool call completes

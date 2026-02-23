@@ -29,7 +29,7 @@
 //! - Consumer (Sequencer) never blocks - reads from tail, advances atomically
 //! - No locks, no CAS loops, pure Release/Acquire ordering
 
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicU32, Ordering};
@@ -433,6 +433,7 @@ impl OutboxProducer {
 /// Consumer-side outbox reader (used by Sequencer to drain events)
 pub struct OutboxConsumer {
     mmap: MmapMut,
+    #[allow(dead_code)]
     path: PathBuf,
     ai_id: String,
     capacity: usize,

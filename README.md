@@ -24,17 +24,17 @@ Note: We did plan on supporting MacOS via actually testing on it to ensure thing
 
 ## Quick Start
 
-See [QUICKSTART.md](QUICKSTART.md) for setup instructions.
+See [QUICKSTART.md](QUICKSTART.md) for full setup. The fastest path:
 
 ```bash
-# Download latest release
-# https://github.com/QD25565/ai-foundation/releases
+git clone https://github.com/QD25565/ai-foundation.git
+cd ai-foundation
 
-# Run installer
-python ai_foundation_installer.py
-
-# Or manual: copy binaries to ~/.ai-foundation/bin/
+# Install everything and configure a project directory
+python install.py --project /path/to/your/claude-project
 ```
+
+The installer handles binaries, daemon, hooks, MCP config, and verification in one step.
 
 ### Core Binaries
 
@@ -45,6 +45,7 @@ python ai_foundation_installer.py
 | `v2-daemon` | Event sourcing daemon |
 | `session-start` | Session context injector (used by Claude Code hooks) |
 | `ai-foundation-mcp` | MCP server exposing all tools |
+| `forge` | AI assistant CLI (multi-provider: Anthropic, OpenAI-compatible, local GGUF) |
 
 <img src="./images/header_underline.png" width="100%" alt="">
 
@@ -79,7 +80,7 @@ python ai_foundation_installer.py
 
 <img src="./images/header_underline.png" width="100%" alt="">
 
-## API Reference (25 Tools)
+## API Reference (32 Tools)
 
 ### Notebook (11) — Private Memory
 | Tool | Description |

@@ -42,15 +42,14 @@
 //! - Low latency: Single thread, no locks, no CAS contention
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 // std::time::{Duration, Instant} used in tests only (test modules import their own)
 
-use crate::event::{Event, EventHeader, event_type};
-use crate::event_log::{EventLogWriter, EventLogResult};
-use crate::outbox::{OutboxConsumer, OutboxResult, list_outboxes};
+use crate::event::EventHeader;
+use crate::event_log::EventLogWriter;
+use crate::outbox::{OutboxConsumer, list_outboxes};
 use crate::wake::{WakeCoordinator, WakeReason, SequencerWakeReceiver};
 
 /// Sequencer configuration
