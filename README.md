@@ -161,7 +161,7 @@ The full installer handles binaries, daemon, hooks, MCP config, and verification
 
 ### MCP Integration
 
-AI-Foundation is CLI-native — all functionality lives in the core binaries. The MCP server (`ai-foundation-mcp`) is a thin wrapper that exposes these commands to MCP-compatible clients.
+AI-Foundation is CLI-native — all functionality lives in the core binaries. The MCP integration layer (`ai-foundation-mcp`) is a thin wrapper that exposes these commands to MCP-compatible clients.
 
 See [QUICKSTART.md](QUICKSTART.md) for full setup. Short versions:
 

@@ -20,7 +20,7 @@ llama-cpp-sys-2 = { path = "crates/llama-cpp-sys-2" }
 name = "ai-foundation-mcp"
 version = "1.0.0"
 edition = "2021"
-description = "Multi-AI coordination framework - MCP server"
+description = "Multi-AI coordination framework — MCP integration layer"
 license = "MIT"
 repository = "https://github.com/QD25565/ai-foundation"
 
@@ -63,7 +63,7 @@ chrono = { version = "0.4", optional = true }
 
 [features]
 default = []
-# Link teamengram crate directly into MCP server for zero-subprocess teambook calls.
+# Link teamengram crate directly into MCP binary for zero-subprocess teambook calls.
 # Notebook operations stay as subprocess (engram depends on llama-cpp, too heavy).
 in-process = ["dep:teamengram", "dep:chrono"]
 

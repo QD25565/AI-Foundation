@@ -1,7 +1,7 @@
 //! AI Foundation HTTP API Server
 //!
 //! Serves REST endpoints for mobile/desktop human clients AND federation peers.
-//! Uses the same CLI subprocess pattern as the MCP server —
+//! Uses the same CLI subprocess pattern as the MCP binary —
 //! CLIs are the source of truth, this is just another thin wrapper.
 //!
 //! Usage:

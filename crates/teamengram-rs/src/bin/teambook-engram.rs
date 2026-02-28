@@ -1265,7 +1265,7 @@ async fn main() -> Result<()> {
 
     // V2 EVENT SOURCING PATH
     // Enable via: --v2 flag OR TEAMENGRAM_V2=1 environment variable
-    // The env var allows MCP server to enable V2 for all CLI subprocess calls
+    // The env var allows the MCP binary to enable V2 for all CLI subprocess calls
     let v2_enabled = cli.v2 || std::env::var("TEAMENGRAM_V2")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);  // V1 is default - V2 requires explicit opt-in

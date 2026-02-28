@@ -21,7 +21,7 @@ import androidx.core.view.WindowCompat
 
 // AI-Foundation Brand Color Palette
 // Based on official brand: Battleship Grey (#878787) + Asparagus Green (#82A473)
-object DeepNetColors {
+object FoundationColors {
     // Primary - Asparagus Green (represents growth/connection)
     val Primary = Color(0xFF82A473)
     val PrimaryVariant = Color(0xFF6B8A5E)
@@ -63,7 +63,7 @@ object DeepNetColors {
  * Matches website's JetBrains Mono + Inter font stack
  * Uses monospace for technical/data display, sans-serif for body text
  */
-object DeepNetTypography {
+object FoundationTypography {
     // Primary monospace font (matches JetBrains Mono from website)
     val MonoFamily = FontFamily.Monospace
 
@@ -161,13 +161,13 @@ object DeepNetTypography {
  * AI-Foundation Gradient Brushes
  * Matches website's gradient patterns
  */
-object DeepNetGradients {
+object FoundationGradients {
     /**
      * Primary brand gradient: Battleship Grey -> Asparagus Green
      * Used for buttons, accents, highlights
      */
     val Primary = Brush.linearGradient(
-        colors = listOf(DeepNetColors.Secondary, DeepNetColors.Primary),
+        colors = listOf(FoundationColors.Secondary, FoundationColors.Primary),
         start = Offset(0f, 0f),
         end = Offset(Float.POSITIVE_INFINITY, Float.POSITIVE_INFINITY)
     )
@@ -177,7 +177,7 @@ object DeepNetGradients {
      * Used for hero titles and important headings
      */
     val Title = Brush.linearGradient(
-        colors = listOf(Color.White, DeepNetColors.Secondary, DeepNetColors.Primary),
+        colors = listOf(Color.White, FoundationColors.Secondary, FoundationColors.Primary),
         start = Offset(0f, 0f),
         end = Offset(Float.POSITIVE_INFINITY, Float.POSITIVE_INFINITY)
     )
@@ -188,8 +188,8 @@ object DeepNetGradients {
      */
     val Glow = Brush.radialGradient(
         colors = listOf(
-            DeepNetColors.GlowGreen,
-            DeepNetColors.Primary.copy(alpha = 0.3f),
+            FoundationColors.GlowGreen,
+            FoundationColors.Primary.copy(alpha = 0.3f),
             Color.Transparent
         )
     )
@@ -199,8 +199,8 @@ object DeepNetGradients {
      */
     val Glass = Brush.verticalGradient(
         colors = listOf(
-            DeepNetColors.GlassBg,
-            DeepNetColors.GlassBg.copy(alpha = 0.04f)
+            FoundationColors.GlassBg,
+            FoundationColors.GlassBg.copy(alpha = 0.04f)
         )
     )
 
@@ -209,7 +209,7 @@ object DeepNetGradients {
      */
     val SectionFade = Brush.horizontalGradient(
         colors = listOf(
-            DeepNetColors.Primary.copy(alpha = 0.15f),
+            FoundationColors.Primary.copy(alpha = 0.15f),
             Color.Transparent
         )
     )
@@ -233,35 +233,35 @@ object DeepNetGradients {
     }
 }
 
-private val DeepNetDarkColorScheme = darkColorScheme(
-    primary = DeepNetColors.Primary,
-    onPrimary = DeepNetColors.OnPrimary,
-    secondary = DeepNetColors.Secondary,
-    onSecondary = DeepNetColors.OnSecondary,
-    tertiary = DeepNetColors.Online,
-    background = DeepNetColors.Background,
-    surface = DeepNetColors.Surface,
-    surfaceVariant = DeepNetColors.SurfaceVariant,
-    onBackground = DeepNetColors.OnBackground,
-    onSurface = DeepNetColors.OnSurface,
-    onSurfaceVariant = DeepNetColors.OnSurfaceVariant,
-    error = DeepNetColors.Error
+private val FoundationDarkColorScheme = darkColorScheme(
+    primary = FoundationColors.Primary,
+    onPrimary = FoundationColors.OnPrimary,
+    secondary = FoundationColors.Secondary,
+    onSecondary = FoundationColors.OnSecondary,
+    tertiary = FoundationColors.Online,
+    background = FoundationColors.Background,
+    surface = FoundationColors.Surface,
+    surfaceVariant = FoundationColors.SurfaceVariant,
+    onBackground = FoundationColors.OnBackground,
+    onSurface = FoundationColors.OnSurface,
+    onSurfaceVariant = FoundationColors.OnSurfaceVariant,
+    error = FoundationColors.Error
 )
 
 // Light theme for accessibility (uses brand colors)
-private val DeepNetLightColorScheme = lightColorScheme(
-    primary = DeepNetColors.Primary,
+private val FoundationLightColorScheme = lightColorScheme(
+    primary = FoundationColors.Primary,
     onPrimary = Color.White,
-    secondary = DeepNetColors.Secondary,
+    secondary = FoundationColors.Secondary,
     onSecondary = Color.White,
-    tertiary = DeepNetColors.PrimaryVariant,
+    tertiary = FoundationColors.PrimaryVariant,
     background = Color(0xFFF5F5F5),
     surface = Color.White,
     surfaceVariant = Color(0xFFE8E8E8),
     onBackground = Color(0xFF1A1A1A),
     onSurface = Color(0xFF1A1A1A),
-    onSurfaceVariant = DeepNetColors.SecondaryVariant,
-    error = DeepNetColors.Error
+    onSurfaceVariant = FoundationColors.SecondaryVariant,
+    error = FoundationColors.Error
 )
 
 @Composable
@@ -269,7 +269,7 @@ fun AIFoundationTheme(
     darkTheme: Boolean = true, // Defaults to dark
     content: @Composable () -> Unit
 ) {
-    val colorScheme = if (darkTheme) DeepNetDarkColorScheme else DeepNetLightColorScheme
+    val colorScheme = if (darkTheme) FoundationDarkColorScheme else FoundationLightColorScheme
 
     val view = LocalView.current
     if (!view.isInEditMode) {
@@ -278,30 +278,30 @@ fun AIFoundationTheme(
             // Use WindowCompat for modern status bar handling
             WindowCompat.setDecorFitsSystemWindows(window, true)
             @Suppress("DEPRECATION")
-            window.statusBarColor = DeepNetColors.Background.toArgb()
+            window.statusBarColor = FoundationColors.Background.toArgb()
             WindowCompat.getInsetsController(window, view).isAppearanceLightStatusBars = !darkTheme
         }
     }
 
     // Custom typography that integrates with Material3
-    val deepNetMaterialTypography = Typography(
-        displayLarge = DeepNetTypography.HeroTitle,
-        displayMedium = DeepNetTypography.SectionTitle,
-        headlineLarge = DeepNetTypography.SectionTitle,
-        headlineMedium = DeepNetTypography.CardTitle,
-        titleLarge = DeepNetTypography.CardTitle,
-        titleMedium = DeepNetTypography.CardSubtitle,
-        bodyLarge = DeepNetTypography.Body,
-        bodyMedium = DeepNetTypography.Body,
-        bodySmall = DeepNetTypography.BodySmall,
-        labelLarge = DeepNetTypography.ButtonText,
-        labelMedium = DeepNetTypography.DataLabel,
-        labelSmall = DeepNetTypography.StatusText
+    val foundationMaterialTypography = Typography(
+        displayLarge = FoundationTypography.HeroTitle,
+        displayMedium = FoundationTypography.SectionTitle,
+        headlineLarge = FoundationTypography.SectionTitle,
+        headlineMedium = FoundationTypography.CardTitle,
+        titleLarge = FoundationTypography.CardTitle,
+        titleMedium = FoundationTypography.CardSubtitle,
+        bodyLarge = FoundationTypography.Body,
+        bodyMedium = FoundationTypography.Body,
+        bodySmall = FoundationTypography.BodySmall,
+        labelLarge = FoundationTypography.ButtonText,
+        labelMedium = FoundationTypography.DataLabel,
+        labelSmall = FoundationTypography.StatusText
     )
 
     MaterialTheme(
         colorScheme = colorScheme,
-        typography = deepNetMaterialTypography,
+        typography = foundationMaterialTypography,
         content = content
     )
 }

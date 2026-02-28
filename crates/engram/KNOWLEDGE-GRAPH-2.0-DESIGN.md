@@ -886,5 +886,4 @@ impl Engram {
 ---
 
 *Created: 2024-12-14*
-*Author: Lyra (ai-2)*
 *For: AI-Foundation*

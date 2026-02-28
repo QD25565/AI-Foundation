@@ -26,7 +26,7 @@ import com.aifoundation.app.data.model.Dm
 import com.aifoundation.app.data.model.TeamMember
 import com.aifoundation.app.ui.components.*
 import com.aifoundation.app.ui.theme.AiIdentity
-import com.aifoundation.app.ui.theme.DeepNetColors
+import com.aifoundation.app.ui.theme.FoundationColors
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -77,13 +77,13 @@ fun InboxScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(DeepNetColors.Background)
+            .background(FoundationColors.Background)
     ) {
         // ── Tab bar ───────────────────────────────────────────────────────────
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(DeepNetColors.Surface)
+                .background(FoundationColors.Surface)
                 .padding(horizontal = 8.dp, vertical = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp),
             verticalAlignment     = Alignment.CenterVertically
@@ -92,7 +92,7 @@ fun InboxScreen(
             TabButton("BROADCASTS", Icons.Default.Campaign, selectedTab == 1) { selectedTab = 1 }
             TabButton("DIALOGUES",  Icons.Default.Forum,    selectedTab == 2) { selectedTab = 2 }
             Spacer(modifier = Modifier.weight(1f))
-            DeepNetButton(
+            FoundationButton(
                 onClick = {
                     when (selectedTab) {
                         0 -> showNewConversation = true
@@ -100,7 +100,7 @@ fun InboxScreen(
                         2 -> showStartDlg        = true
                     }
                 },
-                variant = DeepNetButtonVariant.PRIMARY,
+                variant = FoundationButtonVariant.PRIMARY,
                 icon    = Icons.Default.Edit,
                 text    = "NEW"
             )
@@ -108,7 +108,7 @@ fun InboxScreen(
 
         if (isLoading) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                DeepNetLoadingIndicator(text = "LOADING...")
+                FoundationLoadingIndicator(text = "LOADING...")
             }
             return@Column
         }
@@ -138,12 +138,12 @@ fun InboxScreen(
     if (showNewConversation) {
         AlertDialog(
             onDismissRequest = { showNewConversation = false; manualRecipient = "" },
-            containerColor   = DeepNetColors.Surface,
+            containerColor   = FoundationColors.Surface,
             title = {
                 Text(
                     text       = "NEW CONVERSATION",
                     fontFamily = FontFamily.Monospace,
-                    color      = DeepNetColors.Primary
+                    color      = FoundationColors.Primary
                 )
             },
             text = {
@@ -157,7 +157,7 @@ fun InboxScreen(
                             text       = "TEAM MEMBERS",
                             fontFamily = FontFamily.Monospace,
                             fontSize   = 10.sp,
-                            color      = DeepNetColors.OnSurfaceVariant
+                            color      = FoundationColors.OnSurfaceVariant
                         )
                         (onlineMembers + offlineMembers).forEach { member ->
                             ContactPickerRow(
@@ -170,7 +170,7 @@ fun InboxScreen(
                             )
                         }
                         HorizontalDivider(
-                            color     = DeepNetColors.SurfaceVariant,
+                            color     = FoundationColors.SurfaceVariant,
                             thickness = 1.dp,
                             modifier  = Modifier.padding(vertical = 4.dp)
                         )
@@ -181,7 +181,7 @@ fun InboxScreen(
                         text       = "OR TYPE AN ID",
                         fontFamily = FontFamily.Monospace,
                         fontSize   = 10.sp,
-                        color      = DeepNetColors.OnSurfaceVariant
+                        color      = FoundationColors.OnSurfaceVariant
                     )
                     Row(
                         horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -193,7 +193,7 @@ fun InboxScreen(
                             placeholder   = "e.g. alpha-001",
                             modifier      = Modifier.weight(1f)
                         )
-                        DeepNetButton(
+                        FoundationButton(
                             onClick = {
                                 val id = manualRecipient.trim()
                                 if (id.isNotBlank()) {
@@ -202,7 +202,7 @@ fun InboxScreen(
                                     manualRecipient = ""
                                 }
                             },
-                            variant = DeepNetButtonVariant.PRIMARY,
+                            variant = FoundationButtonVariant.PRIMARY,
                             text    = "OPEN"
                         )
                     }
@@ -210,9 +210,9 @@ fun InboxScreen(
             },
             confirmButton = {},
             dismissButton = {
-                DeepNetButton(
+                FoundationButton(
                     onClick = { showNewConversation = false; manualRecipient = "" },
-                    variant = DeepNetButtonVariant.GHOST,
+                    variant = FoundationButtonVariant.GHOST,
                     text    = "CANCEL"
                 )
             }
@@ -223,9 +223,9 @@ fun InboxScreen(
     if (showBroadcast) {
         AlertDialog(
             onDismissRequest = { showBroadcast = false },
-            containerColor   = DeepNetColors.Surface,
+            containerColor   = FoundationColors.Surface,
             title = {
-                Text(text = "BROADCAST", fontFamily = FontFamily.Monospace, color = DeepNetColors.Primary)
+                Text(text = "BROADCAST", fontFamily = FontFamily.Monospace, color = FoundationColors.Primary)
             },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -243,7 +243,7 @@ fun InboxScreen(
                 }
             },
             confirmButton = {
-                DeepNetButton(
+                FoundationButton(
                     onClick = {
                         if (bcContent.isNotBlank()) {
                             onSendBroadcast(bcContent)
@@ -251,14 +251,14 @@ fun InboxScreen(
                             showBroadcast = false
                         }
                     },
-                    variant = DeepNetButtonVariant.PRIMARY,
+                    variant = FoundationButtonVariant.PRIMARY,
                     text    = "SEND"
                 )
             },
             dismissButton = {
-                DeepNetButton(
+                FoundationButton(
                     onClick = { showBroadcast = false },
-                    variant = DeepNetButtonVariant.GHOST,
+                    variant = FoundationButtonVariant.GHOST,
                     text    = "CANCEL"
                 )
             }
@@ -269,9 +269,9 @@ fun InboxScreen(
     if (showStartDlg) {
         AlertDialog(
             onDismissRequest = { showStartDlg = false },
-            containerColor   = DeepNetColors.Surface,
+            containerColor   = FoundationColors.Surface,
             title = {
-                Text(text = "START DIALOGUE", fontFamily = FontFamily.Monospace, color = DeepNetColors.Primary)
+                Text(text = "START DIALOGUE", fontFamily = FontFamily.Monospace, color = FoundationColors.Primary)
             },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -282,7 +282,7 @@ fun InboxScreen(
                 }
             },
             confirmButton = {
-                DeepNetButton(
+                FoundationButton(
                     onClick = {
                         if (dlgResponder.isNotBlank() && dlgTopic.isNotBlank()) {
                             onStartDialogue(dlgResponder, dlgTopic)
@@ -290,11 +290,11 @@ fun InboxScreen(
                             showStartDlg = false
                         }
                     },
-                    variant = DeepNetButtonVariant.PRIMARY, text = "START"
+                    variant = FoundationButtonVariant.PRIMARY, text = "START"
                 )
             },
             dismissButton = {
-                DeepNetButton(onClick = { showStartDlg = false }, variant = DeepNetButtonVariant.GHOST, text = "CANCEL")
+                FoundationButton(onClick = { showStartDlg = false }, variant = FoundationButtonVariant.GHOST, text = "CANCEL")
             }
         )
     }
@@ -303,9 +303,9 @@ fun InboxScreen(
     if (showRespondDlg) {
         AlertDialog(
             onDismissRequest = { showRespondDlg = false },
-            containerColor   = DeepNetColors.Surface,
+            containerColor   = FoundationColors.Surface,
             title = {
-                Text(text = "RESPOND", fontFamily = FontFamily.Monospace, color = DeepNetColors.Primary)
+                Text(text = "RESPOND", fontFamily = FontFamily.Monospace, color = FoundationColors.Primary)
             },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -313,14 +313,14 @@ fun InboxScreen(
                         text       = "Dialogue #$dlgId",
                         fontFamily = FontFamily.Monospace,
                         fontSize   = 12.sp,
-                        color      = DeepNetColors.OnSurfaceVariant
+                        color      = FoundationColors.OnSurfaceVariant
                     )
                     StyledTextField(value = dlgResponse, onValueChange = { dlgResponse = it },
                         placeholder = "Your response…", minLines = 4)
                 }
             },
             confirmButton = {
-                DeepNetButton(
+                FoundationButton(
                     onClick = {
                         if (dlgResponse.isNotBlank()) {
                             onRespondDialogue(dlgId, dlgResponse)
@@ -328,11 +328,11 @@ fun InboxScreen(
                             showRespondDlg = false
                         }
                     },
-                    variant = DeepNetButtonVariant.PRIMARY, text = "SEND"
+                    variant = FoundationButtonVariant.PRIMARY, text = "SEND"
                 )
             },
             dismissButton = {
-                DeepNetButton(onClick = { showRespondDlg = false }, variant = DeepNetButtonVariant.GHOST, text = "CANCEL")
+                FoundationButton(onClick = { showRespondDlg = false }, variant = FoundationButtonVariant.GHOST, text = "CANCEL")
             }
         )
     }
@@ -371,9 +371,9 @@ private fun DmsTab(
     ) {
         item {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                DeepNetButton(
+                FoundationButton(
                     onClick = onRefresh,
-                    variant = DeepNetButtonVariant.GHOST,
+                    variant = FoundationButtonVariant.GHOST,
                     icon    = Icons.Default.Refresh,
                     text    = "REFRESH"
                 )
@@ -384,11 +384,11 @@ private fun DmsTab(
             val partnerColor = AiIdentity.colorFor(partnerId)
             val previewText  = if (latestDm.from == myHId) "You: ${latestDm.content}" else latestDm.content
 
-            DeepNetCard(
+            FoundationCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clickable { onOpenConversation(partnerId) },
-                variant  = DeepNetCardVariant.DATA
+                variant  = FoundationCardVariant.DATA
             ) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
@@ -400,8 +400,8 @@ private fun DmsTab(
                             .size(8.dp)
                             .clip(CircleShape)
                             .background(
-                                if (partner?.online == true) DeepNetColors.Online
-                                else DeepNetColors.Offline.copy(alpha = 0.4f)
+                                if (partner?.online == true) FoundationColors.Online
+                                else FoundationColors.Offline.copy(alpha = 0.4f)
                             )
                     )
 
@@ -430,13 +430,13 @@ private fun DmsTab(
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
                             fontSize   = 14.sp,
-                            color      = DeepNetColors.OnSurface
+                            color      = FoundationColors.OnSurface
                         )
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
                             text     = previewText,
                             style    = MaterialTheme.typography.bodySmall,
-                            color    = DeepNetColors.OnSurfaceVariant,
+                            color    = FoundationColors.OnSurfaceVariant,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
@@ -448,13 +448,13 @@ private fun DmsTab(
                             text       = formatThreadTime(latestDm.timestamp),
                             style      = MaterialTheme.typography.labelSmall,
                             fontFamily = FontFamily.Monospace,
-                            color      = DeepNetColors.OnSurfaceVariant
+                            color      = FoundationColors.OnSurfaceVariant
                         )
                         Spacer(modifier = Modifier.height(4.dp))
                         Icon(
                             imageVector        = Icons.Default.ChevronRight,
                             contentDescription = null,
-                            tint               = DeepNetColors.OnSurfaceVariant,
+                            tint               = FoundationColors.OnSurfaceVariant,
                             modifier           = Modifier.size(16.dp)
                         )
                     }
@@ -478,12 +478,12 @@ private fun BroadcastsTab(broadcasts: List<Broadcast>, onRefresh: () -> Unit) {
     ) {
         item {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                DeepNetButton(onClick = onRefresh, variant = DeepNetButtonVariant.GHOST,
+                FoundationButton(onClick = onRefresh, variant = FoundationButtonVariant.GHOST,
                     icon = Icons.Default.Refresh, text = "REFRESH")
             }
         }
         items(broadcasts, key = { it.id }) { bc ->
-            DeepNetCard(modifier = Modifier.fillMaxWidth(), variant = DeepNetCardVariant.DATA) {
+            FoundationCard(modifier = Modifier.fillMaxWidth(), variant = FoundationCardVariant.DATA) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -520,13 +520,13 @@ private fun BroadcastsTab(broadcasts: List<Broadcast>, onRefresh: () -> Unit) {
                             if (bc.channel.isNotBlank() && bc.channel != "general") {
                                 Surface(
                                     shape = MaterialTheme.shapes.small,
-                                    color = DeepNetColors.Primary.copy(alpha = 0.12f)
+                                    color = FoundationColors.Primary.copy(alpha = 0.12f)
                                 ) {
                                     Text(
                                         text       = "#${bc.channel}",
                                         fontFamily = FontFamily.Monospace,
                                         fontSize   = 9.sp,
-                                        color      = DeepNetColors.Primary,
+                                        color      = FoundationColors.Primary,
                                         modifier   = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
                                     )
                                 }
@@ -536,7 +536,7 @@ private fun BroadcastsTab(broadcasts: List<Broadcast>, onRefresh: () -> Unit) {
                         Text(
                             text     = bc.content,
                             style    = MaterialTheme.typography.bodySmall,
-                            color    = DeepNetColors.OnSurface,
+                            color    = FoundationColors.OnSurface,
                             maxLines = 4,
                             overflow = TextOverflow.Ellipsis
                         )
@@ -545,7 +545,7 @@ private fun BroadcastsTab(broadcasts: List<Broadcast>, onRefresh: () -> Unit) {
                     Text(
                         text       = bc.timestamp.take(16),
                         style      = MaterialTheme.typography.labelSmall,
-                        color      = DeepNetColors.OnSurfaceVariant,
+                        color      = FoundationColors.OnSurfaceVariant,
                         fontFamily = FontFamily.Monospace
                     )
                 }
@@ -572,17 +572,17 @@ private fun DialoguesTab(
     ) {
         item {
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                DeepNetButton(onClick = onRefresh, variant = DeepNetButtonVariant.GHOST,
+                FoundationButton(onClick = onRefresh, variant = FoundationButtonVariant.GHOST,
                     icon = Icons.Default.Refresh, text = "REFRESH")
             }
         }
         items(dialogues, key = { it.id }) { dlg ->
             val statusColor = when (dlg.status.lowercase()) {
-                "open", "active" -> DeepNetColors.Primary
-                "closed"         -> DeepNetColors.Offline
-                else             -> DeepNetColors.Warning
+                "open", "active" -> FoundationColors.Primary
+                "closed"         -> FoundationColors.Offline
+                else             -> FoundationColors.Warning
             }
-            DeepNetCard(modifier = Modifier.fillMaxWidth(), variant = DeepNetCardVariant.DATA) {
+            FoundationCard(modifier = Modifier.fillMaxWidth(), variant = FoundationCardVariant.DATA) {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
@@ -594,7 +594,7 @@ private fun DialoguesTab(
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
                             fontSize   = 13.sp,
-                            color      = DeepNetColors.OnSurface,
+                            color      = FoundationColors.OnSurface,
                             maxLines   = 2,
                             overflow   = TextOverflow.Ellipsis
                         )
@@ -615,7 +615,7 @@ private fun DialoguesTab(
                                 text       = "${dlg.initiator} → ${dlg.responder}",
                                 style      = MaterialTheme.typography.bodySmall,
                                 fontFamily = FontFamily.Monospace,
-                                color      = DeepNetColors.OnSurfaceVariant
+                                color      = FoundationColors.OnSurfaceVariant
                             )
                         }
                         Spacer(modifier = Modifier.height(6.dp))
@@ -624,7 +624,7 @@ private fun DialoguesTab(
                             Text(
                                 text  = "${dlg.message_count} messages",
                                 style = MaterialTheme.typography.labelSmall,
-                                color = DeepNetColors.OnSurfaceVariant
+                                color = FoundationColors.OnSurfaceVariant
                             )
                         }
                     }
@@ -632,7 +632,7 @@ private fun DialoguesTab(
                         Icon(
                             imageVector        = Icons.AutoMirrored.Filled.Reply,
                             contentDescription = "Respond",
-                            tint               = DeepNetColors.Primary
+                            tint               = FoundationColors.Primary
                         )
                     }
                 }
@@ -658,7 +658,7 @@ private fun ContactPickerRow(member: TeamMember, onClick: () -> Unit) {
             modifier = Modifier
                 .size(7.dp)
                 .clip(CircleShape)
-                .background(if (member.online) DeepNetColors.Online else DeepNetColors.Offline.copy(alpha = 0.4f))
+                .background(if (member.online) FoundationColors.Online else FoundationColors.Offline.copy(alpha = 0.4f))
         )
         // Avatar
         Box(
@@ -682,7 +682,7 @@ private fun ContactPickerRow(member: TeamMember, onClick: () -> Unit) {
             fontFamily = FontFamily.Monospace,
             fontSize   = 13.sp,
             fontWeight = FontWeight.Medium,
-            color      = DeepNetColors.OnSurface,
+            color      = FoundationColors.OnSurface,
             modifier   = Modifier.weight(1f)
         )
         // Status
@@ -690,7 +690,7 @@ private fun ContactPickerRow(member: TeamMember, onClick: () -> Unit) {
             Text(
                 text   = "online",
                 style  = MaterialTheme.typography.labelSmall,
-                color  = DeepNetColors.Online,
+                color  = FoundationColors.Online,
                 fontFamily = FontFamily.Monospace
             )
         }
@@ -704,9 +704,9 @@ private fun TabButton(
     selected: Boolean,
     onClick: () -> Unit
 ) {
-    DeepNetButton(
+    FoundationButton(
         onClick = onClick,
-        variant = if (selected) DeepNetButtonVariant.PRIMARY else DeepNetButtonVariant.GHOST,
+        variant = if (selected) FoundationButtonVariant.PRIMARY else FoundationButtonVariant.GHOST,
         icon    = icon,
         text    = label
     )
@@ -727,11 +727,11 @@ private fun StyledTextField(
         modifier      = modifier.fillMaxWidth(),
         minLines      = minLines,
         colors        = OutlinedTextFieldDefaults.colors(
-            focusedBorderColor   = DeepNetColors.Primary,
-            unfocusedBorderColor = DeepNetColors.OnSurfaceVariant,
-            cursorColor          = DeepNetColors.Primary,
-            focusedTextColor     = DeepNetColors.OnSurface,
-            unfocusedTextColor   = DeepNetColors.OnSurface
+            focusedBorderColor   = FoundationColors.Primary,
+            unfocusedBorderColor = FoundationColors.OnSurfaceVariant,
+            cursorColor          = FoundationColors.Primary,
+            focusedTextColor     = FoundationColors.OnSurface,
+            unfocusedTextColor   = FoundationColors.OnSurface
         )
     )
 }
@@ -753,19 +753,19 @@ private fun StatusChip(label: String, color: androidx.compose.ui.graphics.Color)
 @Composable
 private fun EmptyState(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String) {
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        DeepNetCard(modifier = Modifier.fillMaxWidth(0.75f), variant = DeepNetCardVariant.TERMINAL) {
+        FoundationCard(modifier = Modifier.fillMaxWidth(0.75f), variant = FoundationCardVariant.TERMINAL) {
             Column(
                 horizontalAlignment = Alignment.CenterHorizontally,
                 modifier = Modifier.fillMaxWidth().padding(32.dp)
             ) {
                 Icon(imageVector = icon, contentDescription = null,
-                    tint = DeepNetColors.OnSurfaceVariant, modifier = Modifier.size(48.dp))
+                    tint = FoundationColors.OnSurfaceVariant, modifier = Modifier.size(48.dp))
                 Spacer(modifier = Modifier.height(12.dp))
                 Text(
                     text       = label,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold,
-                    color      = DeepNetColors.OnSurfaceVariant
+                    color      = FoundationColors.OnSurfaceVariant
                 )
             }
         }

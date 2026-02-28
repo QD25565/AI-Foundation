@@ -20,7 +20,7 @@ import androidx.compose.ui.unit.sp
 import com.aifoundation.app.data.model.Note
 import com.aifoundation.app.data.model.NoteSearchResult
 import com.aifoundation.app.ui.components.*
-import com.aifoundation.app.ui.theme.DeepNetColors
+import com.aifoundation.app.ui.theme.FoundationColors
 import kotlin.math.roundToInt
 
 /**
@@ -46,7 +46,7 @@ fun NotebookScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(DeepNetColors.Background)
+            .background(FoundationColors.Background)
     ) {
         // Header
         Row(
@@ -62,29 +62,29 @@ fun NotebookScreen(
                     style      = MaterialTheme.typography.headlineSmall,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Black,
-                    color      = DeepNetColors.Primary
+                    color      = FoundationColors.Primary
                 )
                 if (notes.isNotEmpty() && !isSearchMode) {
                     Text(
                         text       = "${notes.size} notes · ${notes.count { it.pinned }} pinned",
                         style      = MaterialTheme.typography.bodySmall,
                         fontFamily = FontFamily.Monospace,
-                        color      = DeepNetColors.OnSurfaceVariant
+                        color      = FoundationColors.OnSurfaceVariant
                     )
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (isSearchMode) {
-                    DeepNetButton(
+                    FoundationButton(
                         onClick = { isSearchMode = false; searchQuery = ""; onRefresh() },
-                        variant = DeepNetButtonVariant.GHOST,
+                        variant = FoundationButtonVariant.GHOST,
                         icon    = Icons.AutoMirrored.Filled.List,
                         text    = "RECENT"
                     )
                 }
-                DeepNetButton(
+                FoundationButton(
                     onClick = { showRememberDialog = true },
-                    variant = DeepNetButtonVariant.PRIMARY,
+                    variant = FoundationButtonVariant.PRIMARY,
                     icon    = Icons.Default.Add,
                     text    = "NOTE"
                 )
@@ -106,11 +106,11 @@ fun NotebookScreen(
                 modifier      = Modifier.weight(1f),
                 singleLine    = true,
                 colors = OutlinedTextFieldDefaults.colors(
-                    focusedBorderColor   = DeepNetColors.Primary,
-                    unfocusedBorderColor = DeepNetColors.OnSurfaceVariant.copy(alpha = 0.4f),
-                    cursorColor          = DeepNetColors.Primary,
-                    focusedTextColor     = DeepNetColors.OnSurface,
-                    unfocusedTextColor   = DeepNetColors.OnSurface
+                    focusedBorderColor   = FoundationColors.Primary,
+                    unfocusedBorderColor = FoundationColors.OnSurfaceVariant.copy(alpha = 0.4f),
+                    cursorColor          = FoundationColors.Primary,
+                    focusedTextColor     = FoundationColors.OnSurface,
+                    unfocusedTextColor   = FoundationColors.OnSurface
                 ),
                 trailingIcon = {
                     if (searchQuery.isNotBlank()) {
@@ -119,7 +119,7 @@ fun NotebookScreen(
                             isSearchMode = true
                         }) {
                             Icon(Icons.Default.Search, contentDescription = "Search",
-                                tint = DeepNetColors.Primary)
+                                tint = FoundationColors.Primary)
                         }
                     }
                 }
@@ -131,14 +131,14 @@ fun NotebookScreen(
                 text       = "Results for \"$searchQuery\"",
                 style      = MaterialTheme.typography.bodySmall,
                 fontFamily = FontFamily.Monospace,
-                color      = DeepNetColors.Primary,
+                color      = FoundationColors.Primary,
                 modifier   = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
             )
         }
 
         if (isLoading) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                DeepNetLoadingIndicator(text = "LOADING NOTES...")
+                FoundationLoadingIndicator(text = "LOADING NOTES...")
             }
             return@Column
         }
@@ -150,7 +150,7 @@ fun NotebookScreen(
                     Text(
                         text       = "No results for \"$searchQuery\"",
                         fontFamily = FontFamily.Monospace,
-                        color      = DeepNetColors.OnSurfaceVariant
+                        color      = FoundationColors.OnSurfaceVariant
                     )
                 }
             } else {
@@ -168,25 +168,25 @@ fun NotebookScreen(
             // Recent notes view
             if (notes.isEmpty()) {
                 Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    DeepNetCard(modifier = Modifier.fillMaxWidth(0.75f), variant = DeepNetCardVariant.TERMINAL) {
+                    FoundationCard(modifier = Modifier.fillMaxWidth(0.75f), variant = FoundationCardVariant.TERMINAL) {
                         Column(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             modifier = Modifier.fillMaxWidth().padding(32.dp)
                         ) {
                             Icon(imageVector = Icons.AutoMirrored.Filled.MenuBook, contentDescription = null,
-                                tint = DeepNetColors.OnSurfaceVariant, modifier = Modifier.size(48.dp))
+                                tint = FoundationColors.OnSurfaceVariant, modifier = Modifier.size(48.dp))
                             Spacer(modifier = Modifier.height(12.dp))
                             Text(
                                 text       = "NO NOTES YET",
                                 fontFamily = FontFamily.Monospace,
                                 fontWeight = FontWeight.Bold,
-                                color      = DeepNetColors.OnSurfaceVariant
+                                color      = FoundationColors.OnSurfaceVariant
                             )
                             Spacer(modifier = Modifier.height(4.dp))
                             Text(
                                 text  = "Tap + to remember something",
                                 fontSize = 12.sp,
-                                color = DeepNetColors.OnSurfaceVariant.copy(alpha = 0.7f)
+                                color = FoundationColors.OnSurfaceVariant.copy(alpha = 0.7f)
                             )
                         }
                     }
@@ -198,7 +198,7 @@ fun NotebookScreen(
                 ) {
                     item {
                         Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                            DeepNetButton(onClick = onRefresh, variant = DeepNetButtonVariant.GHOST,
+                            FoundationButton(onClick = onRefresh, variant = FoundationButtonVariant.GHOST,
                                 icon = Icons.Default.Refresh, text = "REFRESH")
                         }
                     }
@@ -215,9 +215,9 @@ fun NotebookScreen(
     if (showRememberDialog) {
         AlertDialog(
             onDismissRequest = { showRememberDialog = false },
-            containerColor   = DeepNetColors.Surface,
+            containerColor   = FoundationColors.Surface,
             title = {
-                Text(text = "REMEMBER", fontFamily = FontFamily.Monospace, color = DeepNetColors.Primary)
+                Text(text = "REMEMBER", fontFamily = FontFamily.Monospace, color = FoundationColors.Primary)
             },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -228,11 +228,11 @@ fun NotebookScreen(
                         modifier      = Modifier.fillMaxWidth(),
                         minLines      = 3,
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor   = DeepNetColors.Primary,
-                            unfocusedBorderColor = DeepNetColors.OnSurfaceVariant,
-                            cursorColor          = DeepNetColors.Primary,
-                            focusedTextColor     = DeepNetColors.OnSurface,
-                            unfocusedTextColor   = DeepNetColors.OnSurface
+                            focusedBorderColor   = FoundationColors.Primary,
+                            unfocusedBorderColor = FoundationColors.OnSurfaceVariant,
+                            cursorColor          = FoundationColors.Primary,
+                            focusedTextColor     = FoundationColors.OnSurface,
+                            unfocusedTextColor   = FoundationColors.OnSurface
                         )
                     )
                     OutlinedTextField(
@@ -242,17 +242,17 @@ fun NotebookScreen(
                         modifier      = Modifier.fillMaxWidth(),
                         singleLine    = true,
                         colors = OutlinedTextFieldDefaults.colors(
-                            focusedBorderColor   = DeepNetColors.Secondary,
-                            unfocusedBorderColor = DeepNetColors.OnSurfaceVariant,
-                            cursorColor          = DeepNetColors.Primary,
-                            focusedTextColor     = DeepNetColors.OnSurface,
-                            unfocusedTextColor   = DeepNetColors.OnSurface
+                            focusedBorderColor   = FoundationColors.Secondary,
+                            unfocusedBorderColor = FoundationColors.OnSurfaceVariant,
+                            cursorColor          = FoundationColors.Primary,
+                            focusedTextColor     = FoundationColors.OnSurface,
+                            unfocusedTextColor   = FoundationColors.OnSurface
                         )
                     )
                 }
             },
             confirmButton = {
-                DeepNetButton(
+                FoundationButton(
                     onClick = {
                         if (noteContent.isNotBlank()) {
                             onRemember(noteContent, noteTags.ifBlank { null })
@@ -260,11 +260,11 @@ fun NotebookScreen(
                             showRememberDialog = false
                         }
                     },
-                    variant = DeepNetButtonVariant.PRIMARY, text = "SAVE"
+                    variant = FoundationButtonVariant.PRIMARY, text = "SAVE"
                 )
             },
             dismissButton = {
-                DeepNetButton(onClick = { showRememberDialog = false }, variant = DeepNetButtonVariant.GHOST, text = "CANCEL")
+                FoundationButton(onClick = { showRememberDialog = false }, variant = FoundationButtonVariant.GHOST, text = "CANCEL")
             }
         )
     }
@@ -272,9 +272,9 @@ fun NotebookScreen(
 
 @Composable
 private fun NoteCard(note: Note) {
-    DeepNetCard(
+    FoundationCard(
         modifier   = Modifier.fillMaxWidth(),
-        variant    = DeepNetCardVariant.DATA,
+        variant    = FoundationCardVariant.DATA,
         enableGlow = note.pinned
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -287,7 +287,7 @@ private fun NoteCard(note: Note) {
                 Text(
                     text     = note.content,
                     style    = MaterialTheme.typography.bodySmall,
-                    color    = DeepNetColors.OnSurface,
+                    color    = FoundationColors.OnSurface,
                     maxLines = 4,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
@@ -297,7 +297,7 @@ private fun NoteCard(note: Note) {
                     Icon(
                         imageVector = Icons.Default.PushPin,
                         contentDescription = "Pinned",
-                        tint = DeepNetColors.Warning,
+                        tint = FoundationColors.Warning,
                         modifier = Modifier.size(14.dp)
                     )
                 }
@@ -315,13 +315,13 @@ private fun NoteCard(note: Note) {
                         note.tags.take(4).forEach { tag ->
                             Surface(
                                 shape = MaterialTheme.shapes.small,
-                                color = DeepNetColors.SurfaceVariant
+                                color = FoundationColors.SurfaceVariant
                             ) {
                                 Text(
                                     text       = tag,
                                     fontFamily = FontFamily.Monospace,
                                     fontSize   = 9.sp,
-                                    color      = DeepNetColors.OnSurfaceVariant,
+                                    color      = FoundationColors.OnSurfaceVariant,
                                     modifier   = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
                                 )
                             }
@@ -330,7 +330,7 @@ private fun NoteCard(note: Note) {
                             Text(
                                 text   = "+${note.tags.size - 4}",
                                 style  = MaterialTheme.typography.labelSmall,
-                                color  = DeepNetColors.OnSurfaceVariant
+                                color  = FoundationColors.OnSurfaceVariant
                             )
                         }
                     }
@@ -338,7 +338,7 @@ private fun NoteCard(note: Note) {
                         text       = note.created_at.take(10),
                         fontFamily = FontFamily.Monospace,
                         fontSize   = 10.sp,
-                        color      = DeepNetColors.OnSurfaceVariant.copy(alpha = 0.6f)
+                        color      = FoundationColors.OnSurfaceVariant.copy(alpha = 0.6f)
                     )
                 }
             }
@@ -349,7 +349,7 @@ private fun NoteCard(note: Note) {
 @Composable
 private fun SearchResultCard(result: NoteSearchResult) {
     val scorePct = (result.score * 100).roundToInt()
-    DeepNetCard(modifier = Modifier.fillMaxWidth(), variant = DeepNetCardVariant.NODE) {
+    FoundationCard(modifier = Modifier.fillMaxWidth(), variant = FoundationCardVariant.NODE) {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -359,7 +359,7 @@ private fun SearchResultCard(result: NoteSearchResult) {
                 Text(
                     text     = result.content,
                     style    = MaterialTheme.typography.bodySmall,
-                    color    = DeepNetColors.OnSurface,
+                    color    = FoundationColors.OnSurface,
                     maxLines = 4,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f)
@@ -371,21 +371,21 @@ private fun SearchResultCard(result: NoteSearchResult) {
                     fontSize   = 11.sp,
                     fontWeight = FontWeight.Bold,
                     color      = when {
-                        scorePct >= 80 -> DeepNetColors.Online
-                        scorePct >= 50 -> DeepNetColors.Warning
-                        else           -> DeepNetColors.OnSurfaceVariant
+                        scorePct >= 80 -> FoundationColors.Online
+                        scorePct >= 50 -> FoundationColors.Warning
+                        else           -> FoundationColors.OnSurfaceVariant
                     }
                 )
             }
             if (result.tags.isNotEmpty()) {
                 Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                     result.tags.take(4).forEach { tag ->
-                        Surface(shape = MaterialTheme.shapes.small, color = DeepNetColors.SurfaceVariant) {
+                        Surface(shape = MaterialTheme.shapes.small, color = FoundationColors.SurfaceVariant) {
                             Text(
                                 text       = tag,
                                 fontFamily = FontFamily.Monospace,
                                 fontSize   = 9.sp,
-                                color      = DeepNetColors.OnSurfaceVariant,
+                                color      = FoundationColors.OnSurfaceVariant,
                                 modifier   = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
                             )
                         }

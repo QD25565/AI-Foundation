@@ -18,7 +18,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aifoundation.app.data.model.Dialogue
 import com.aifoundation.app.ui.components.*
-import com.aifoundation.app.ui.theme.DeepNetColors
+import com.aifoundation.app.ui.theme.FoundationColors
 
 /**
  * Dialogues screen — standalone view of all structured AI-to-AI conversations.
@@ -43,7 +43,7 @@ fun DialoguesScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(DeepNetColors.Background)
+            .background(FoundationColors.Background)
     ) {
         // Header
         Row(
@@ -58,38 +58,38 @@ fun DialoguesScreen(
                 style      = MaterialTheme.typography.headlineSmall,
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Black,
-                color      = DeepNetColors.Primary
+                color      = FoundationColors.Primary
             )
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                DeepNetButton(onClick = onRefresh, variant = DeepNetButtonVariant.GHOST,
+                FoundationButton(onClick = onRefresh, variant = FoundationButtonVariant.GHOST,
                     icon = Icons.Default.Refresh, text = "REFRESH")
-                DeepNetButton(onClick = { showStartDialog = true }, variant = DeepNetButtonVariant.PRIMARY,
+                FoundationButton(onClick = { showStartDialog = true }, variant = FoundationButtonVariant.PRIMARY,
                     icon = Icons.Default.Add, text = "START")
             }
         }
 
         if (isLoading) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                DeepNetLoadingIndicator(text = "LOADING DIALOGUES...")
+                FoundationLoadingIndicator(text = "LOADING DIALOGUES...")
             }
             return@Column
         }
 
         if (dialogues.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                DeepNetCard(modifier = Modifier.fillMaxWidth(0.75f), variant = DeepNetCardVariant.TERMINAL) {
+                FoundationCard(modifier = Modifier.fillMaxWidth(0.75f), variant = FoundationCardVariant.TERMINAL) {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier.fillMaxWidth().padding(32.dp)
                     ) {
                         Icon(imageVector = Icons.Default.Forum, contentDescription = null,
-                            tint = DeepNetColors.OnSurfaceVariant, modifier = Modifier.size(48.dp))
+                            tint = FoundationColors.OnSurfaceVariant, modifier = Modifier.size(48.dp))
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(text = "NO DIALOGUES", fontFamily = FontFamily.Monospace,
-                            fontWeight = FontWeight.Bold, color = DeepNetColors.OnSurfaceVariant)
+                            fontWeight = FontWeight.Bold, color = FoundationColors.OnSurfaceVariant)
                         Spacer(modifier = Modifier.height(4.dp))
                         Text(text = "Start a conversation with another AI",
-                            fontSize = 12.sp, color = DeepNetColors.OnSurfaceVariant.copy(alpha = 0.7f))
+                            fontSize = 12.sp, color = FoundationColors.OnSurfaceVariant.copy(alpha = 0.7f))
                     }
                 }
             }
@@ -102,11 +102,11 @@ fun DialoguesScreen(
         ) {
             items(dialogues, key = { it.id }) { dlg ->
                 val statusColor = when (dlg.status.lowercase()) {
-                    "open", "active" -> DeepNetColors.Primary
-                    "closed"         -> DeepNetColors.Offline
-                    else             -> DeepNetColors.Warning
+                    "open", "active" -> FoundationColors.Primary
+                    "closed"         -> FoundationColors.Offline
+                    else             -> FoundationColors.Warning
                 }
-                DeepNetCard(modifier = Modifier.fillMaxWidth(), variant = DeepNetCardVariant.DATA) {
+                FoundationCard(modifier = Modifier.fillMaxWidth(), variant = FoundationCardVariant.DATA) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
@@ -115,12 +115,12 @@ fun DialoguesScreen(
                         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(text = dlg.topic, fontFamily = FontFamily.Monospace,
                                 fontWeight = FontWeight.Bold, fontSize = 13.sp,
-                                color = DeepNetColors.OnSurface, maxLines = 2,
+                                color = FoundationColors.OnSurface, maxLines = 2,
                                 overflow = TextOverflow.Ellipsis)
                             Text(text = "${dlg.initiator} → ${dlg.responder}",
                                 style = MaterialTheme.typography.bodySmall,
                                 fontFamily = FontFamily.Monospace,
-                                color = DeepNetColors.OnSurfaceVariant)
+                                color = FoundationColors.OnSurfaceVariant)
                             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Surface(shape = MaterialTheme.shapes.small,
                                     color = statusColor.copy(alpha = 0.15f)) {
@@ -131,7 +131,7 @@ fun DialoguesScreen(
                                 }
                                 Text(text = "${dlg.message_count} messages",
                                     style = MaterialTheme.typography.labelSmall,
-                                    color = DeepNetColors.OnSurfaceVariant)
+                                    color = FoundationColors.OnSurfaceVariant)
                             }
                         }
                         IconButton(onClick = {
@@ -139,7 +139,7 @@ fun DialoguesScreen(
                             showRespondDialog = true
                         }) {
                             Icon(Icons.AutoMirrored.Filled.Reply, contentDescription = "Respond",
-                                tint = DeepNetColors.Primary)
+                                tint = FoundationColors.Primary)
                         }
                     }
                 }
@@ -152,8 +152,8 @@ fun DialoguesScreen(
     if (showStartDialog) {
         AlertDialog(
             onDismissRequest = { showStartDialog = false },
-            containerColor   = DeepNetColors.Surface,
-            title = { Text(text = "START DIALOGUE", fontFamily = FontFamily.Monospace, color = DeepNetColors.Primary) },
+            containerColor   = FoundationColors.Surface,
+            title = { Text(text = "START DIALOGUE", fontFamily = FontFamily.Monospace, color = FoundationColors.Primary) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(value = responder, onValueChange = { responder = it },
@@ -167,18 +167,18 @@ fun DialoguesScreen(
                 }
             },
             confirmButton = {
-                DeepNetButton(
+                FoundationButton(
                     onClick = {
                         if (responder.isNotBlank() && topic.isNotBlank()) {
                             onStartDialogue(responder, topic)
                             responder = ""; topic = ""; showStartDialog = false
                         }
                     },
-                    variant = DeepNetButtonVariant.PRIMARY, text = "START"
+                    variant = FoundationButtonVariant.PRIMARY, text = "START"
                 )
             },
             dismissButton = {
-                DeepNetButton(onClick = { showStartDialog = false }, variant = DeepNetButtonVariant.GHOST, text = "CANCEL")
+                FoundationButton(onClick = { showStartDialog = false }, variant = FoundationButtonVariant.GHOST, text = "CANCEL")
             }
         )
     }
@@ -187,12 +187,12 @@ fun DialoguesScreen(
     if (showRespondDialog) {
         AlertDialog(
             onDismissRequest = { showRespondDialog = false },
-            containerColor   = DeepNetColors.Surface,
-            title = { Text(text = "RESPOND", fontFamily = FontFamily.Monospace, color = DeepNetColors.Primary) },
+            containerColor   = FoundationColors.Surface,
+            title = { Text(text = "RESPOND", fontFamily = FontFamily.Monospace, color = FoundationColors.Primary) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(text = "Dialogue #$selectedId", fontFamily = FontFamily.Monospace,
-                        fontSize = 12.sp, color = DeepNetColors.OnSurfaceVariant)
+                        fontSize = 12.sp, color = FoundationColors.OnSurfaceVariant)
                     OutlinedTextField(value = responseText, onValueChange = { responseText = it },
                         placeholder = { Text("Your response...") },
                         modifier = Modifier.fillMaxWidth(), minLines = 4,
@@ -200,18 +200,18 @@ fun DialoguesScreen(
                 }
             },
             confirmButton = {
-                DeepNetButton(
+                FoundationButton(
                     onClick = {
                         if (responseText.isNotBlank()) {
                             onRespondDialogue(selectedId, responseText)
                             responseText = ""; selectedId = ""; showRespondDialog = false
                         }
                     },
-                    variant = DeepNetButtonVariant.PRIMARY, text = "SEND"
+                    variant = FoundationButtonVariant.PRIMARY, text = "SEND"
                 )
             },
             dismissButton = {
-                DeepNetButton(onClick = { showRespondDialog = false }, variant = DeepNetButtonVariant.GHOST, text = "CANCEL")
+                FoundationButton(onClick = { showRespondDialog = false }, variant = FoundationButtonVariant.GHOST, text = "CANCEL")
             }
         )
     }
@@ -219,9 +219,9 @@ fun DialoguesScreen(
 
 @Composable
 private fun textFieldColors() = OutlinedTextFieldDefaults.colors(
-    focusedBorderColor   = DeepNetColors.Primary,
-    unfocusedBorderColor = DeepNetColors.OnSurfaceVariant,
-    cursorColor          = DeepNetColors.Primary,
-    focusedTextColor     = DeepNetColors.OnSurface,
-    unfocusedTextColor   = DeepNetColors.OnSurface
+    focusedBorderColor   = FoundationColors.Primary,
+    unfocusedBorderColor = FoundationColors.OnSurfaceVariant,
+    cursorColor          = FoundationColors.Primary,
+    focusedTextColor     = FoundationColors.OnSurface,
+    unfocusedTextColor   = FoundationColors.OnSurface
 )

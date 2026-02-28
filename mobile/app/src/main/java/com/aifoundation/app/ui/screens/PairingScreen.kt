@@ -14,7 +14,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aifoundation.app.ui.components.*
-import com.aifoundation.app.ui.theme.DeepNetColors
+import com.aifoundation.app.ui.theme.FoundationColors
 
 /**
  * Two-phase pairing screen.
@@ -25,7 +25,7 @@ import com.aifoundation.app.ui.theme.DeepNetColors
  * Phase 2 (pairingCode != null):
  *   Server returned a code. App displays it and instructs the user to run:
  *     teambook mobile-pair <code>
- *   DeepNetRoot polls pollPairingCode() every 3 s in the background.
+ *   AppRoot polls pollPairingCode() every 3 s in the background.
  *   On approval the token arrives, isPaired flips, and navigation happens automatically.
  */
 @Composable
@@ -42,7 +42,7 @@ fun PairingScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(DeepNetColors.Background)
+            .background(FoundationColors.Background)
             .padding(start = 24.dp, end = 24.dp, top = 24.dp, bottom = 48.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
@@ -54,7 +54,7 @@ fun PairingScreen(
             fontSize     = 28.sp,
             fontWeight   = FontWeight.Black,
             fontFamily   = FontFamily.Monospace,
-            color        = DeepNetColors.Primary,
+            color        = FoundationColors.Primary,
             letterSpacing = (-1).sp
         )
         Spacer(modifier = Modifier.height(4.dp))
@@ -62,7 +62,7 @@ fun PairingScreen(
             text          = "HUMAN INTERFACE",
             fontSize      = 14.sp,
             fontFamily    = FontFamily.Monospace,
-            color         = DeepNetColors.Secondary,
+            color         = FoundationColors.Secondary,
             letterSpacing = 2.sp
         )
 
@@ -71,14 +71,14 @@ fun PairingScreen(
         if (pairingCode == null) {
             // ── Phase 1: Enter server URL ─────────────────────────────────────
 
-            DeepNetCard(
+            FoundationCard(
                 modifier = Modifier.fillMaxWidth(),
-                variant  = DeepNetCardVariant.TERMINAL
+                variant  = FoundationCardVariant.TERMINAL
             ) {
                 Text(
                     text  = "Server URL",
                     style = MaterialTheme.typography.labelMedium,
-                    color = DeepNetColors.OnSurfaceVariant
+                    color = FoundationColors.OnSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 OutlinedTextField(
@@ -88,11 +88,11 @@ fun PairingScreen(
                     modifier      = Modifier.fillMaxWidth(),
                     enabled       = !isPairing,
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor   = DeepNetColors.Primary,
-                        unfocusedBorderColor = DeepNetColors.OnSurfaceVariant,
-                        cursorColor          = DeepNetColors.Primary,
-                        focusedTextColor     = DeepNetColors.OnSurface,
-                        unfocusedTextColor   = DeepNetColors.OnSurface
+                        focusedBorderColor   = FoundationColors.Primary,
+                        unfocusedBorderColor = FoundationColors.OnSurfaceVariant,
+                        cursorColor          = FoundationColors.Primary,
+                        focusedTextColor     = FoundationColors.OnSurface,
+                        unfocusedTextColor   = FoundationColors.OnSurface
                     ),
                     singleLine = true
                 )
@@ -100,7 +100,7 @@ fun PairingScreen(
                 Text(
                     text  = "Emulator: 10.0.2.2:8081 · Real device: your server's LAN IP",
                     style = MaterialTheme.typography.bodySmall,
-                    color = DeepNetColors.OnSurfaceVariant.copy(alpha = 0.6f)
+                    color = FoundationColors.OnSurfaceVariant.copy(alpha = 0.6f)
                 )
             }
 
@@ -108,17 +108,17 @@ fun PairingScreen(
 
             // Error
             pairingError?.let {
-                DeepNetCard(modifier = Modifier.fillMaxWidth(), variant = DeepNetCardVariant.ALERT) {
-                    Text(text = it, color = DeepNetColors.Error, fontSize = 13.sp)
+                FoundationCard(modifier = Modifier.fillMaxWidth(), variant = FoundationCardVariant.ALERT) {
+                    Text(text = it, color = FoundationColors.Error, fontSize = 13.sp)
                 }
                 Spacer(modifier = Modifier.height(16.dp))
             }
 
             // GET CODE button
             if (isPairing) {
-                DeepNetLoadingIndicator(text = "CONNECTING...")
+                FoundationLoadingIndicator(text = "CONNECTING...")
             } else {
-                DeepNetButton(
+                FoundationButton(
                     onClick  = {
                         if (editableUrl.isNotBlank()) {
                             pairingError?.let { onClearError() }
@@ -126,7 +126,7 @@ fun PairingScreen(
                         }
                     },
                     enabled  = editableUrl.isNotBlank(),
-                    variant  = DeepNetButtonVariant.PRIMARY,
+                    variant  = FoundationButtonVariant.PRIMARY,
                     icon     = Icons.Default.VpnKey,
                     text     = "GET PAIRING CODE",
                     modifier = Modifier.fillMaxWidth(0.8f)
@@ -136,33 +136,33 @@ fun PairingScreen(
             Spacer(modifier = Modifier.weight(1f))
 
             // Help footer
-            DeepNetCard(modifier = Modifier.fillMaxWidth(), variant = DeepNetCardVariant.DATA) {
+            FoundationCard(modifier = Modifier.fillMaxWidth(), variant = FoundationCardVariant.DATA) {
                 Text(
                     text       = "Start the mobile API server on your machine:",
                     fontSize   = 12.sp,
-                    color      = DeepNetColors.OnSurfaceVariant
+                    color      = FoundationColors.OnSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
                     text       = "ai-foundation-mobile-api",
                     fontFamily = FontFamily.Monospace,
                     fontSize   = 12.sp,
-                    color      = DeepNetColors.Primary
+                    color      = FoundationColors.Primary
                 )
             }
 
         } else {
             // ── Phase 2: Show code, wait for approval ─────────────────────────
 
-            DeepNetCard(
+            FoundationCard(
                 modifier   = Modifier.fillMaxWidth(),
-                variant    = DeepNetCardVariant.NODE,
+                variant    = FoundationCardVariant.NODE,
                 enableGlow = true
             ) {
                 Text(
                     text  = "Your Pairing Code",
                     style = MaterialTheme.typography.labelMedium,
-                    color = DeepNetColors.OnSurfaceVariant
+                    color = FoundationColors.OnSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(16.dp))
                 Text(
@@ -170,18 +170,18 @@ fun PairingScreen(
                     fontFamily    = FontFamily.Monospace,
                     fontSize      = 36.sp,
                     fontWeight    = FontWeight.Black,
-                    color         = DeepNetColors.Primary,
+                    color         = FoundationColors.Primary,
                     letterSpacing = 6.sp,
                     textAlign     = TextAlign.Center,
                     modifier      = Modifier.fillMaxWidth()
                 )
                 Spacer(modifier = Modifier.height(16.dp))
-                HorizontalDivider(color = DeepNetColors.GlassBorder)
+                HorizontalDivider(color = FoundationColors.GlassBorder)
                 Spacer(modifier = Modifier.height(12.dp))
                 Text(
                     text  = "Run this command on your server:",
                     style = MaterialTheme.typography.bodySmall,
-                    color = DeepNetColors.OnSurfaceVariant
+                    color = FoundationColors.OnSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(6.dp))
                 Text(
@@ -189,24 +189,24 @@ fun PairingScreen(
                     fontFamily = FontFamily.Monospace,
                     fontSize   = 13.sp,
                     fontWeight = FontWeight.Bold,
-                    color      = DeepNetColors.Primary
+                    color      = FoundationColors.Primary
                 )
             }
 
             Spacer(modifier = Modifier.height(24.dp))
 
             // Polling indicator
-            DeepNetCard(modifier = Modifier.fillMaxWidth(), variant = DeepNetCardVariant.TERMINAL) {
+            FoundationCard(modifier = Modifier.fillMaxWidth(), variant = FoundationCardVariant.TERMINAL) {
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    DeepNetLoadingIndicator()
+                    FoundationLoadingIndicator()
                     Text(
                         text       = "Waiting for approval...",
                         fontFamily = FontFamily.Monospace,
                         fontSize   = 13.sp,
-                        color      = DeepNetColors.OnSurfaceVariant
+                        color      = FoundationColors.OnSurfaceVariant
                     )
                 }
             }
@@ -214,8 +214,8 @@ fun PairingScreen(
             // Error (e.g. code expired)
             pairingError?.let {
                 Spacer(modifier = Modifier.height(16.dp))
-                DeepNetCard(modifier = Modifier.fillMaxWidth(), variant = DeepNetCardVariant.ALERT) {
-                    Text(text = it, color = DeepNetColors.Error, fontSize = 13.sp)
+                FoundationCard(modifier = Modifier.fillMaxWidth(), variant = FoundationCardVariant.ALERT) {
+                    Text(text = it, color = FoundationColors.Error, fontSize = 13.sp)
                 }
             }
 
@@ -224,7 +224,7 @@ fun PairingScreen(
             Text(
                 text       = "Code expires in 10 minutes",
                 fontSize   = 12.sp,
-                color      = DeepNetColors.OnSurfaceVariant,
+                color      = FoundationColors.OnSurfaceVariant,
                 textAlign  = TextAlign.Center
             )
         }

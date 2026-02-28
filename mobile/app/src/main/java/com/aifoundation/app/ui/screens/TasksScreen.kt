@@ -19,7 +19,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aifoundation.app.data.model.Task
 import com.aifoundation.app.ui.components.*
-import com.aifoundation.app.ui.theme.DeepNetColors
+import com.aifoundation.app.ui.theme.FoundationColors
 
 /**
  * Tasks screen — shared task queue with typed cards.
@@ -42,7 +42,7 @@ fun TasksScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(DeepNetColors.Background)
+            .background(FoundationColors.Background)
     ) {
         // Header row
         Row(
@@ -58,7 +58,7 @@ fun TasksScreen(
                     style      = MaterialTheme.typography.headlineSmall,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Black,
-                    color      = DeepNetColors.Primary
+                    color      = FoundationColors.Primary
                 )
                 if (tasks.isNotEmpty()) {
                     val pending = tasks.count { it.status == "pending" }
@@ -67,20 +67,20 @@ fun TasksScreen(
                         text       = "$pending pending · $active active · ${tasks.size} total",
                         style      = MaterialTheme.typography.bodySmall,
                         fontFamily = FontFamily.Monospace,
-                        color      = DeepNetColors.OnSurfaceVariant
+                        color      = FoundationColors.OnSurfaceVariant
                     )
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                DeepNetButton(
+                FoundationButton(
                     onClick = onRefresh,
-                    variant = DeepNetButtonVariant.GHOST,
+                    variant = FoundationButtonVariant.GHOST,
                     icon    = Icons.Default.Refresh,
                     text    = "REFRESH"
                 )
-                DeepNetButton(
+                FoundationButton(
                     onClick = { showCreateDialog = true },
-                    variant = DeepNetButtonVariant.PRIMARY,
+                    variant = FoundationButtonVariant.PRIMARY,
                     icon    = Icons.Default.Add,
                     text    = "NEW"
                 )
@@ -89,26 +89,26 @@ fun TasksScreen(
 
         if (isLoading) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                DeepNetLoadingIndicator(text = "LOADING TASKS...")
+                FoundationLoadingIndicator(text = "LOADING TASKS...")
             }
             return@Column
         }
 
         if (tasks.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                DeepNetCard(modifier = Modifier.fillMaxWidth(0.75f), variant = DeepNetCardVariant.TERMINAL) {
+                FoundationCard(modifier = Modifier.fillMaxWidth(0.75f), variant = FoundationCardVariant.TERMINAL) {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier.fillMaxWidth().padding(32.dp)
                     ) {
                         Icon(imageVector = Icons.Default.TaskAlt, contentDescription = null,
-                            tint = DeepNetColors.OnSurfaceVariant, modifier = Modifier.size(48.dp))
+                            tint = FoundationColors.OnSurfaceVariant, modifier = Modifier.size(48.dp))
                         Spacer(modifier = Modifier.height(12.dp))
                         Text(
                             text       = "NO TASKS",
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
-                            color      = DeepNetColors.OnSurfaceVariant
+                            color      = FoundationColors.OnSurfaceVariant
                         )
                     }
                 }
@@ -138,9 +138,9 @@ fun TasksScreen(
     if (showCreateDialog) {
         AlertDialog(
             onDismissRequest = { showCreateDialog = false },
-            containerColor   = DeepNetColors.Surface,
+            containerColor   = FoundationColors.Surface,
             title = {
-                Text(text = "NEW TASK", fontFamily = FontFamily.Monospace, color = DeepNetColors.Primary)
+                Text(text = "NEW TASK", fontFamily = FontFamily.Monospace, color = FoundationColors.Primary)
             },
             text = {
                 OutlinedTextField(
@@ -150,16 +150,16 @@ fun TasksScreen(
                     modifier      = Modifier.fillMaxWidth(),
                     minLines      = 2,
                     colors = OutlinedTextFieldDefaults.colors(
-                        focusedBorderColor   = DeepNetColors.Primary,
-                        unfocusedBorderColor = DeepNetColors.OnSurfaceVariant,
-                        cursorColor          = DeepNetColors.Primary,
-                        focusedTextColor     = DeepNetColors.OnSurface,
-                        unfocusedTextColor   = DeepNetColors.OnSurface
+                        focusedBorderColor   = FoundationColors.Primary,
+                        unfocusedBorderColor = FoundationColors.OnSurfaceVariant,
+                        cursorColor          = FoundationColors.Primary,
+                        focusedTextColor     = FoundationColors.OnSurface,
+                        unfocusedTextColor   = FoundationColors.OnSurface
                     )
                 )
             },
             confirmButton = {
-                DeepNetButton(
+                FoundationButton(
                     onClick = {
                         if (newTaskDesc.isNotBlank()) {
                             onCreateTask(newTaskDesc)
@@ -167,11 +167,11 @@ fun TasksScreen(
                             showCreateDialog = false
                         }
                     },
-                    variant = DeepNetButtonVariant.PRIMARY, text = "CREATE"
+                    variant = FoundationButtonVariant.PRIMARY, text = "CREATE"
                 )
             },
             dismissButton = {
-                DeepNetButton(onClick = { showCreateDialog = false }, variant = DeepNetButtonVariant.GHOST, text = "CANCEL")
+                FoundationButton(onClick = { showCreateDialog = false }, variant = FoundationButtonVariant.GHOST, text = "CANCEL")
             }
         )
     }
@@ -181,23 +181,23 @@ fun TasksScreen(
         val task = selectedTask!!
         AlertDialog(
             onDismissRequest = { showUpdateDialog = false },
-            containerColor   = DeepNetColors.Surface,
+            containerColor   = FoundationColors.Surface,
             title = {
-                Text(text = "UPDATE TASK", fontFamily = FontFamily.Monospace, color = DeepNetColors.Primary)
+                Text(text = "UPDATE TASK", fontFamily = FontFamily.Monospace, color = FoundationColors.Primary)
             },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                     Text(
                         text       = task.description,
                         style      = MaterialTheme.typography.bodyMedium,
-                        color      = DeepNetColors.OnSurface,
+                        color      = FoundationColors.OnSurface,
                         maxLines   = 3,
                         overflow   = TextOverflow.Ellipsis
                     )
                     Text(
                         text       = "Set status:",
                         style      = MaterialTheme.typography.labelMedium,
-                        color      = DeepNetColors.OnSurfaceVariant
+                        color      = FoundationColors.OnSurfaceVariant
                     )
                     // Status options
                     listOf("pending", "started", "done", "blocked", "closed").forEach { status ->
@@ -226,7 +226,7 @@ fun TasksScreen(
                 }
             },
             confirmButton = {
-                DeepNetButton(
+                FoundationButton(
                     onClick = {
                         if (newStatus.isNotBlank()) {
                             onUpdateTask(task.id, newStatus)
@@ -234,11 +234,11 @@ fun TasksScreen(
                             selectedTask = null
                         }
                     },
-                    variant = DeepNetButtonVariant.PRIMARY, text = "UPDATE"
+                    variant = FoundationButtonVariant.PRIMARY, text = "UPDATE"
                 )
             },
             dismissButton = {
-                DeepNetButton(onClick = { showUpdateDialog = false }, variant = DeepNetButtonVariant.GHOST, text = "CANCEL")
+                FoundationButton(onClick = { showUpdateDialog = false }, variant = FoundationButtonVariant.GHOST, text = "CANCEL")
             }
         )
     }
@@ -248,18 +248,18 @@ fun TasksScreen(
 private fun TaskCard(task: Task, onTap: () -> Unit) {
     val (statusColor, statusLabel) = taskStatusStyle(task.status)
 
-    DeepNetCard(
+    FoundationCard(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onTap),
-        variant  = DeepNetCardVariant.DATA
+        variant  = FoundationCardVariant.DATA
     ) {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             // Description
             Text(
                 text     = task.description,
                 style    = MaterialTheme.typography.bodyMedium,
-                color    = DeepNetColors.OnSurface,
+                color    = FoundationColors.OnSurface,
                 maxLines = 3,
                 overflow = TextOverflow.Ellipsis
             )
@@ -290,7 +290,7 @@ private fun TaskCard(task: Task, onTap: () -> Unit) {
                         text       = owner,
                         fontFamily = FontFamily.Monospace,
                         fontSize   = 11.sp,
-                        color      = DeepNetColors.OnSurfaceVariant
+                        color      = FoundationColors.OnSurfaceVariant
                     )
                 }
 
@@ -301,7 +301,7 @@ private fun TaskCard(task: Task, onTap: () -> Unit) {
                     text       = "#${task.id.take(8)}",
                     fontFamily = FontFamily.Monospace,
                     fontSize   = 10.sp,
-                    color      = DeepNetColors.OnSurfaceVariant.copy(alpha = 0.6f)
+                    color      = FoundationColors.OnSurfaceVariant.copy(alpha = 0.6f)
                 )
             }
         }
@@ -309,11 +309,11 @@ private fun TaskCard(task: Task, onTap: () -> Unit) {
 }
 
 private fun taskStatusStyle(status: String): Pair<Color, String> = when (status.lowercase()) {
-    "pending"                                   -> DeepNetColors.OnSurfaceVariant to "PENDING"
+    "pending"                                   -> FoundationColors.OnSurfaceVariant to "PENDING"
     "claimed", "started", "in_progress",
-    "in-progress"                               -> DeepNetColors.Warning to "IN PROGRESS"
-    "done", "completed"                         -> DeepNetColors.Online  to "DONE"
-    "blocked"                                   -> DeepNetColors.Error   to "BLOCKED"
-    "closed"                                    -> DeepNetColors.Offline to "CLOSED"
-    else                                        -> DeepNetColors.Secondary to status.uppercase()
+    "in-progress"                               -> FoundationColors.Warning to "IN PROGRESS"
+    "done", "completed"                         -> FoundationColors.Online  to "DONE"
+    "blocked"                                   -> FoundationColors.Error   to "BLOCKED"
+    "closed"                                    -> FoundationColors.Offline to "CLOSED"
+    else                                        -> FoundationColors.Secondary to status.uppercase()
 }

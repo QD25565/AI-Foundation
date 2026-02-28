@@ -14,7 +14,7 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import com.aifoundation.app.ui.theme.DeepNetColors
+import com.aifoundation.app.ui.theme.FoundationColors
 import kotlin.math.PI
 import kotlin.math.sin
 
@@ -27,9 +27,9 @@ import kotlin.math.sin
  * Animated energy pulse effect around the border
  * Creates a pulsing glow effect using the brand colors
  */
-fun Modifier.deepNetEnergyPulse(
+fun Modifier.foundationEnergyPulse(
     enabled: Boolean = true,
-    pulseColor: Color = DeepNetColors.Primary,
+    pulseColor: Color = FoundationColors.Primary,
     pulseWidth: Dp = 2.dp,
     glowWidth: Dp = 6.dp,
     pulseDuration: Int = 2500,
@@ -85,9 +85,9 @@ fun Modifier.deepNetEnergyPulse(
  * Subtle animated glow effect
  * Less intense than energy pulse, good for always-on effects
  */
-fun Modifier.deepNetGlow(
+fun Modifier.foundationGlow(
     enabled: Boolean = true,
-    glowColor: Color = DeepNetColors.GlowGreen,
+    glowColor: Color = FoundationColors.GlowGreen,
     intensity: Float = 0.5f,
     shape: Shape
 ): Modifier = composed {
@@ -132,9 +132,9 @@ fun Modifier.deepNetGlow(
  * Corner bracket overlay - HUD-style corners
  * Animated brackets in the corners of the element
  */
-fun Modifier.deepNetCornerBrackets(
+fun Modifier.foundationCornerBrackets(
     enabled: Boolean = true,
-    bracketColor: Color = DeepNetColors.Primary,
+    bracketColor: Color = FoundationColors.Primary,
     bracketLength: Dp = 16.dp,
     strokeWidth: Dp = 2.dp,
     animated: Boolean = true
@@ -188,9 +188,9 @@ fun Modifier.deepNetCornerBrackets(
  * Subtle scan line overlay
  * Creates horizontal scan lines for a retro-tech feel
  */
-fun Modifier.deepNetScanLines(
+fun Modifier.foundationScanLines(
     enabled: Boolean = true,
-    lineColor: Color = DeepNetColors.OnSurface.copy(alpha = 0.03f),
+    lineColor: Color = FoundationColors.OnSurface.copy(alpha = 0.03f),
     lineSpacing: Dp = 4.dp,
     animated: Boolean = false,
     animationSpeed: Float = 1.0f
@@ -244,9 +244,9 @@ fun Modifier.deepNetScanLines(
  * Grid overlay effect
  * Subtle network grid pattern
  */
-fun Modifier.deepNetGridOverlay(
+fun Modifier.foundationGridOverlay(
     enabled: Boolean = true,
-    gridColor: Color = DeepNetColors.GlassBorder,
+    gridColor: Color = FoundationColors.GlassBorder,
     cellSize: Dp = 24.dp,
     strokeWidth: Dp = 0.5.dp,
     animated: Boolean = false
@@ -307,9 +307,9 @@ fun Modifier.deepNetGridOverlay(
  * Data flow effect
  * Animated dots moving along the border
  */
-fun Modifier.deepNetDataFlow(
+fun Modifier.foundationDataFlow(
     enabled: Boolean = true,
-    dotColor: Color = DeepNetColors.Primary,
+    dotColor: Color = FoundationColors.Primary,
     dotCount: Int = 3,
     flowDuration: Int = 4000
 ): Modifier = composed {
@@ -367,7 +367,7 @@ fun Modifier.deepNetDataFlow(
  * Status indicator glow
  * Pulsing glow based on status color
  */
-fun Modifier.deepNetStatusGlow(
+fun Modifier.foundationStatusGlow(
     enabled: Boolean = true,
     statusColor: Color,
     intensity: Float = 0.5f
@@ -406,9 +406,9 @@ fun Modifier.deepNetStatusGlow(
  * Matches website's stat-card::before pattern - 2px green line at top with glow
  * Used for cards to create the signature AI-Foundation look
  */
-fun Modifier.deepNetTopAccent(
+fun Modifier.foundationTopAccent(
     enabled: Boolean = true,
-    accentColor: Color = DeepNetColors.Primary,
+    accentColor: Color = FoundationColors.Primary,
     accentHeight: Dp = 2.dp,
     glowEnabled: Boolean = true
 ): Modifier = composed {
@@ -450,9 +450,9 @@ fun Modifier.deepNetTopAccent(
  * Bottom accent line effect
  * Variant of top accent for bottom placement
  */
-fun Modifier.deepNetBottomAccent(
+fun Modifier.foundationBottomAccent(
     enabled: Boolean = true,
-    accentColor: Color = DeepNetColors.Primary,
+    accentColor: Color = FoundationColors.Primary,
     accentHeight: Dp = 2.dp,
     glowEnabled: Boolean = true
 ): Modifier = composed {
@@ -494,13 +494,13 @@ fun Modifier.deepNetBottomAccent(
 /**
  * Gradient text effect brush
  * Creates the signature AI-Foundation gradient from white -> battleship -> asparagus
- * Usage: Text(modifier = Modifier.deepNetGradientText())
+ * Usage: Text(modifier = Modifier.foundationGradientText())
  */
-fun Modifier.deepNetGradientText(
+fun Modifier.foundationGradientText(
     colors: List<Color> = listOf(
         Color.White,
-        DeepNetColors.Secondary,
-        DeepNetColors.Primary
+        FoundationColors.Secondary,
+        FoundationColors.Primary
     ),
     angle: Float = 135f
 ): Modifier = this.drawWithCache {

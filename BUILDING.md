@@ -42,7 +42,7 @@ cargo build --release
 # Or build specific binaries
 cargo build --release -p notebook-rs        # builds notebook-cli + session-start
 cargo build --release -p teamengram         # builds teambook + v2-daemon
-cargo build --release -p ai-foundation-mcp  # builds the MCP server
+cargo build --release -p ai-foundation-mcp  # builds the MCP integration layer
 cargo build --release -p forge              # builds Forge CLI (notebook integration, no local LLM)
 cargo build --release -p federation         # builds federation node (experimental)
 ```
@@ -144,7 +144,7 @@ cargo build --release --target x86_64-unknown-linux-gnu
 Any CLI tool that needs to know which AI it's running as **must** use this priority order — no exceptions:
 
 1. **`{CWD}/.claude/settings.json` → `env.AI_ID`** — most reliable; survives the WSL↔Windows process boundary where env vars are not inherited by `.exe` processes launched from WSL bash
-2. **`$AI_ID` environment variable** — works when set explicitly by a launcher (e.g. the MCP server sets this before spawning CLI subprocesses)
+2. **`$AI_ID` environment variable** — works when set explicitly by a launcher (e.g. the MCP integration layer sets this before spawning CLI subprocesses)
 3. **`"unknown"`** — loud fallback so misconfiguration is immediately visible, not silently wrong
 
 Do not use WSLENV or any other platform-specific mechanism. The settings.json approach works on Windows, Linux, macOS, and WSL without any platform assumptions.

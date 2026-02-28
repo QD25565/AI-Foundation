@@ -3,7 +3,7 @@ package com.aifoundation.app.viewmodel
 import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.aifoundation.app.data.local.DeepNetPreferences
+import com.aifoundation.app.data.local.AppPreferences
 import com.aifoundation.app.data.model.*
 import com.aifoundation.app.data.network.SseClient
 import com.aifoundation.app.data.network.TeambookClient
@@ -21,12 +21,12 @@ import kotlinx.coroutines.launch
  * SSE events update the flows directly without a polling round-trip.
  * Manual refresh methods are available for pull-to-refresh.
  *
- * Pairing state (token, hId, serverUrl) is persisted via DeepNetPreferences
+ * Pairing state (token, hId, serverUrl) is persisted via AppPreferences
  * so the user stays authenticated across process death / app restarts.
  */
-class DeepNetViewModel(application: Application) : AndroidViewModel(application) {
+class MainViewModel(application: Application) : AndroidViewModel(application) {
 
-    private val prefs = DeepNetPreferences(application)
+    private val prefs = AppPreferences(application)
     private val repository = TeambookRepository()
     private val sseClient = SseClient()
 

@@ -35,6 +35,6 @@ Scope: Full codebase audit covering security, data integrity, and quality.
 
 All findings from the v57 audit have been addressed:
 1. Build breakage from `rmcp` API drift — resolved, builds clean with 0 warnings.
-2. Tool/API naming drift — tool count now audited from source (28 tools in MCP server).
+2. Tool/API naming drift — command count now audited from source (28 commands across CLI binaries).
 3. Dead code (deprecated modules, teambook_v1 wrappers) — removed in v58 source sync.
 4. Integration test quality — replaced with 151 targeted integration tests using TestHarness (isolated dual-daemon spawning).

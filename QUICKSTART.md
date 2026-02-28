@@ -106,7 +106,7 @@ After install:
 │   ├── teambook(.exe)         ← team coordination
 │   ├── v2-daemon(.exe)        ← event sourcing daemon
 │   ├── session-start(.exe)    ← session context injector
-│   ├── ai-foundation-mcp(.exe)← MCP server
+│   ├── ai-foundation-mcp(.exe)← MCP integration layer
 │   ├── forge(.exe)            ← AI assistant CLI (optional)
 │   ├── ai-foundation-mobile-api(.exe) ← mobile app server (optional)
 │   └── VERSION                ← installed version
@@ -124,7 +124,7 @@ your-project/
 ├── bin/
 │   ├── teambook(.exe)         ← local copy for hooks
 │   └── session-start(.exe)    ← local copy for hooks
-└── .mcp.json                  ← MCP server config
+└── .mcp.json                  ← MCP config
 ```
 
 ---

@@ -25,8 +25,8 @@ import androidx.navigation.compose.rememberNavController
 import com.aifoundation.app.ui.components.*
 import com.aifoundation.app.ui.screens.*
 import com.aifoundation.app.ui.theme.AIFoundationTheme
-import com.aifoundation.app.ui.theme.DeepNetColors
-import com.aifoundation.app.viewmodel.DeepNetViewModel
+import com.aifoundation.app.ui.theme.FoundationColors
+import com.aifoundation.app.viewmodel.MainViewModel
 import kotlinx.coroutines.delay
 
 /**
@@ -37,14 +37,14 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             AIFoundationTheme {
-                DeepNetRoot()
+                AppRoot()
             }
         }
     }
 }
 
 @Composable
-fun DeepNetRoot(viewModel: DeepNetViewModel = viewModel()) {
+fun AppRoot(viewModel: MainViewModel = viewModel()) {
     val isPaired     by viewModel.isPaired.collectAsState()
     val isPairing    by viewModel.isPairing.collectAsState()
     val pairingCode  by viewModel.pairingCode.collectAsState()
@@ -72,7 +72,7 @@ fun DeepNetRoot(viewModel: DeepNetViewModel = viewModel()) {
             onClearError  = { viewModel.clearError() }
         )
     } else {
-        DeepNetApp(viewModel = viewModel)
+        AiFoundationApp(viewModel = viewModel)
     }
 }
 
@@ -89,7 +89,7 @@ sealed class Screen(val route: String, val title: String, val icon: @Composable 
 // ── Main app shell ─────────────────────────────────────────────────────────────
 
 @Composable
-fun DeepNetApp(viewModel: DeepNetViewModel) {
+fun AiFoundationApp(viewModel: MainViewModel) {
     val navController     = rememberNavController()
     val navBackStackEntry by navController.currentBackStackEntryAsState()
     val currentRoute      = navBackStackEntry?.destination?.route
@@ -122,13 +122,13 @@ fun DeepNetApp(viewModel: DeepNetViewModel) {
     }
 
     Scaffold(
-        containerColor = DeepNetColors.Background,
+        containerColor = FoundationColors.Background,
         snackbarHost   = { SnackbarHost(snackbarHostState) },
         bottomBar = {
             if (showBottomNav) {
                 NavigationBar(
-                    containerColor = DeepNetColors.Surface,
-                    contentColor   = DeepNetColors.OnSurface
+                    containerColor = FoundationColors.Surface,
+                    contentColor   = FoundationColors.OnSurface
                 ) {
                     screens.forEach { screen ->
                         NavigationBarItem(
@@ -144,11 +144,11 @@ fun DeepNetApp(viewModel: DeepNetViewModel) {
                                 }
                             },
                             colors = NavigationBarItemDefaults.colors(
-                                selectedIconColor   = DeepNetColors.Primary,
-                                selectedTextColor   = DeepNetColors.Primary,
-                                unselectedIconColor = DeepNetColors.OnSurfaceVariant,
-                                unselectedTextColor = DeepNetColors.OnSurfaceVariant,
-                                indicatorColor      = DeepNetColors.Primary.copy(alpha = 0.1f)
+                                selectedIconColor   = FoundationColors.Primary,
+                                selectedTextColor   = FoundationColors.Primary,
+                                unselectedIconColor = FoundationColors.OnSurfaceVariant,
+                                unselectedTextColor = FoundationColors.OnSurfaceVariant,
+                                indicatorColor      = FoundationColors.Primary.copy(alpha = 0.1f)
                             )
                         )
                     }
@@ -258,7 +258,7 @@ fun SettingsScreen(
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .background(DeepNetColors.Background)
+            .background(FoundationColors.Background)
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
@@ -267,21 +267,21 @@ fun SettingsScreen(
                 text  = "SETTINGS",
                 style = MaterialTheme.typography.headlineMedium,
                 fontFamily = FontFamily.Monospace,
-                color = DeepNetColors.Primary
+                color = FoundationColors.Primary
             )
         }
 
         // Identity + connection
         item {
-            DeepNetCard(
+            FoundationCard(
                 modifier   = Modifier.fillMaxWidth(),
-                variant    = DeepNetCardVariant.NODE,
+                variant    = FoundationCardVariant.NODE,
                 enableGlow = true
             ) {
                 Text(
                     text  = "IDENTITY",
                     style = MaterialTheme.typography.labelMedium,
-                    color = DeepNetColors.OnSurfaceVariant
+                    color = FoundationColors.OnSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
@@ -289,19 +289,19 @@ fun SettingsScreen(
                     style      = MaterialTheme.typography.bodyLarge,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold,
-                    color      = DeepNetColors.Primary
+                    color      = FoundationColors.Primary
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text       = serverUrl,
                     style      = MaterialTheme.typography.bodySmall,
                     fontFamily = FontFamily.Monospace,
-                    color      = DeepNetColors.OnSurfaceVariant
+                    color      = FoundationColors.OnSurfaceVariant
                 )
                 Spacer(modifier = Modifier.height(10.dp))
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    DeepNetStatusIndicator(
-                        status    = if (sseConnected) DeepNetStatus.ONLINE else DeepNetStatus.OFFLINE,
+                    FoundationStatusIndicator(
+                        status    = if (sseConnected) FoundationStatus.ONLINE else FoundationStatus.OFFLINE,
                         showLabel = true,
                         animated  = sseConnected
                     )
@@ -310,7 +310,7 @@ fun SettingsScreen(
                         text       = if (sseConnected) "Live updates active" else "Disconnected",
                         style      = MaterialTheme.typography.bodySmall,
                         fontFamily = FontFamily.Monospace,
-                        color      = DeepNetColors.OnSurfaceVariant
+                        color      = FoundationColors.OnSurfaceVariant
                     )
                 }
             }
@@ -318,9 +318,9 @@ fun SettingsScreen(
 
         // Unpair
         item {
-            DeepNetButton(
+            FoundationButton(
                 onClick  = { showUnpairConfirm = true },
-                variant  = DeepNetButtonVariant.DANGER,
+                variant  = FoundationButtonVariant.DANGER,
                 icon     = Icons.Default.LinkOff,
                 text     = "UNPAIR DEVICE",
                 modifier = Modifier.fillMaxWidth()
@@ -329,18 +329,18 @@ fun SettingsScreen(
 
         // About
         item {
-            DeepNetCard(modifier = Modifier.fillMaxWidth(), variant = DeepNetCardVariant.DATA) {
+            FoundationCard(modifier = Modifier.fillMaxWidth(), variant = FoundationCardVariant.DATA) {
                 Text(
                     text  = "AI-Foundation Mobile v2.0",
                     style = MaterialTheme.typography.titleMedium,
                     fontFamily = FontFamily.Monospace,
-                    color = DeepNetColors.OnSurface
+                    color = FoundationColors.OnSurface
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text  = "Human Interface · Real-time SSE · Threaded DMs",
                     style = MaterialTheme.typography.bodySmall,
-                    color = DeepNetColors.OnSurfaceVariant
+                    color = FoundationColors.OnSurfaceVariant
                 )
             }
         }
@@ -350,31 +350,31 @@ fun SettingsScreen(
     if (showUnpairConfirm) {
         AlertDialog(
             onDismissRequest = { showUnpairConfirm = false },
-            containerColor   = DeepNetColors.Surface,
+            containerColor   = FoundationColors.Surface,
             title = {
                 Text(
                     text       = "UNPAIR DEVICE",
                     fontFamily = FontFamily.Monospace,
-                    color      = DeepNetColors.Error
+                    color      = FoundationColors.Error
                 )
             },
             text = {
                 Text(
                     text  = "This will disconnect this device from $hId. You will need a new pairing code to reconnect.",
-                    color = DeepNetColors.OnSurface
+                    color = FoundationColors.OnSurface
                 )
             },
             confirmButton = {
-                DeepNetButton(
+                FoundationButton(
                     onClick = { onUnpair(); showUnpairConfirm = false },
-                    variant = DeepNetButtonVariant.DANGER,
+                    variant = FoundationButtonVariant.DANGER,
                     text    = "UNPAIR"
                 )
             },
             dismissButton = {
-                DeepNetButton(
+                FoundationButton(
                     onClick = { showUnpairConfirm = false },
-                    variant = DeepNetButtonVariant.GHOST,
+                    variant = FoundationButtonVariant.GHOST,
                     text    = "CANCEL"
                 )
             }

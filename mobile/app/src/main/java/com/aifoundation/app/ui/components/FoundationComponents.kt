@@ -24,7 +24,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.aifoundation.app.ui.theme.DeepNetColors
+import com.aifoundation.app.ui.theme.FoundationColors
 
 /**
  * Themed UI components
@@ -34,7 +34,7 @@ import com.aifoundation.app.ui.theme.DeepNetColors
 /**
  * Card variant types for different contexts
  */
-enum class DeepNetCardVariant {
+enum class FoundationCardVariant {
     STANDARD,       // Default card style
     NODE,           // For network node display
     TERMINAL,       // Terminal/console style
@@ -48,9 +48,9 @@ enum class DeepNetCardVariant {
  * Styled card with cut corners and optional effects
  */
 @Composable
-fun DeepNetCard(
+fun FoundationCard(
     modifier: Modifier = Modifier,
-    variant: DeepNetCardVariant = DeepNetCardVariant.STANDARD,
+    variant: FoundationCardVariant = FoundationCardVariant.STANDARD,
     onClick: (() -> Unit)? = null,
     enablePulse: Boolean = false,
     enableGlow: Boolean = false,
@@ -58,30 +58,30 @@ fun DeepNetCard(
     content: @Composable ColumnScope.() -> Unit
 ) {
     val shape = when (variant) {
-        DeepNetCardVariant.STANDARD -> DeepNetShapes.Standard
-        DeepNetCardVariant.NODE -> DeepNetShapes.Node
-        DeepNetCardVariant.TERMINAL -> DeepNetShapes.Terminal
-        DeepNetCardVariant.DATA -> DeepNetShapes.DataStream
-        DeepNetCardVariant.FEDERATION -> DeepNetShapes.Federation
-        DeepNetCardVariant.ALERT -> DeepNetShapes.Alert
-        DeepNetCardVariant.SUCCESS -> DeepNetShapes.Standard
+        FoundationCardVariant.STANDARD -> FoundationShapes.Standard
+        FoundationCardVariant.NODE -> FoundationShapes.Node
+        FoundationCardVariant.TERMINAL -> FoundationShapes.Terminal
+        FoundationCardVariant.DATA -> FoundationShapes.DataStream
+        FoundationCardVariant.FEDERATION -> FoundationShapes.Federation
+        FoundationCardVariant.ALERT -> FoundationShapes.Alert
+        FoundationCardVariant.SUCCESS -> FoundationShapes.Standard
     }
 
     // All cards get visible asparagus green border by default
     val (backgroundColor, borderColor) = when (variant) {
-        DeepNetCardVariant.STANDARD -> DeepNetColors.Surface to DeepNetColors.Primary.copy(alpha = 0.6f)
-        DeepNetCardVariant.NODE -> DeepNetColors.Surface to DeepNetColors.Primary.copy(alpha = 0.7f)
-        DeepNetCardVariant.TERMINAL -> DeepNetColors.Background to DeepNetColors.Primary.copy(alpha = 0.8f)
-        DeepNetCardVariant.DATA -> DeepNetColors.Surface to DeepNetColors.Primary.copy(alpha = 0.5f)
-        DeepNetCardVariant.FEDERATION -> DeepNetColors.Surface to DeepNetColors.Primary.copy(alpha = 0.6f)
-        DeepNetCardVariant.ALERT -> DeepNetColors.Surface to DeepNetColors.Error.copy(alpha = 0.7f)
-        DeepNetCardVariant.SUCCESS -> DeepNetColors.Surface to DeepNetColors.Online.copy(alpha = 0.7f)
+        FoundationCardVariant.STANDARD -> FoundationColors.Surface to FoundationColors.Primary.copy(alpha = 0.6f)
+        FoundationCardVariant.NODE -> FoundationColors.Surface to FoundationColors.Primary.copy(alpha = 0.7f)
+        FoundationCardVariant.TERMINAL -> FoundationColors.Background to FoundationColors.Primary.copy(alpha = 0.8f)
+        FoundationCardVariant.DATA -> FoundationColors.Surface to FoundationColors.Primary.copy(alpha = 0.5f)
+        FoundationCardVariant.FEDERATION -> FoundationColors.Surface to FoundationColors.Primary.copy(alpha = 0.6f)
+        FoundationCardVariant.ALERT -> FoundationColors.Surface to FoundationColors.Error.copy(alpha = 0.7f)
+        FoundationCardVariant.SUCCESS -> FoundationColors.Surface to FoundationColors.Online.copy(alpha = 0.7f)
     }
 
     val pulseColor = when (variant) {
-        DeepNetCardVariant.ALERT -> DeepNetColors.Error
-        DeepNetCardVariant.SUCCESS -> DeepNetColors.Online
-        else -> DeepNetColors.Primary
+        FoundationCardVariant.ALERT -> FoundationColors.Error
+        FoundationCardVariant.SUCCESS -> FoundationColors.Online
+        else -> FoundationColors.Primary
     }
 
     var cardModifier = modifier
@@ -90,7 +90,7 @@ fun DeepNetCard(
         .border(1.dp, borderColor, shape)
 
     if (enablePulse) {
-        cardModifier = cardModifier.deepNetEnergyPulse(
+        cardModifier = cardModifier.foundationEnergyPulse(
             enabled = true,
             pulseColor = pulseColor,
             shape = shape
@@ -98,7 +98,7 @@ fun DeepNetCard(
     }
 
     if (enableGlow) {
-        cardModifier = cardModifier.deepNetGlow(
+        cardModifier = cardModifier.foundationGlow(
             enabled = true,
             glowColor = pulseColor,
             shape = shape
@@ -106,7 +106,7 @@ fun DeepNetCard(
     }
 
     if (enableBrackets) {
-        cardModifier = cardModifier.deepNetCornerBrackets(
+        cardModifier = cardModifier.foundationCornerBrackets(
             enabled = true,
             bracketColor = borderColor
         )
@@ -115,7 +115,7 @@ fun DeepNetCard(
     if (onClick != null) {
         cardModifier = cardModifier.clickable(
             interactionSource = remember { MutableInteractionSource() },
-            indication = ripple(color = DeepNetColors.Primary),
+            indication = ripple(color = FoundationColors.Primary),
             onClick = onClick
         )
     }
@@ -130,39 +130,39 @@ fun DeepNetCard(
  * Styled button with cut corners
  */
 @Composable
-fun DeepNetButton(
+fun FoundationButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
-    variant: DeepNetButtonVariant = DeepNetButtonVariant.PRIMARY,
+    variant: FoundationButtonVariant = FoundationButtonVariant.PRIMARY,
     icon: ImageVector? = null,
     text: String
 ) {
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
 
-    val shape = DeepNetShapes.SmallCut
+    val shape = FoundationShapes.SmallCut
 
     val (backgroundColor, contentColor, borderColor) = when (variant) {
-        DeepNetButtonVariant.PRIMARY -> Triple(
-            DeepNetColors.Primary,
-            DeepNetColors.OnPrimary,
-            DeepNetColors.Primary
+        FoundationButtonVariant.PRIMARY -> Triple(
+            FoundationColors.Primary,
+            FoundationColors.OnPrimary,
+            FoundationColors.Primary
         )
-        DeepNetButtonVariant.SECONDARY -> Triple(
-            DeepNetColors.Surface,
-            DeepNetColors.Primary,
-            DeepNetColors.Primary
+        FoundationButtonVariant.SECONDARY -> Triple(
+            FoundationColors.Surface,
+            FoundationColors.Primary,
+            FoundationColors.Primary
         )
-        DeepNetButtonVariant.DANGER -> Triple(
-            DeepNetColors.Error,
-            DeepNetColors.OnPrimary,
-            DeepNetColors.Error
+        FoundationButtonVariant.DANGER -> Triple(
+            FoundationColors.Error,
+            FoundationColors.OnPrimary,
+            FoundationColors.Error
         )
-        DeepNetButtonVariant.GHOST -> Triple(
+        FoundationButtonVariant.GHOST -> Triple(
             Color.Transparent,
-            DeepNetColors.OnSurface,
-            DeepNetColors.GlassBorder
+            FoundationColors.OnSurface,
+            FoundationColors.GlassBorder
         )
     }
 
@@ -208,7 +208,7 @@ fun DeepNetButton(
     }
 }
 
-enum class DeepNetButtonVariant {
+enum class FoundationButtonVariant {
     PRIMARY,
     SECONDARY,
     DANGER,
@@ -219,23 +219,23 @@ enum class DeepNetButtonVariant {
  * Status indicator with animated glow
  */
 @Composable
-fun DeepNetStatusIndicator(
-    status: DeepNetStatus,
+fun FoundationStatusIndicator(
+    status: FoundationStatus,
     modifier: Modifier = Modifier,
     size: Dp = 12.dp,
     animated: Boolean = true,
     showLabel: Boolean = false
 ) {
     val statusColor = when (status) {
-        DeepNetStatus.ONLINE -> DeepNetColors.Online
-        DeepNetStatus.OFFLINE -> DeepNetColors.Offline
-        DeepNetStatus.CONNECTING -> DeepNetColors.Warning
-        DeepNetStatus.ERROR -> DeepNetColors.Error
-        DeepNetStatus.SECURE -> DeepNetColors.WallSecure
-        DeepNetStatus.BREACHED -> DeepNetColors.WallBreached
+        FoundationStatus.ONLINE -> FoundationColors.Online
+        FoundationStatus.OFFLINE -> FoundationColors.Offline
+        FoundationStatus.CONNECTING -> FoundationColors.Warning
+        FoundationStatus.ERROR -> FoundationColors.Error
+        FoundationStatus.SECURE -> FoundationColors.WallSecure
+        FoundationStatus.BREACHED -> FoundationColors.WallBreached
     }
 
-    val pulseAnimation = if (animated && status in listOf(DeepNetStatus.CONNECTING, DeepNetStatus.ERROR)) {
+    val pulseAnimation = if (animated && status in listOf(FoundationStatus.CONNECTING, FoundationStatus.ERROR)) {
         rememberInfiniteTransition(label = "statusPulse").animateFloat(
             initialValue = 0.5f,
             targetValue = 1f,
@@ -266,12 +266,12 @@ fun DeepNetStatusIndicator(
         if (showLabel) {
             Text(
                 text = when (status) {
-                    DeepNetStatus.ONLINE -> "ONLINE"
-                    DeepNetStatus.OFFLINE -> "OFFLINE"
-                    DeepNetStatus.CONNECTING -> "CONNECTING"
-                    DeepNetStatus.ERROR -> "ERROR"
-                    DeepNetStatus.SECURE -> "SECURE"
-                    DeepNetStatus.BREACHED -> "BREACHED"
+                    FoundationStatus.ONLINE -> "ONLINE"
+                    FoundationStatus.OFFLINE -> "OFFLINE"
+                    FoundationStatus.CONNECTING -> "CONNECTING"
+                    FoundationStatus.ERROR -> "ERROR"
+                    FoundationStatus.SECURE -> "SECURE"
+                    FoundationStatus.BREACHED -> "BREACHED"
                 },
                 color = statusColor,
                 fontFamily = FontFamily.Monospace,
@@ -282,7 +282,7 @@ fun DeepNetStatusIndicator(
     }
 }
 
-enum class DeepNetStatus {
+enum class FoundationStatus {
     ONLINE,
     OFFLINE,
     CONNECTING,
@@ -295,14 +295,14 @@ enum class DeepNetStatus {
  * Section header with stylized design
  */
 @Composable
-fun DeepNetSectionHeader(
+fun FoundationSectionHeader(
     title: String,
     subtitle: String? = null,
     icon: ImageVector? = null,
-    accentColor: Color = DeepNetColors.Primary,
+    accentColor: Color = FoundationColors.Primary,
     modifier: Modifier = Modifier
 ) {
-    val shape = DeepNetShapes.Header
+    val shape = FoundationShapes.Header
 
     Row(
         modifier = modifier
@@ -342,7 +342,7 @@ fun DeepNetSectionHeader(
             subtitle?.let {
                 Text(
                     text = it,
-                    color = DeepNetColors.OnSurfaceVariant,
+                    color = FoundationColors.OnSurfaceVariant,
                     fontSize = 11.sp
                 )
             }
@@ -354,10 +354,10 @@ fun DeepNetSectionHeader(
  * Data display row
  */
 @Composable
-fun DeepNetDataRow(
+fun FoundationDataRow(
     label: String,
     value: String,
-    valueColor: Color = DeepNetColors.Primary,
+    valueColor: Color = FoundationColors.Primary,
     modifier: Modifier = Modifier
 ) {
     Row(
@@ -367,7 +367,7 @@ fun DeepNetDataRow(
     ) {
         Text(
             text = label,
-            color = DeepNetColors.OnSurfaceVariant,
+            color = FoundationColors.OnSurfaceVariant,
             fontSize = 12.sp
         )
         Text(
@@ -384,9 +384,9 @@ fun DeepNetDataRow(
  * Divider with gradient fade
  */
 @Composable
-fun DeepNetDivider(
+fun FoundationDivider(
     modifier: Modifier = Modifier,
-    color: Color = DeepNetColors.GlassBorder
+    color: Color = FoundationColors.GlassBorder
 ) {
     Box(
         modifier = modifier
@@ -409,9 +409,9 @@ fun DeepNetDivider(
  * Loading indicator
  */
 @Composable
-fun DeepNetLoadingIndicator(
+fun FoundationLoadingIndicator(
     modifier: Modifier = Modifier,
-    color: Color = DeepNetColors.Primary,
+    color: Color = FoundationColors.Primary,
     text: String? = null
 ) {
     val rotation = rememberInfiniteTransition(label = "loading").animateFloat(
@@ -437,7 +437,7 @@ fun DeepNetLoadingIndicator(
         text?.let {
             Text(
                 text = it,
-                color = DeepNetColors.OnSurfaceVariant,
+                color = FoundationColors.OnSurfaceVariant,
                 fontFamily = FontFamily.Monospace,
                 fontSize = 12.sp
             )

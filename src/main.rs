@@ -1,5 +1,5 @@
-//! AI Foundation MCP Server - Thin CLI Wrapper Architecture
-//! All tools call CLI executables via subprocess.
+//! AI Foundation MCP Integration Layer - Thin CLI Wrapper
+//! All commands call CLI executables via subprocess.
 //!
 //! TOOL COUNT: 28
 //! - Notebook: 8  (remember, recall, list, get, pin, delete, update, tags)

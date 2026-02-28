@@ -19,7 +19,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.aifoundation.app.data.model.TeamMember
 import com.aifoundation.app.ui.components.*
-import com.aifoundation.app.ui.theme.DeepNetColors
+import com.aifoundation.app.ui.theme.FoundationColors
 
 /**
  * Team roster — AI agents + humans with real-time presence.
@@ -39,7 +39,7 @@ fun TeamScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(DeepNetColors.Background)
+            .background(FoundationColors.Background)
     ) {
         // Header
         Row(
@@ -55,20 +55,20 @@ fun TeamScreen(
                     style      = MaterialTheme.typography.headlineSmall,
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Black,
-                    color      = DeepNetColors.Primary
+                    color      = FoundationColors.Primary
                 )
                 if (team.isNotEmpty()) {
                     Text(
                         text       = "$onlineCount of ${team.size} online",
                         style      = MaterialTheme.typography.bodySmall,
                         fontFamily = FontFamily.Monospace,
-                        color      = DeepNetColors.OnSurfaceVariant
+                        color      = FoundationColors.OnSurfaceVariant
                     )
                 }
             }
-            DeepNetButton(
+            FoundationButton(
                 onClick = onRefresh,
-                variant = DeepNetButtonVariant.GHOST,
+                variant = FoundationButtonVariant.GHOST,
                 icon    = Icons.Default.Refresh,
                 text    = "REFRESH"
             )
@@ -76,14 +76,14 @@ fun TeamScreen(
 
         if (isLoading) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                DeepNetLoadingIndicator(text = "LOADING TEAM...")
+                FoundationLoadingIndicator(text = "LOADING TEAM...")
             }
             return@Column
         }
 
         if (team.isEmpty()) {
             Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                DeepNetCard(modifier = Modifier.fillMaxWidth(0.8f), variant = DeepNetCardVariant.TERMINAL) {
+                FoundationCard(modifier = Modifier.fillMaxWidth(0.8f), variant = FoundationCardVariant.TERMINAL) {
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         modifier = Modifier.fillMaxWidth().padding(32.dp)
@@ -91,7 +91,7 @@ fun TeamScreen(
                         Icon(
                             imageVector = Icons.Default.Groups,
                             contentDescription = null,
-                            tint = DeepNetColors.OnSurfaceVariant,
+                            tint = FoundationColors.OnSurfaceVariant,
                             modifier = Modifier.size(48.dp)
                         )
                         Spacer(modifier = Modifier.height(12.dp))
@@ -99,7 +99,7 @@ fun TeamScreen(
                             text       = "NO TEAM MEMBERS",
                             fontFamily = FontFamily.Monospace,
                             fontWeight = FontWeight.Bold,
-                            color      = DeepNetColors.OnSurfaceVariant
+                            color      = FoundationColors.OnSurfaceVariant
                         )
                     }
                 }
@@ -118,7 +118,7 @@ fun TeamScreen(
                         text       = "AI AGENTS",
                         style      = MaterialTheme.typography.labelSmall,
                         fontFamily = FontFamily.Monospace,
-                        color      = DeepNetColors.OnSurfaceVariant,
+                        color      = FoundationColors.OnSurfaceVariant,
                         modifier   = Modifier.padding(horizontal = 4.dp, vertical = 6.dp)
                     )
                 }
@@ -135,7 +135,7 @@ fun TeamScreen(
                         text       = "HUMANS",
                         style      = MaterialTheme.typography.labelSmall,
                         fontFamily = FontFamily.Monospace,
-                        color      = DeepNetColors.OnSurfaceVariant,
+                        color      = FoundationColors.OnSurfaceVariant,
                         modifier   = Modifier.padding(horizontal = 4.dp, vertical = 6.dp)
                     )
                 }
@@ -154,11 +154,11 @@ private fun TeamMemberRow(
     member: TeamMember,
     onSendDm: (String) -> Unit
 ) {
-    DeepNetCard(
+    FoundationCard(
         modifier = Modifier
             .fillMaxWidth()
             .clickable { if (member.isAi) onSendDm(member.ai_id) },
-        variant  = DeepNetCardVariant.DATA
+        variant  = FoundationCardVariant.DATA
     ) {
         Row(
             verticalAlignment = Alignment.CenterVertically,
@@ -169,7 +169,7 @@ private fun TeamMemberRow(
                 modifier = Modifier
                     .size(10.dp)
                     .clip(CircleShape)
-                    .background(if (member.online) DeepNetColors.Online else DeepNetColors.Offline)
+                    .background(if (member.online) FoundationColors.Online else FoundationColors.Offline)
             )
 
             // Avatar circle with initial
@@ -177,7 +177,7 @@ private fun TeamMemberRow(
                 modifier = Modifier
                     .size(36.dp)
                     .clip(CircleShape)
-                    .background(DeepNetColors.SurfaceVariant),
+                    .background(FoundationColors.SurfaceVariant),
                 contentAlignment = Alignment.Center
             ) {
                 Text(
@@ -185,7 +185,7 @@ private fun TeamMemberRow(
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold,
                     fontSize   = 14.sp,
-                    color      = DeepNetColors.Primary
+                    color      = FoundationColors.Primary
                 )
             }
 
@@ -196,7 +196,7 @@ private fun TeamMemberRow(
                     fontFamily = FontFamily.Monospace,
                     fontWeight = FontWeight.Bold,
                     fontSize   = 14.sp,
-                    color      = DeepNetColors.OnSurface
+                    color      = FoundationColors.OnSurface
                 )
                 val subtitle = when {
                     !member.online         -> "offline · ${member.last_seen}"
@@ -206,16 +206,16 @@ private fun TeamMemberRow(
                 Text(
                     text   = subtitle,
                     style  = MaterialTheme.typography.bodySmall,
-                    color  = if (member.online) DeepNetColors.OnSurfaceVariant else DeepNetColors.Offline,
+                    color  = if (member.online) FoundationColors.OnSurfaceVariant else FoundationColors.Offline,
                     maxLines = 1
                 )
             }
 
             // Type badge
             val (badgeLabel, badgeColor) = when (member.type) {
-                "ai"    -> "AI"    to DeepNetColors.Primary
-                "human" -> "HUMAN" to DeepNetColors.Warning
-                else    -> member.type.uppercase() to DeepNetColors.Secondary
+                "ai"    -> "AI"    to FoundationColors.Primary
+                "human" -> "HUMAN" to FoundationColors.Warning
+                else    -> member.type.uppercase() to FoundationColors.Secondary
             }
             Surface(
                 shape = MaterialTheme.shapes.small,
@@ -236,7 +236,7 @@ private fun TeamMemberRow(
                 Icon(
                     imageVector = Icons.Default.ChevronRight,
                     contentDescription = "Send DM",
-                    tint = DeepNetColors.OnSurfaceVariant,
+                    tint = FoundationColors.OnSurfaceVariant,
                     modifier = Modifier.size(16.dp)
                 )
             }

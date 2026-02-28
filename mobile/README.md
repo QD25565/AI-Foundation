@@ -45,7 +45,7 @@ curl -X POST http://localhost:8080/api/pair/generate \
   -d '{"h_id": "human-yourname"}'
 ```
 
-This returns a short code (e.g., `QD-7X3K`) valid for 10 minutes.
+This returns a short code (e.g., `AB-7X3K`) valid for 10 minutes.
 
 ### Pair Your Phone
 
@@ -135,7 +135,7 @@ The app communicates with the backend via REST. All authenticated endpoints requ
 
 ### Pairing (No Auth)
 - `POST /api/pair/generate` — Generate code `{"h_id": "human-yourname"}`
-- `POST /api/pair` — Validate code `{"code": "QD-7X3K"}`
+- `POST /api/pair` — Validate code `{"code": "AB-7X3K"}`
 
 ## Building from Source
 
@@ -171,19 +171,19 @@ App Layer (Compose UI)
   └── SettingsScreen        → Paired identity, SSE status, unpair
 
 ViewModel Layer (StateFlow)
-  └── DeepNetViewModel      → All state; session restored from prefs on restart
+  └── MainViewModel      → All state; session restored from prefs on restart
 
 Data Layer (Retrofit + OkHttp)
   ├── TeambookClient        → HTTP client (separate SSE client, no read timeout)
   ├── SseClient             → Persistent SSE connection to /api/events
   ├── TeambookRepository    → Data access, Result<T> wrappers
-  └── DeepNetPreferences    → Persists token + server URL across process death
+  └── AppPreferences    → Persists token + server URL across process death
 
 Theme Layer
   ├── AiIdentity            → Deterministic participant color from ID hash
-  ├── DeepNetColors         → #0A0A0A bg, #82A473 primary, #878787 secondary
-  ├── DeepNetComponents     → Card, Button, StatusIndicator, LoadingIndicator
-  └── DeepNetEdgeShape      → Cut-corner shape system (7 variants)
+  ├── FoundationColors         → #0A0A0A bg, #82A473 primary, #878787 secondary
+  ├── FoundationComponents     → Card, Button, StatusIndicator, LoadingIndicator
+  └── FoundationEdgeShape      → Cut-corner shape system (7 variants)
 ```
 
 ## Project Structure
@@ -193,13 +193,13 @@ mobile/
 ├── app/src/main/java/com/aifoundation/app/
 │   ├── MainActivity.kt               # Entry point, navigation
 │   ├── viewmodel/
-│   │   └── DeepNetViewModel.kt       # App state; survives process death
+│   │   └── MainViewModel.kt          # App state; survives process death
 │   ├── data/
 │   │   ├── network/TeambookApi.kt    # Retrofit API interface
 │   │   ├── network/TeambookClient.kt # HTTP client (Retrofit + OkHttp)
 │   │   ├── network/SseClient.kt      # SSE connection to /api/events
 │   │   ├── repository/               # Data repositories
-│   │   ├── local/DeepNetPreferences.kt # Persists token + server URL
+│   │   ├── local/AppPreferences.kt   # Persists token + server URL
 │   │   └── model/AppModels.kt        # Typed data models
 │   └── ui/
 │       ├── screens/
@@ -213,8 +213,8 @@ mobile/
 │       ├── components/               # Reusable UI components
 │       └── theme/
 │           ├── AiIdentity.kt         # Deterministic identity colors
-│           ├── Theme.kt              # DeepNetColors, typography, gradients
-│           └── DeepNetComponents.kt  # Card, Button, etc.
+│           ├── Theme.kt              # FoundationColors, typography, gradients
+│           └── FoundationComponents.kt # Card, Button, etc.
 └── build.gradle.kts
 ```
 

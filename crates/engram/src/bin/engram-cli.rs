@@ -7,12 +7,12 @@ use std::path::PathBuf;
 
 /// Get the default database path based on AI_ID
 /// Uses centralized location: ~/.ai-foundation/agents/{ai_id}/notebook.engram
-/// This matches the MCP server path for CLI/MCP parity.
+/// This matches the MCP binary path for CLI/MCP parity.
 /// Per-agent directory groups all agent data (notebook, tasks, config).
 fn get_default_database_path() -> PathBuf {
     let ai_id = std::env::var("AI_ID").unwrap_or_else(|_| "default".to_string());
 
-    // Use ~/.ai-foundation/agents/{ai_id}/notebook.engram (same as MCP server)
+    // Use ~/.ai-foundation/agents/{ai_id}/notebook.engram (same as MCP binary)
     if let Some(home) = dirs::home_dir() {
         // NEW path: ~/.ai-foundation/agents/{ai_id}/notebook.engram
         let new_dir = home.join(".ai-foundation").join("agents").join(&ai_id);
@@ -252,7 +252,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     // Use provided database path or compute default from AI_ID
-    // Default: ~/.ai-foundation/notebook/{ai_id}.engram (matches MCP server)
+    // Default: ~/.ai-foundation/notebook/{ai_id}.engram (matches MCP binary)
     let database = cli.database.unwrap_or_else(get_default_database_path);
 
     match cli.command {

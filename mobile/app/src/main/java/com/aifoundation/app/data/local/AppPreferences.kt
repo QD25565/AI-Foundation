@@ -8,10 +8,10 @@ import androidx.core.content.edit
  * Persistent storage for AI-Foundation identity and settings.
  * Stores device registration, server URL, and user preferences.
  */
-class DeepNetPreferences(context: Context) {
+class AppPreferences(context: Context) {
 
     companion object {
-        private const val PREFS_NAME = "ai_foundation_deep_net"
+        private const val PREFS_NAME = "ai_foundation_prefs"
 
         // Identity keys
         private const val KEY_DEVICE_ID = "device_id"

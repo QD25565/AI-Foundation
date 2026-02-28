@@ -14,12 +14,12 @@ import kotlin.math.min
  * Themed shape with stylized cut corners
  * Creates the signature angular, network-inspired look for the federation UI
  */
-class DeepNetEdgeShape(
+class FoundationEdgeShape(
     private val cutDepth: Dp = 8.dp,
-    private val style: DeepNetStyle = DeepNetStyle.STANDARD
+    private val style: FoundationStyle = FoundationStyle.STANDARD
 ) : Shape {
 
-    enum class DeepNetStyle {
+    enum class FoundationStyle {
         STANDARD,       // Basic angled corners - all four corners cut
         TERMINAL,       // Terminal/console style - top corners only
         NODE,           // Network node style - asymmetric cuts
@@ -38,13 +38,13 @@ class DeepNetEdgeShape(
         val path = Path()
 
         when (style) {
-            DeepNetStyle.STANDARD -> createStandardPath(path, size, cutDepthPx)
-            DeepNetStyle.TERMINAL -> createTerminalPath(path, size, cutDepthPx)
-            DeepNetStyle.NODE -> createNodePath(path, size, cutDepthPx)
-            DeepNetStyle.FEDERATION -> createFederationPath(path, size, cutDepthPx)
-            DeepNetStyle.DATA_STREAM -> createDataStreamPath(path, size, cutDepthPx)
-            DeepNetStyle.HEADER -> createHeaderPath(path, size, cutDepthPx)
-            DeepNetStyle.ALERT -> createAlertPath(path, size, cutDepthPx)
+            FoundationStyle.STANDARD -> createStandardPath(path, size, cutDepthPx)
+            FoundationStyle.TERMINAL -> createTerminalPath(path, size, cutDepthPx)
+            FoundationStyle.NODE -> createNodePath(path, size, cutDepthPx)
+            FoundationStyle.FEDERATION -> createFederationPath(path, size, cutDepthPx)
+            FoundationStyle.DATA_STREAM -> createDataStreamPath(path, size, cutDepthPx)
+            FoundationStyle.HEADER -> createHeaderPath(path, size, cutDepthPx)
+            FoundationStyle.ALERT -> createAlertPath(path, size, cutDepthPx)
         }
 
         return Outline.Generic(path)
@@ -168,16 +168,16 @@ class DeepNetEdgeShape(
 /**
  * Convenience object for common themed shapes
  */
-object DeepNetShapes {
-    val Standard = DeepNetEdgeShape(8.dp, DeepNetEdgeShape.DeepNetStyle.STANDARD)
-    val Terminal = DeepNetEdgeShape(6.dp, DeepNetEdgeShape.DeepNetStyle.TERMINAL)
-    val Node = DeepNetEdgeShape(10.dp, DeepNetEdgeShape.DeepNetStyle.NODE)
-    val Federation = DeepNetEdgeShape(8.dp, DeepNetEdgeShape.DeepNetStyle.FEDERATION)
-    val DataStream = DeepNetEdgeShape(6.dp, DeepNetEdgeShape.DeepNetStyle.DATA_STREAM)
-    val Header = DeepNetEdgeShape(10.dp, DeepNetEdgeShape.DeepNetStyle.HEADER)
-    val Alert = DeepNetEdgeShape(12.dp, DeepNetEdgeShape.DeepNetStyle.ALERT)
+object FoundationShapes {
+    val Standard = FoundationEdgeShape(8.dp, FoundationEdgeShape.FoundationStyle.STANDARD)
+    val Terminal = FoundationEdgeShape(6.dp, FoundationEdgeShape.FoundationStyle.TERMINAL)
+    val Node = FoundationEdgeShape(10.dp, FoundationEdgeShape.FoundationStyle.NODE)
+    val Federation = FoundationEdgeShape(8.dp, FoundationEdgeShape.FoundationStyle.FEDERATION)
+    val DataStream = FoundationEdgeShape(6.dp, FoundationEdgeShape.FoundationStyle.DATA_STREAM)
+    val Header = FoundationEdgeShape(10.dp, FoundationEdgeShape.FoundationStyle.HEADER)
+    val Alert = FoundationEdgeShape(12.dp, FoundationEdgeShape.FoundationStyle.ALERT)
 
     // Size variants
-    val SmallCut = DeepNetEdgeShape(4.dp, DeepNetEdgeShape.DeepNetStyle.STANDARD)
-    val LargeCut = DeepNetEdgeShape(14.dp, DeepNetEdgeShape.DeepNetStyle.STANDARD)
+    val SmallCut = FoundationEdgeShape(4.dp, FoundationEdgeShape.FoundationStyle.STANDARD)
+    val LargeCut = FoundationEdgeShape(14.dp, FoundationEdgeShape.FoundationStyle.STANDARD)
 }

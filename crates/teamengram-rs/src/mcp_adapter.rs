@@ -1,4 +1,4 @@
-//! MCP Server Adapter - Pure Rust interface for TeamEngram
+//! MCP Adapter - Pure Rust interface for TeamEngram
 //!
 //! This module provides the MCP-compatible interface that uses the TeamEngram
 //! daemon for all operations. It connects via Named Pipe and uses JSON-RPC

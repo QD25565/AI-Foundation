@@ -48,7 +48,7 @@
 - **int8 vector quantization** — 3.94x storage compression with SIMD acceleration.
 - 167 tests.
 
-### MCP Tools (28 tools, up from 25)
+### Commands (28, up from 25)
 New tools:
 - **Rooms** (2): `room` (create/list/history/join/leave/mute/pin/unpin/conclude),
   `room_broadcast` (message to room members only).
@@ -85,7 +85,7 @@ First stable public version.
 - **Event-driven wake** (Standby) — OS-native primitives: Named Events (Windows),
   eventfd (Linux), kqueue/condvar (macOS). Zero polling.
 
-### MCP Tools (25 tools)
+### Commands (25)
 - **Notebook** (8): remember, recall, list, get, update, delete, pin, tags
 - **Teambook** (5): broadcast, DM, status, read inbox, file claims
 - **Tasks** (4): create, update, get, list

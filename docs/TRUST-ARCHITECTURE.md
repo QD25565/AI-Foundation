@@ -131,4 +131,4 @@ Your users verify against your public key. The official AI-Foundation key has no
 
 ---
 
-*This is a core architectural document. Changes to the trust model should be discussed with QD.*
+*This is a core architectural document. Changes to the trust model should be discussed with the project maintainer.*

@@ -24,7 +24,7 @@ import androidx.compose.ui.unit.sp
 import com.aifoundation.app.data.model.Dm
 import com.aifoundation.app.data.model.TeamMember
 import com.aifoundation.app.ui.theme.AiIdentity
-import com.aifoundation.app.ui.theme.DeepNetColors
+import com.aifoundation.app.ui.theme.FoundationColors
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -87,7 +87,7 @@ fun ConversationScreen(
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .background(DeepNetColors.Background)
+            .background(FoundationColors.Background)
     ) {
         // ── Conversation header ───────────────────────────────────────────────
         ConversationHeader(
@@ -97,7 +97,7 @@ fun ConversationScreen(
             onBack       = onBack
         )
 
-        HorizontalDivider(color = DeepNetColors.Surface, thickness = 1.dp)
+        HorizontalDivider(color = FoundationColors.Surface, thickness = 1.dp)
 
         // ── Message area ──────────────────────────────────────────────────────
         Box(modifier = Modifier.weight(1f)) {
@@ -120,13 +120,13 @@ fun ConversationScreen(
             }
         }
 
-        HorizontalDivider(color = DeepNetColors.Surface, thickness = 1.dp)
+        HorizontalDivider(color = FoundationColors.Surface, thickness = 1.dp)
 
         // ── Input bar ─────────────────────────────────────────────────────────
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .background(DeepNetColors.Surface)
+                .background(FoundationColors.Surface)
                 .padding(horizontal = 8.dp, vertical = 6.dp),
             verticalAlignment    = Alignment.Bottom,
             horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -138,17 +138,17 @@ fun ConversationScreen(
                     Text(
                         text  = "Message $partnerId…",
                         fontSize = 13.sp,
-                        color = DeepNetColors.OnSurfaceVariant
+                        color = FoundationColors.OnSurfaceVariant
                     )
                 },
                 modifier  = Modifier.weight(1f),
                 maxLines  = 5,
                 colors    = OutlinedTextFieldDefaults.colors(
                     focusedBorderColor   = partnerColor.copy(alpha = 0.50f),
-                    unfocusedBorderColor = DeepNetColors.OnSurfaceVariant.copy(alpha = 0.30f),
+                    unfocusedBorderColor = FoundationColors.OnSurfaceVariant.copy(alpha = 0.30f),
                     cursorColor          = partnerColor,
-                    focusedTextColor     = DeepNetColors.OnSurface,
-                    unfocusedTextColor   = DeepNetColors.OnSurface
+                    focusedTextColor     = FoundationColors.OnSurface,
+                    unfocusedTextColor   = FoundationColors.OnSurface
                 )
             )
 
@@ -164,12 +164,12 @@ fun ConversationScreen(
                 modifier = Modifier
                     .size(48.dp)
                     .clip(CircleShape)
-                    .background(if (canSend) DeepNetColors.Primary else DeepNetColors.SurfaceVariant)
+                    .background(if (canSend) FoundationColors.Primary else FoundationColors.SurfaceVariant)
             ) {
                 Icon(
                     imageVector        = Icons.AutoMirrored.Filled.Send,
                     contentDescription = "Send",
-                    tint               = if (canSend) DeepNetColors.Background else DeepNetColors.OnSurfaceVariant
+                    tint               = if (canSend) FoundationColors.Background else FoundationColors.OnSurfaceVariant
                 )
             }
         }
@@ -188,7 +188,7 @@ private fun ConversationHeader(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .background(DeepNetColors.Surface)
+            .background(FoundationColors.Surface)
             .padding(horizontal = 4.dp, vertical = 8.dp),
         verticalAlignment     = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp)
@@ -197,7 +197,7 @@ private fun ConversationHeader(
             Icon(
                 imageVector        = Icons.AutoMirrored.Filled.ArrowBack,
                 contentDescription = "Back",
-                tint               = DeepNetColors.OnSurface
+                tint               = FoundationColors.OnSurface
             )
         }
 
@@ -226,7 +226,7 @@ private fun ConversationHeader(
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Bold,
                 fontSize   = 15.sp,
-                color      = DeepNetColors.OnSurface
+                color      = FoundationColors.OnSurface
             )
             val statusText = when {
                 partner == null                              -> "not in team"
@@ -235,7 +235,7 @@ private fun ConversationHeader(
                 partner.last_seen.isNotBlank()              -> "offline · ${partner.last_seen}"
                 else                                        -> "offline"
             }
-            val statusColor = if (partner?.online == true) DeepNetColors.Online else DeepNetColors.OnSurfaceVariant
+            val statusColor = if (partner?.online == true) FoundationColors.Online else FoundationColors.OnSurfaceVariant
             Text(
                 text     = statusText,
                 style    = MaterialTheme.typography.bodySmall,
@@ -251,7 +251,7 @@ private fun ConversationHeader(
                     .padding(end = 8.dp)
                     .size(8.dp)
                     .clip(CircleShape)
-                    .background(DeepNetColors.Online)
+                    .background(FoundationColors.Online)
             )
         }
     }
@@ -287,17 +287,17 @@ private fun EmptyConversation(partnerId: String, partnerColor: Color) {
                 fontFamily = FontFamily.Monospace,
                 fontWeight = FontWeight.Bold,
                 fontSize   = 15.sp,
-                color      = DeepNetColors.OnSurface
+                color      = FoundationColors.OnSurface
             )
             Text(
                 text  = "No messages yet",
                 style = MaterialTheme.typography.bodySmall,
-                color = DeepNetColors.OnSurfaceVariant
+                color = FoundationColors.OnSurfaceVariant
             )
             Text(
                 text  = "Start the conversation below",
                 style = MaterialTheme.typography.labelSmall,
-                color = DeepNetColors.OnSurfaceVariant.copy(alpha = 0.55f),
+                color = FoundationColors.OnSurfaceVariant.copy(alpha = 0.55f),
                 fontFamily = FontFamily.Monospace
             )
         }
@@ -316,13 +316,13 @@ private fun DateSeparator(label: String) {
     ) {
         Surface(
             shape = MaterialTheme.shapes.small,
-            color = DeepNetColors.SurfaceVariant
+            color = FoundationColors.SurfaceVariant
         ) {
             Text(
                 text       = label,
                 fontFamily = FontFamily.Monospace,
                 fontSize   = 10.sp,
-                color      = DeepNetColors.OnSurfaceVariant,
+                color      = FoundationColors.OnSurfaceVariant,
                 modifier   = Modifier.padding(horizontal = 10.dp, vertical = 3.dp)
             )
         }
@@ -351,12 +351,12 @@ private fun MessageBubble(item: MessageItem, partnerColor: Color) {
             Box(
                 modifier = Modifier
                     .clip(sentShape)
-                    .background(DeepNetColors.Primary)
+                    .background(FoundationColors.Primary)
                     .padding(horizontal = 14.dp, vertical = 10.dp)
             ) {
                 Text(
                     text       = item.dm.content,
-                    color      = DeepNetColors.Background,   // near-black on green — 7.4:1 contrast, WCAG AA ✓
+                    color      = FoundationColors.Background,   // near-black on green — 7.4:1 contrast, WCAG AA ✓
                     fontSize   = 14.sp,
                     lineHeight = 20.sp
                 )
@@ -373,7 +373,7 @@ private fun MessageBubble(item: MessageItem, partnerColor: Color) {
             ) {
                 Text(
                     text       = item.dm.content,
-                    color      = DeepNetColors.OnSurface,
+                    color      = FoundationColors.OnSurface,
                     fontSize   = 14.sp,
                     lineHeight = 20.sp
                 )
@@ -384,7 +384,7 @@ private fun MessageBubble(item: MessageItem, partnerColor: Color) {
         Text(
             text       = item.formattedTime,
             style      = MaterialTheme.typography.labelSmall,
-            color      = DeepNetColors.OnSurfaceVariant.copy(alpha = 0.55f),
+            color      = FoundationColors.OnSurfaceVariant.copy(alpha = 0.55f),
             fontFamily = FontFamily.Monospace,
             modifier   = Modifier.padding(horizontal = 4.dp, top = 2.dp)
         )
