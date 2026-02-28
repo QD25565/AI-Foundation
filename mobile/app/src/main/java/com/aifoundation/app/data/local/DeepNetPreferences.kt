@@ -5,7 +5,7 @@ import android.content.SharedPreferences
 import androidx.core.content.edit
 
 /**
- * Persistent storage for AI-Foundation Deep Net identity and settings.
+ * Persistent storage for AI-Foundation identity and settings.
  * Stores device registration, server URL, and user preferences.
  */
 class DeepNetPreferences(context: Context) {

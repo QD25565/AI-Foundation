@@ -42,8 +42,6 @@ impl RegionHeader {
 /// Shared memory region for AI communication
 pub struct SharedRegion {
     mmap: MmapMut,
-    #[allow(dead_code)]
-    path: PathBuf,
     mailbox_buffer_size: usize,
 }
 
@@ -124,7 +122,6 @@ impl SharedRegion {
 
         Ok(Self {
             mmap,
-            path,
             mailbox_buffer_size,
         })
     }

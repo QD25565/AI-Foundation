@@ -13,7 +13,7 @@ use crate::{
     header::{EngramHeader, HEADER_SIZE, flags as header_flags},
     hnsw::HnswIndex,
     note::{Note, NoteEntry},
-    recall::{RecallConfig, RecallResult, bm25_score, recency_score},
+    recall::{RecallConfig, RecallResult, BM25Corpus, recency_score_at},
     vault::Vault,
     vector::VectorStore,
     EngramError, EngramStats, VerifyResult,
@@ -42,6 +42,7 @@ struct NoteCache {
     entries: HashMap<u64, CacheEntry>,
     max_size: usize,
     access_counter: AtomicU64,
+    hit_count: u64,
 }
 
 impl NoteCache {
@@ -50,12 +51,14 @@ impl NoteCache {
             entries: HashMap::with_capacity(max_size),
             max_size,
             access_counter: AtomicU64::new(0),
+            hit_count: 0,
         }
     }
 
     fn get(&mut self, id: u64) -> Option<&Note> {
         if let Some(entry) = self.entries.get_mut(&id) {
             entry.last_access = self.access_counter.fetch_add(1, Ordering::Relaxed);
+            self.hit_count += 1;
             Some(&entry.note)
         } else {
             None
@@ -90,6 +93,7 @@ impl NoteCache {
 
     fn clear(&mut self) {
         self.entries.clear();
+        self.hit_count = 0;
     }
 
     #[allow(dead_code)]
@@ -99,7 +103,7 @@ impl NoteCache {
 
     #[allow(dead_code)]
     fn hits(&self) -> usize {
-        self.entries.len()
+        self.hit_count as usize
     }
 }
 
@@ -163,12 +167,14 @@ pub struct Engram {
     /// Recall configuration for hybrid search
     recall_config: RecallConfig,
 
-    /// AI ID for vault key derivation
-    #[allow(dead_code)]
-    ai_id: String,
-
     /// Encryption cipher for note content
     cipher: EngramCipher,
+
+    /// Cached BM25 corpus statistics (IDF + avgdl) — invalidated on note writes.
+    /// Avoids rebuilding IDF from scratch on every recall call.
+    bm25_cache: Option<BM25Corpus>,
+    /// Note count when BM25 cache was built (cheap invalidation check)
+    bm25_cache_note_count: u64,
 
     /// Statistics
     cache_hits: u64,
@@ -237,8 +243,9 @@ impl Engram {
             graph: GraphIndex::new(),
             vault: Vault::new(&ai_id),
             recall_config: RecallConfig::default(),
-            ai_id: ai_id.clone(),
             cipher: EngramCipher::new(&ai_id),
+            bm25_cache: None,
+            bm25_cache_note_count: 0,
             cache_hits: 0,
             cache_misses: 0,
             last_index_mtime: std::fs::metadata(path).ok().and_then(|m| m.modified().ok()),
@@ -285,8 +292,9 @@ impl Engram {
             graph: GraphIndex::new(),
             vault: Vault::new(&ai_id),
             recall_config: RecallConfig::default(),
-            ai_id: ai_id.clone(),
             cipher: EngramCipher::new(&ai_id),
+            bm25_cache: None,
+            bm25_cache_note_count: 0,
             cache_hits: 0,
             cache_misses: 0,
             last_index_mtime: None, // Will be set after loading indexes
@@ -311,8 +319,6 @@ impl Engram {
 
         // Record current file mtime for multi-process sync detection
         db.last_index_mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
-
-        // TODO: Load vector store, HNSW index, graph, and vault from file
 
         Ok(db)
     }
@@ -558,6 +564,52 @@ impl Engram {
         // Persist indexes to ensure embeddings/graph survive restart
         self.persist_indexes()?;
 
+        // Invalidate BM25 corpus cache — note set changed
+        self.bm25_cache = None;
+
+        Ok(id)
+    }
+
+    /// Store an ephemeral (working) memory that expires after ttl_hours.
+    /// Expired notes are filtered from recall results automatically.
+    /// Use for session-scoped context, in-progress task notes, or any memory
+    /// that should self-destruct rather than accumulate indefinitely.
+    pub fn remember_working(&mut self, content: &str, tags: &[&str], ttl_hours: u16) -> Result<u64> {
+        if self.read_only {
+            return Err(EngramError::ReadOnly);
+        }
+
+        self.refresh_if_modified()?;
+
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let mut entry = NoteEntry::new_encrypted(id, content, tags, true, &self.cipher)?;
+        entry.ttl_hours = ttl_hours;
+        self.write_note_entry(&entry)?;
+
+        let offset = self.header.note_log_offset + self.header.note_log_size - entry.total_size() as u64;
+        self.note_index.insert(id, offset);
+        self.temporal_index.push((entry.timestamp, id));
+
+        for tag in tags {
+            self.tag_bloom.insert(&tag.to_string());
+            self.tag_index
+                .entry(tag.to_string())
+                .or_insert_with(Vec::new)
+                .push(id);
+        }
+
+        self.header.note_count += 1;
+        self.header.active_notes += 1;
+        self.header.touch();
+        self.header.write_to(&mut self.file)?;
+
+        self.persist_indexes()?;
+
+        // Invalidate BM25 corpus cache — note set changed
+        self.bm25_cache = None;
+
         Ok(id)
     }
 
@@ -626,6 +678,9 @@ impl Engram {
         // Persist indexes to ensure embeddings/graph survive restart
         self.persist_indexes()?;
 
+        // Invalidate BM25 corpus cache — note set changed
+        self.bm25_cache = None;
+
         Ok(ids)
     }
 
@@ -689,6 +744,9 @@ impl Engram {
         // Persist indexes to ensure embeddings/graph survive restart
         self.persist_indexes()?;
 
+        // Invalidate BM25 corpus cache — note set changed
+        self.bm25_cache = None;
+
         Ok(())
     }
 
@@ -718,8 +776,9 @@ impl Engram {
             ids.retain(|&nid| nid != id);
         }
 
-        // Write new entry with same ID
-        let entry = NoteEntry::new_encrypted(id, final_content, final_tags, true, &self.cipher)?;
+        // Write new entry with same ID, stamping updated_at so recency reflects edits
+        let mut entry = NoteEntry::new_encrypted(id, final_content, final_tags, true, &self.cipher)?;
+        entry.updated_at = chrono::Utc::now().timestamp() as u32;
         self.write_note_entry(&entry)?;
 
         // Update note_index to point to new offset
@@ -744,6 +803,9 @@ impl Engram {
 
         // Persist indexes
         self.persist_indexes()?;
+
+        // Invalidate BM25 corpus cache — note content changed
+        self.bm25_cache = None;
 
         Ok(())
     }
@@ -959,6 +1021,16 @@ impl Engram {
         Ok(notes)
     }
 
+    /// Get all tags with note counts, sorted by count descending
+    pub fn all_tags(&self) -> Vec<(String, usize)> {
+        let mut tags: Vec<(String, usize)> = self.tag_index
+            .iter()
+            .map(|(tag, ids)| (tag.clone(), ids.len()))
+            .collect();
+        tags.sort_by(|a, b| b.1.cmp(&a.1));
+        tags
+    }
+
     /// Get notes in a time range
     pub fn temporal_range(&mut self, start: i64, end: i64) -> Result<Vec<Note>> {
         // Collect IDs first to avoid borrow issues
@@ -1133,14 +1205,20 @@ impl Engram {
     /// Search for similar notes using vector similarity
     /// Returns (note_id, similarity_score) pairs sorted by similarity
     pub fn search_similar(&self, query: &[f32], k: usize) -> Vec<(u64, f32)> {
-        if self.hnsw_index.is_empty() {
+        let raw = if self.hnsw_index.is_empty() {
             // Fall back to brute-force if no HNSW index
-            return self.vector_store.nearest(query, k);
-        }
+            self.vector_store.nearest(query, k)
+        } else {
+            // Use HNSW for O(log n) approximate nearest neighbor search
+            // Request extra candidates to account for filtering
+            self.hnsw_index.search(query, k + 10, (k + 10).max(50))
+        };
 
-        // Use HNSW for O(log n) approximate nearest neighbor search
-        // ef parameter controls accuracy/speed tradeoff
-        self.hnsw_index.search(query, k, k.max(50))
+        // Filter out deleted notes (HNSW/VectorStore may contain stale entries)
+        raw.into_iter()
+            .filter(|(id, _)| self.note_index.contains_key(id))
+            .take(k)
+            .collect()
     }
 
     /// Get embedding vector for a note
@@ -1252,6 +1330,29 @@ impl Engram {
         }
     }
 
+    /// Invalidate an edge between two notes, removing it from graph scoring
+    ///
+    /// Use this when a newer note supersedes or contradicts the relationship
+    /// represented by this edge. Differs from `remove_edge` semantically:
+    /// this is "this connection is no longer valid", not "this was a mistake".
+    ///
+    /// Triggers PageRank recompute so the change is immediately reflected
+    /// in recall scoring without requiring a restart.
+    ///
+    /// Returns true if an edge was found and invalidated.
+    pub fn invalidate_edge(&mut self, from: u64, to: u64) -> bool {
+        if !self.read_only {
+            let removed = self.graph.invalidate_edge(from, to);
+            if removed {
+                self.graph.compute_pagerank(20, 0.85);
+                let _ = self.persist_indexes();
+            }
+            removed
+        } else {
+            false
+        }
+    }
+
     /// Get related notes via graph edges
     pub fn get_related(&self, id: u64) -> Vec<(u64, f32, EdgeType)> {
         self.graph
@@ -1300,11 +1401,14 @@ impl Engram {
     ///
     /// This is the main search function that intelligently combines all signals:
     /// - Vector similarity (semantic meaning)
-    /// - Keyword matching (BM25)
+    /// - Keyword matching (BM25 with cached corpus IDF)
     /// - Graph scores (PageRank importance)
     /// - Recency (temporal relevance)
     pub fn recall(&mut self, query: &str, query_embedding: Option<&[f32]>, limit: usize) -> Result<Vec<RecallResult>> {
         let mut candidates: std::collections::HashMap<u64, RecallResult> = std::collections::HashMap::new();
+
+        // Pre-compute timestamp once for all recency scoring (avoids per-note syscall)
+        let now_nanos = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
 
         // 1. Vector search (if embedding provided)
         if let Some(embedding) = query_embedding {
@@ -1323,18 +1427,37 @@ impl Engram {
             }
         }
 
-        // 2. Keyword search (BM25) - search through recent notes
-        let recent_ids: Vec<u64> = self.temporal_index
+        // 2. Keyword search (BM25 with cached corpus IDF)
+        // Load all notes for BM25 scoring. The corpus (IDF + avgdl) is cached across
+        // recalls and only rebuilt when notes are added/deleted/updated.
+        let all_ids: Vec<u64> = self.temporal_index
             .iter()
             .rev()
-            .take(500) // Search last 500 notes for keywords
             .map(|(_, id)| *id)
             .collect();
 
-        let avgdl = 50.0; // Estimated average document length
-        for id in recent_ids {
+        let mut notes_for_bm25: Vec<(u64, Note)> = Vec::with_capacity(all_ids.len());
+        for id in all_ids {
             if let Some(note) = self.get(id)? {
-                let bm25 = bm25_score(&note.content, query, 1.2, 0.75, avgdl);
+                notes_for_bm25.push((id, note));
+            }
+        }
+
+        // Build or reuse cached BM25 corpus statistics (IDF + avgdl).
+        // Rebuilding only on note count change is a cheap heuristic that avoids
+        // O(n * words) IDF computation on every recall. The cache is also explicitly
+        // invalidated by remember/forget/update methods for correctness.
+        let current_note_count = notes_for_bm25.len() as u64;
+        if self.bm25_cache.is_none() || self.bm25_cache_note_count != current_note_count {
+            let content_refs: Vec<&str> = notes_for_bm25.iter().map(|(_, n)| n.content.as_str()).collect();
+            self.bm25_cache = Some(BM25Corpus::new(&content_refs));
+            self.bm25_cache_note_count = current_note_count;
+        }
+
+        // Score each note against the query using corpus-aware BM25
+        if let Some(ref corpus) = self.bm25_cache {
+            for (id, note) in notes_for_bm25 {
+                let bm25 = corpus.score(&note.content, query, 1.2, 0.75);
                 if bm25 > 0.0 {
                     candidates.entry(id).or_insert_with(|| RecallResult {
                         note: note.clone(),
@@ -1348,12 +1471,19 @@ impl Engram {
             }
         }
 
+        // Filter expired working-memory notes before scoring
+        candidates.retain(|_, result| !result.note.is_expired());
+
         // 3. Add graph scores and recency for all candidates
         for (id, result) in candidates.iter_mut() {
             result.graph_score = self.graph.get_pagerank(*id);
-            result.recency_score = recency_score(
-                result.note.timestamp,
+            // Use effective_timestamp_nanos() so edits (updated_at) boost recency,
+            // not just the original creation time. Uses pre-computed now_nanos to
+            // avoid calling chrono::Utc::now() per candidate.
+            result.recency_score = recency_score_at(
+                result.note.effective_timestamp_nanos(),
                 self.recall_config.recency_half_life_hours,
+                now_nanos,
             );
         }
 
@@ -1584,6 +1714,11 @@ impl Engram {
         data.extend_from_slice(&(graph_bytes.len() as u64).to_le_bytes());
         data.extend_from_slice(&graph_bytes);
 
+        // hnsw index (graph structure only — vectors already in vector_store above)
+        let hnsw_bytes = self.hnsw_index.serialize();
+        data.extend_from_slice(&(hnsw_bytes.len() as u64).to_le_bytes());
+        data.extend_from_slice(&hnsw_bytes);
+
         data
     }
 
@@ -1699,7 +1834,19 @@ impl Engram {
             let graph_len = read_u64(&mut cursor)? as usize;
             if cursor + graph_len <= data.len() {
                 let _ = self.graph.deserialize(&data[cursor..cursor + graph_len]);
-                // cursor += graph_len; // Not needed - end of data
+                cursor += graph_len;
+            }
+        }
+
+        // hnsw index (optional — new in persistence v2)
+        if cursor + 8 <= data.len() {
+            let hnsw_len = read_u64(&mut cursor)? as usize;
+            if cursor + hnsw_len <= data.len() {
+                if let Some(hnsw) = crate::hnsw::HnswIndex::deserialize(&data[cursor..cursor + hnsw_len]) {
+                    self.hnsw_index = hnsw;
+                    // Vectors repopulated in load_persisted_indexes() after vector_store is loaded
+                }
+                // cursor += hnsw_len;
             }
         }
 
@@ -1744,6 +1891,35 @@ impl Engram {
         // Deserialize indexes
         self.deserialize_indexes(&section[12..])?;
 
+        // HNSW graph structure: if deserialized from index section, validate node IDs
+        // against note_index (notes may have been deleted between save and load),
+        // then repopulate vectors. If invalid, fall back to full rebuild.
+        if !self.hnsw_index.is_empty() {
+            let valid_ids: std::collections::HashSet<u64> = self.note_index.keys().copied().collect();
+            let dangling = self.hnsw_index.validate_node_ids(&valid_ids);
+
+            if dangling.is_empty() {
+                // All nodes valid — just repopulate vectors for distance calcs
+                let vectors = self.vector_store.all_vectors();
+                self.hnsw_index.repopulate_vectors(&vectors);
+            } else {
+                // Dangling refs found (deleted notes) — rebuild from scratch
+                self.hnsw_index = crate::hnsw::HnswIndex::new();
+                for &id in self.note_index.keys() {
+                    if let Some(embedding) = self.vector_store.get(id) {
+                        self.hnsw_index.add(id, embedding);
+                    }
+                }
+            }
+        } else if self.vector_store.count() > 0 {
+            // No persisted HNSW (older file format) — rebuild from embeddings
+            for &id in self.note_index.keys() {
+                if let Some(embedding) = self.vector_store.get(id) {
+                    self.hnsw_index.add(id, embedding);
+                }
+            }
+        }
+
         Ok(true)
     }
 
@@ -1786,14 +1962,14 @@ mod tests {
 
         // Create new database
         {
-            let db = Engram::open(&path).unwrap();
+            let mut db = Engram::open(&path).unwrap();
             assert_eq!(db.stats().active_notes, 0);
             assert!(!db.is_mapped()); // No notes yet
         }
 
         // Reopen existing
         {
-            let db = Engram::open(&path).unwrap();
+            let mut db = Engram::open(&path).unwrap();
             assert_eq!(db.stats().active_notes, 0);
         }
     }
@@ -1976,10 +2152,10 @@ mod tests {
             db.remember("Note 3", &["gamma"]).unwrap();
             db.pin(1).unwrap();
 
-            // Not yet persisted
-            assert!(!db.has_persisted_indexes());
+            // remember() + pin() auto-persist on every write — indexes are already persisted
+            assert!(db.has_persisted_indexes());
 
-            // Persist indexes
+            // Calling persist_indexes() explicitly is idempotent
             db.persist_indexes().unwrap();
             assert!(db.has_persisted_indexes());
         }
@@ -2186,6 +2362,109 @@ mod tests {
     }
 
     #[test]
+    fn test_hnsw_persistence_roundtrip() {
+        use crate::vector::DIMS;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.engram");
+
+        let mut results_before;
+
+        // Phase 1: Create notes with embeddings, search, close
+        {
+            let mut db = Engram::open(&path).unwrap();
+
+            for i in 1..=20 {
+                let id = db.remember(&format!("Vector note {}", i), &["vector"]).unwrap();
+                let mut embedding = vec![0.0f32; DIMS];
+                let angle = i as f32 * 0.2;
+                embedding[0] = angle.cos();
+                embedding[1] = angle.sin();
+                db.add_embedding(id, &embedding).unwrap();
+            }
+
+            // Search before close
+            let mut query = vec![0.0f32; DIMS];
+            let target = 2.0f32; // Close to note 10 (angle = 2.0)
+            query[0] = target.cos();
+            query[1] = target.sin();
+            results_before = db.search_similar(&query, 5);
+            assert!(!results_before.is_empty());
+
+            db.persist_indexes().unwrap();
+        } // db dropped, file closed
+
+        // Phase 2: Reopen and verify same search results
+        {
+            let mut db = Engram::open(&path).unwrap();
+
+            let mut query = vec![0.0f32; DIMS];
+            let target = 2.0f32;
+            query[0] = target.cos();
+            query[1] = target.sin();
+            let results_after = db.search_similar(&query, 5);
+
+            assert_eq!(results_before.len(), results_after.len(),
+                "Same number of results after reopen");
+            for (before, after) in results_before.iter().zip(results_after.iter()) {
+                assert_eq!(before.0, after.0,
+                    "Same note IDs in same order after reopen");
+            }
+        }
+    }
+
+    #[test]
+    fn test_hnsw_persistence_dangling_refs() {
+        use crate::vector::DIMS;
+
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.engram");
+
+        // Phase 1: Create notes with embeddings
+        {
+            let mut db = Engram::open(&path).unwrap();
+
+            for i in 1..=10 {
+                let id = db.remember(&format!("Note {}", i), &["test"]).unwrap();
+                let mut embedding = vec![0.0f32; DIMS];
+                let angle = i as f32 * 0.3;
+                embedding[0] = angle.cos();
+                embedding[1] = angle.sin();
+                db.add_embedding(id, &embedding).unwrap();
+            }
+
+            db.persist_indexes().unwrap();
+        }
+
+        // Phase 2: Delete some notes (creates dangling refs in persisted HNSW)
+        {
+            let mut db = Engram::open(&path).unwrap();
+            db.forget(3).unwrap();
+            db.forget(7).unwrap();
+            db.persist_indexes().unwrap();
+        }
+
+        // Phase 3: Reopen — HNSW should detect dangling refs and rebuild
+        {
+            let mut db = Engram::open(&path).unwrap();
+
+            // Should still work — dangling refs handled gracefully
+            let mut query = vec![0.0f32; DIMS];
+            query[0] = 1.0;
+            let results = db.search_similar(&query, 5);
+
+            // Should not return deleted notes
+            for (id, _) in &results {
+                assert!(*id != 3 && *id != 7,
+                    "Deleted note {} should not appear in results", id);
+            }
+
+            // Remaining notes should still be searchable
+            assert_eq!(db.stats().active_notes, 8);
+        }
+    }
+
+    #[test]
     fn test_vault_operations() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.engram");
@@ -2319,9 +2598,9 @@ mod tests {
         let mut db = Engram::open(&path).unwrap();
 
         // Create notes in quick succession (within temporal window)
-        let id1 = db.remember("First note", &[]).unwrap();
+        let _id1 = db.remember("First note", &[]).unwrap();
         let id2 = db.remember("Second note", &[]).unwrap();
-        let id3 = db.remember("Third note", &[]).unwrap();
+        let _id3 = db.remember("Third note", &[]).unwrap();
 
         // Auto-link temporal edges
         let count = db.auto_link_temporal(id2, 30).unwrap();

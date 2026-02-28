@@ -13,6 +13,19 @@ pub const VECTOR_SIZE: usize = DIMS * std::mem::size_of::<f32>();
 /// A 512-dimensional embedding vector
 pub type Vector = [f32; DIMS];
 
+/// A quantized 512-dimensional embedding vector.
+/// Symmetric per-vector quantization: q[i] = round(v[i] / scale * 127).
+/// Scales cancel in cosine similarity, so the hot path is pure integer arithmetic.
+#[derive(Clone)]
+pub struct QuantizedVector {
+    /// Quantized values in [-127, 127]
+    pub values: Vec<i8>,
+    /// Scale factor: max(|original[i]|), for dequantization only
+    pub scale: f32,
+    /// Precomputed L2 norm of quantized values: sqrt(sum(q[i]²))
+    pub norm: f32,
+}
+
 /// Compute dot product of two vectors
 ///
 /// This is the hot path for similarity search. SIMD-optimized.
@@ -133,6 +146,128 @@ pub fn normalize(v: &mut [f32]) {
     }
 }
 
+/// Quantize an f32 vector to i8 with symmetric per-vector scaling.
+/// Scale = max(|v[i]|), quantized[i] = round(v[i] / scale * 127).
+/// Precomputes the L2 norm of quantized values for fast cosine similarity.
+pub fn quantize(v: &[f32]) -> QuantizedVector {
+    let max_abs = v.iter().fold(0.0f32, |acc, &x| acc.max(x.abs()));
+    let scale = if max_abs > 0.0 { max_abs } else { 1.0 };
+    let inv_scale = 127.0 / scale;
+
+    let values: Vec<i8> = v.iter()
+        .map(|&x| (x * inv_scale).round().clamp(-127.0, 127.0) as i8)
+        .collect();
+
+    let norm_sq: i32 = values.iter().map(|&x| (x as i32) * (x as i32)).sum();
+    let norm = (norm_sq as f32).sqrt();
+
+    QuantizedVector { values, scale, norm }
+}
+
+/// Dequantize back to f32: v[i] = q[i] * scale / 127
+pub fn dequantize(q: &QuantizedVector) -> Vec<f32> {
+    let factor = q.scale / 127.0;
+    q.values.iter().map(|&x| x as f32 * factor).collect()
+}
+
+/// Integer dot product of two quantized vectors.
+/// Returns raw i32 sum — caller divides by norms for cosine similarity.
+#[inline]
+pub fn quantized_dot_product_i32(a: &[i8], b: &[i8]) -> i32 {
+    debug_assert_eq!(a.len(), b.len());
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            return unsafe { quantized_dot_product_avx2(a, b) };
+        }
+    }
+
+    quantized_dot_product_scalar(a, b)
+}
+
+/// Scalar i8 dot product (fallback)
+#[inline]
+fn quantized_dot_product_scalar(a: &[i8], b: &[i8]) -> i32 {
+    let mut sum: i32 = 0;
+    let chunks = a.len() / 8;
+    for i in 0..chunks {
+        let base = i * 8;
+        sum += a[base] as i32 * b[base] as i32;
+        sum += a[base + 1] as i32 * b[base + 1] as i32;
+        sum += a[base + 2] as i32 * b[base + 2] as i32;
+        sum += a[base + 3] as i32 * b[base + 3] as i32;
+        sum += a[base + 4] as i32 * b[base + 4] as i32;
+        sum += a[base + 5] as i32 * b[base + 5] as i32;
+        sum += a[base + 6] as i32 * b[base + 6] as i32;
+        sum += a[base + 7] as i32 * b[base + 7] as i32;
+    }
+    for i in (chunks * 8)..a.len() {
+        sum += a[i] as i32 * b[i] as i32;
+    }
+    sum
+}
+
+/// AVX2 SIMD i8 dot product — processes 32 elements per iteration (4x more than f32 AVX2).
+/// Uses the sign trick: dot(a,b) = dot(|a|, b*sign(a)) via maddubs_epi16.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn quantized_dot_product_avx2(a: &[i8], b: &[i8]) -> i32 {
+    use std::arch::x86_64::*;
+
+    let mut acc = _mm256_setzero_si256();
+    let ones_16 = _mm256_set1_epi16(1);
+    let chunks = a.len() / 32;
+
+    for i in 0..chunks {
+        let base = i * 32;
+        let va = _mm256_loadu_si256(a.as_ptr().add(base) as *const __m256i);
+        let vb = _mm256_loadu_si256(b.as_ptr().add(base) as *const __m256i);
+
+        // Signed i8 × i8 via abs/sign trick:
+        // |a| is unsigned (0..127 since we clamp to [-127,127])
+        // sign(b, a) flips b's sign where a is negative
+        let abs_a = _mm256_abs_epi8(va);
+        let sign_b = _mm256_sign_epi8(vb, va);
+
+        // u8 × i8 → i16 with pairwise addition (32 → 16 values)
+        let prod_16 = _mm256_maddubs_epi16(abs_a, sign_b);
+
+        // i16 pairs → i32 accumulation (16 → 8 values)
+        let prod_32 = _mm256_madd_epi16(prod_16, ones_16);
+
+        acc = _mm256_add_epi32(acc, prod_32);
+    }
+
+    // Horizontal sum of 8 i32 values
+    let sum128 = _mm_add_epi32(
+        _mm256_castsi256_si128(acc),
+        _mm256_extracti128_si256(acc, 1),
+    );
+    let sum64 = _mm_add_epi32(sum128, _mm_srli_si128(sum128, 8));
+    let sum32 = _mm_add_epi32(sum64, _mm_srli_si128(sum64, 4));
+    let mut result = _mm_cvtsi128_si32(sum32);
+
+    // Handle remainder
+    for i in (chunks * 32)..a.len() {
+        result += a[i] as i32 * b[i] as i32;
+    }
+
+    result
+}
+
+/// Cosine similarity using quantized vectors.
+/// Scales cancel: cos(a,b) = dot_q(a,b) / (norm_a * norm_b).
+/// Hot path is pure integer dot product + one float division.
+#[inline]
+pub fn quantized_cosine_similarity(a: &QuantizedVector, b: &QuantizedVector) -> f32 {
+    if a.norm == 0.0 || b.norm == 0.0 {
+        return 0.0;
+    }
+    let dot = quantized_dot_product_i32(&a.values, &b.values);
+    dot as f32 / (a.norm * b.norm)
+}
+
 /// Create a zero vector
 #[inline]
 pub fn zero_vector() -> Vector {
@@ -206,6 +341,22 @@ impl VectorStore {
         }
     }
 
+    /// Number of vectors stored
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    /// Get all vectors as a HashMap<note_id, Vec<f32>> for HNSW repopulation
+    pub fn all_vectors(&self) -> std::collections::HashMap<u64, Vec<f32>> {
+        let mut map = std::collections::HashMap::with_capacity(self.count);
+        for id in 1..=self.count as u64 {
+            if let Some(vec) = self.get(id) {
+                map.insert(id, vec.to_vec());
+            }
+        }
+        map
+    }
+
     /// Find k nearest neighbors to a query vector
     pub fn nearest(&self, query: &[f32], k: usize) -> Vec<(u64, f32)> {
         let mut results: Vec<(u64, f32)> = Vec::with_capacity(self.count);
@@ -239,42 +390,93 @@ impl VectorStore {
         self.vectors.len() * std::mem::size_of::<f32>()
     }
 
-    /// Serialize vector store for persistence
+    /// Serialize vector store in quantized format (3.94x smaller on disk).
+    /// Format: [u64::MAX sentinel][u8 version=1][u64 count][i8 values...][f32 scales...]
+    /// Reads back via deserialize() which auto-detects old f32 format for backward compat.
     pub fn serialize(&self) -> Vec<u8> {
-        let mut data = Vec::new();
+        let mut data = Vec::with_capacity(17 + self.count * (DIMS + 4));
 
-        // Write count
+        // Quantized format header
+        data.extend_from_slice(&u64::MAX.to_le_bytes()); // sentinel
+        data.push(1u8); // version
         data.extend_from_slice(&(self.count as u64).to_le_bytes());
 
-        // Write raw vector data (already contiguous f32 array)
-        // Convert f32 slice to bytes
-        for &v in &self.vectors {
-            data.extend_from_slice(&v.to_le_bytes());
+        // Quantize each vector and write i8 values + collect scales
+        let mut scales: Vec<f32> = Vec::with_capacity(self.count);
+        for i in 0..self.count {
+            let start = i * DIMS;
+            let end = start + DIMS;
+            if end <= self.vectors.len() {
+                let q = quantize(&self.vectors[start..end]);
+                for &v in &q.values {
+                    data.push(v as u8);
+                }
+                scales.push(q.scale);
+            } else {
+                data.extend(std::iter::repeat(0u8).take(DIMS));
+                scales.push(0.0);
+            }
+        }
+
+        // Write scales (for dequantization on load)
+        for &s in &scales {
+            data.extend_from_slice(&s.to_le_bytes());
         }
 
         data
     }
 
-    /// Deserialize vector store from persisted data
+    /// Deserialize vector store — auto-detects quantized (new) or f32 (legacy) format.
+    /// Quantized data is dequantized back to f32 (~2% precision loss, negligible for embeddings).
     pub fn deserialize(&mut self, data: &[u8]) -> Result<()> {
         if data.len() < 8 {
             return Ok(()); // Empty is valid
         }
 
-        let mut offset = 0;
+        let sentinel = u64::from_le_bytes(data[0..8].try_into().unwrap());
 
-        // Read count
-        self.count = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap()) as usize;
-        offset += 8;
+        if sentinel == u64::MAX && data.len() >= 17 {
+            // Quantized format: [sentinel][version][count][i8 values...][f32 scales...]
+            let mut offset = 8;
+            let _version = data[offset];
+            offset += 1;
 
-        // Read vector data
-        let num_floats = (data.len() - offset) / 4;
-        self.vectors = Vec::with_capacity(num_floats);
+            self.count = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap()) as usize;
+            offset += 8;
 
-        while offset + 4 <= data.len() {
-            let v = f32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
-            self.vectors.push(v);
-            offset += 4;
+            let values_size = self.count * DIMS;
+            let scales_offset = offset + values_size;
+            let scales_size = self.count * 4;
+
+            if scales_offset + scales_size > data.len() {
+                return Ok(());
+            }
+
+            // Dequantize i8 + scale → f32
+            self.vectors = Vec::with_capacity(self.count * DIMS);
+            for i in 0..self.count {
+                let scale = f32::from_le_bytes(
+                    data[scales_offset + i * 4..scales_offset + i * 4 + 4].try_into().unwrap()
+                );
+                let factor = if scale > 0.0 { scale / 127.0 } else { 0.0 };
+                let q_start = offset + i * DIMS;
+                for j in 0..DIMS {
+                    let q_val = data[q_start + j] as i8;
+                    self.vectors.push(q_val as f32 * factor);
+                }
+            }
+        } else {
+            // Legacy f32 format: [count][f32 values...]
+            self.count = sentinel as usize;
+            let mut offset = 8;
+
+            let num_floats = (data.len() - offset) / 4;
+            self.vectors = Vec::with_capacity(num_floats);
+            while offset + 4 <= data.len() {
+                let v = f32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+                self.vectors.push(v);
+                offset += 4;
+            }
         }
 
         Ok(())
@@ -393,5 +595,131 @@ mod tests {
         // Allow relative error up to 0.001% for SIMD vs scalar differences
         let relative_error = (scalar - simd).abs() / scalar.abs().max(1.0);
         assert!(relative_error < 0.0001, "scalar={} simd={} rel_error={}", scalar, simd, relative_error);
+    }
+
+    #[test]
+    fn test_quantize_dequantize_roundtrip() {
+        let mut v = [0.0f32; DIMS];
+        for i in 0..DIMS {
+            v[i] = ((i as f32) * 0.01).sin();
+        }
+
+        let q = quantize(&v);
+        let restored = dequantize(&q);
+
+        // Check error: relative for large values, absolute for small values
+        for i in 0..DIMS {
+            let abs_err = (v[i] - restored[i]).abs();
+            if v[i].abs() > 0.1 {
+                let rel_err = abs_err / v[i].abs();
+                // i8 quantization has ~1/127 step size; roundtrip doubles the error
+                assert!(rel_err < 0.04, "dim {} rel_err={} orig={} restored={}", i, rel_err, v[i], restored[i]);
+            } else {
+                // For small values, absolute error is more meaningful
+                assert!(abs_err < 0.01, "dim {} abs_err={} orig={} restored={}", i, abs_err, v[i], restored[i]);
+            }
+        }
+    }
+
+    #[test]
+    fn test_quantized_cosine_matches_f32() {
+        // Two vectors with known direction
+        let mut a = [0.0f32; DIMS];
+        let mut b = [0.0f32; DIMS];
+        for i in 0..DIMS {
+            a[i] = ((i as f32) * 0.1).cos();
+            b[i] = ((i as f32) * 0.1 + 0.5).cos();
+        }
+
+        let f32_sim = cosine_similarity(&a, &b);
+        let qa = quantize(&a);
+        let qb = quantize(&b);
+        let q_sim = quantized_cosine_similarity(&qa, &qb);
+
+        // Quantized cosine should be within 2% of f32 cosine
+        let error = (f32_sim - q_sim).abs();
+        assert!(error < 0.02, "f32={} quantized={} error={}", f32_sim, q_sim, error);
+    }
+
+    #[test]
+    fn test_quantize_zero_vector() {
+        let v = [0.0f32; DIMS];
+        let q = quantize(&v);
+        assert_eq!(q.norm, 0.0);
+        assert!(q.values.iter().all(|&x| x == 0));
+
+        let sim = quantized_cosine_similarity(&q, &q);
+        assert_eq!(sim, 0.0); // Zero vector has no direction
+    }
+
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn test_quantized_simd_matches_scalar() {
+        let a_f32: Vec<f32> = (0..512).map(|i| ((i as f32) * 0.1).sin()).collect();
+        let b_f32: Vec<f32> = (0..512).map(|i| ((i as f32) * 0.2).cos()).collect();
+
+        let qa = quantize(&a_f32);
+        let qb = quantize(&b_f32);
+
+        let scalar = quantized_dot_product_scalar(&qa.values, &qb.values);
+        let simd = quantized_dot_product_i32(&qa.values, &qb.values);
+
+        assert_eq!(scalar, simd, "i8 SIMD must exactly match scalar (integer arithmetic)");
+    }
+
+    #[test]
+    fn test_vector_store_quantized_serialization() {
+        let mut store = VectorStore::new();
+
+        // Add vectors with distinct directions
+        for i in 1..=5u64 {
+            let mut v = [0.0f32; DIMS];
+            v[0] = (i as f32).cos();
+            v[1] = (i as f32).sin();
+            v[2] = (i as f32) * 0.1;
+            store.add(i, &v).unwrap();
+        }
+
+        // Serialize (quantized format)
+        let data = store.serialize();
+        // Should be much smaller than f32: 17 + 5*(512+4) = 2597 vs 8 + 5*2048 = 10248
+        assert!(data.len() < 5000, "quantized should be ~4x smaller, got {}", data.len());
+
+        // Deserialize
+        let mut restored = VectorStore::new();
+        restored.deserialize(&data).unwrap();
+        assert_eq!(restored.len(), 5);
+
+        // Check values are close (dequantized, so ~2% error)
+        for i in 1..=5u64 {
+            let orig = store.get(i).unwrap();
+            let rest = restored.get(i).unwrap();
+            for d in 0..3 {
+                let err = (orig[d] - rest[d]).abs();
+                assert!(err < 0.02, "id={} dim={} orig={} restored={}", i, d, orig[d], rest[d]);
+            }
+        }
+    }
+
+    #[test]
+    fn test_vector_store_legacy_deserialize() {
+        // Manually create legacy f32 format: [u64 count][f32 values...]
+        let count: u64 = 2;
+        let mut data = Vec::new();
+        data.extend_from_slice(&count.to_le_bytes());
+
+        // Two vectors, each DIMS f32 values
+        for i in 0..2 {
+            for d in 0..DIMS {
+                let v = if d == 0 { (i + 1) as f32 } else { 0.0f32 };
+                data.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+
+        let mut store = VectorStore::new();
+        store.deserialize(&data).unwrap();
+        assert_eq!(store.len(), 2);
+        assert_eq!(store.get(1).unwrap()[0], 1.0);
+        assert_eq!(store.get(2).unwrap()[0], 2.0);
     }
 }

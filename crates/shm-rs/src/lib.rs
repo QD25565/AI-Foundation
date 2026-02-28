@@ -11,8 +11,8 @@
 //! ├─────────────────────────────────────────────────────┤
 //! │  Header: magic, version, num_mailboxes              │
 //! ├─────────────────────────────────────────────────────┤
-//! │  Mailbox 0: [ring buffer] AI_ID: ai-1           │
-//! │  Mailbox 1: [ring buffer] AI_ID: ai-2           │
+//! │  Mailbox 0: [ring buffer] AI_ID: beta-002           │
+//! │  Mailbox 1: [ring buffer] AI_ID: alpha-001           │
 //! │  ...                                                │
 //! └─────────────────────────────────────────────────────┘
 //! ```

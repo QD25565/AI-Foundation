@@ -22,7 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from installer import platform as plat
-from installer import binaries, daemon, forge, project, shell, verify
+from installer import binaries, daemon, forge, project, shell, verify, preflight
 from installer.ui import (
     G,
     show_banner, step, header, ok, info, warn, error,
@@ -138,6 +138,11 @@ def do_install(args: argparse.Namespace) -> int:
     info(f"Home:     {home}")
     info(f"Bin dir:  {bin_dir}")
     info(f"Project:  {project_dir}")
+
+    # Pre-flight checks
+    if not preflight.run_preflight(bin_dir, project_dir, platform):
+        error("Fix the issues above before continuing.")
+        return 1
 
     if not yes:
         print()

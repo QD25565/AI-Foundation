@@ -1,0 +1,35 @@
+{
+  "version": "58",
+  "channel": "stable",
+  "pub_date": "2026-03-01T13:15:00Z",
+  "binaries": {
+    "ai-foundation-mcp": {
+      "sha256": "f240e95214a872277e36519dff0e0053e7270c760f35bc68da99860b36e93af9",
+      "size": 2589696
+    },
+    "notebook-cli": {
+      "sha256": "8a513f4d5c231dfb63ac14dc45dab5b847ce67e7ff85f116c872d4a12e2599f6",
+      "size": 5334528
+    },
+    "teambook": {
+      "sha256": "e296c19165656f976e6ec9ff7bcb4bcd66e1b08ec450339a7d13fbf38d9e83da",
+      "size": 4211200
+    },
+    "v2-daemon": {
+      "sha256": "cf94502dbfe7390bf94606977b4f0f215d94d5bda90e0fb7963432c0543ad9cb",
+      "size": 1198592
+    },
+    "session-start": {
+      "sha256": "e476b2542ad87f7cb6bac4b275205753e992db8c088c09b0763fba60d8d71c2e",
+      "size": 1883648
+    },
+    "forge": {
+      "sha256": "fd849d0edc598a6449ec6bd6962a38e6a64f90eefadaa20664a79b1dd932f3b9",
+      "size": 2650112
+    },
+    "forge-local": {
+      "sha256": "c895c9965a7847e40152c1cf5f2f288044c5e2028d75e116af4f8f3bda14fc93",
+      "size": 6356480
+    }
+  }
+}

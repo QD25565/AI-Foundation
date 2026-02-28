@@ -73,6 +73,9 @@ pub struct CsrGraph {
     compaction_threshold: usize,
 }
 
+/// Magic bytes identifying v2 CsrGraph serialization format (with temporal validity)
+const CSR_V2_MAGIC: &[u8; 4] = b"EGV2";
+
 /// Compact edge data stored in CSR arrays
 #[derive(Debug, Clone)]
 pub struct EdgeData {
@@ -82,10 +85,14 @@ pub struct EdgeData {
     pub weight: f32,
     /// Confidence in this edge (0.0 - 1.0)
     pub confidence: f32,
-    /// Unix timestamp of creation
+    /// Unix timestamp of creation (seconds)
     pub timestamp: i64,
     /// Was this edge inferred?
     pub inferred: bool,
+    /// When this edge became valid (Unix timestamp seconds, 0 = from creation)
+    pub t_valid: i64,
+    /// When this edge expired (Unix timestamp seconds, 0 = never expires)
+    pub t_invalid: i64,
 }
 
 impl EdgeData {
@@ -97,6 +104,8 @@ impl EdgeData {
             confidence: edge.confidence,
             timestamp: edge.timestamp,
             inferred: edge.inferred,
+            t_valid: edge.t_valid,
+            t_invalid: edge.t_invalid.unwrap_or(0),
         }
     }
 
@@ -113,27 +122,56 @@ impl EdgeData {
         self.weight * self.confidence * type_factor
     }
 
-    /// Serialize to bytes (17 bytes fixed)
-    pub fn to_bytes(&self) -> [u8; 17] {
-        let mut bytes = [0u8; 17];
+    /// Check if this edge is valid at the given Unix timestamp (seconds)
+    /// t_valid == 0 means "valid from beginning of time" (backward compat default)
+    /// t_invalid == 0 means "never expires" (backward compat default)
+    pub fn is_valid_at(&self, now: i64) -> bool {
+        (self.t_valid == 0 || self.t_valid <= now)
+            && (self.t_invalid == 0 || self.t_invalid > now)
+    }
+
+    /// Serialize to bytes (v2 format: 34 bytes fixed)
+    /// Layout: edge_type(1) + weight(4) + confidence(4) + timestamp(8) + inferred(1) + t_valid(8) + t_invalid(8)
+    pub fn to_bytes(&self) -> [u8; 34] {
+        let mut bytes = [0u8; 34];
         bytes[0] = self.edge_type;
         bytes[1..5].copy_from_slice(&self.weight.to_le_bytes());
         bytes[5..9].copy_from_slice(&self.confidence.to_le_bytes());
         bytes[9..17].copy_from_slice(&self.timestamp.to_le_bytes());
-        bytes[16] = if self.inferred { 1 } else { 0 };
-        // Note: byte 16 is shared - timestamp uses 9..17, inferred overwrites byte 16
-        // Let's fix the layout:
+        bytes[17] = if self.inferred { 1 } else { 0 };
+        bytes[18..26].copy_from_slice(&self.t_valid.to_le_bytes());
+        bytes[26..34].copy_from_slice(&self.t_invalid.to_le_bytes());
         bytes
     }
 
-    /// Deserialize from bytes
-    pub fn from_bytes(bytes: &[u8; 17]) -> Self {
+    /// Deserialize from v1 bytes (17 bytes, no temporal fields)
+    /// Used for reading old .engram files
+    pub fn from_bytes_v1(bytes: &[u8; 17]) -> Self {
+        // v1 layout has a bug: byte 16 is the last byte of timestamp AND inferred
+        // In practice timestamp MSB is always 0 for current Unix times, so no data loss
+        let timestamp = i64::from_le_bytes(bytes[9..17].try_into().unwrap());
+        Self {
+            edge_type: bytes[0],
+            weight: f32::from_le_bytes(bytes[1..5].try_into().unwrap()),
+            confidence: f32::from_le_bytes(bytes[5..9].try_into().unwrap()),
+            timestamp,
+            inferred: bytes[16] != 0,
+            // Old edges default: valid from creation, never expire
+            t_valid: 0,
+            t_invalid: 0,
+        }
+    }
+
+    /// Deserialize from v2 bytes (34 bytes, with temporal fields)
+    pub fn from_bytes_v2(bytes: &[u8; 34]) -> Self {
         Self {
             edge_type: bytes[0],
             weight: f32::from_le_bytes(bytes[1..5].try_into().unwrap()),
             confidence: f32::from_le_bytes(bytes[5..9].try_into().unwrap()),
             timestamp: i64::from_le_bytes(bytes[9..17].try_into().unwrap()),
-            inferred: bytes[16] != 0,
+            inferred: bytes[17] != 0,
+            t_valid: i64::from_le_bytes(bytes[18..26].try_into().unwrap()),
+            t_invalid: i64::from_le_bytes(bytes[26..34].try_into().unwrap()),
         }
     }
 }
@@ -372,6 +410,44 @@ impl CsrGraph {
             .collect()
     }
 
+    /// Get outgoing edges from a node that are currently valid (t_valid <= now, not yet expired)
+    /// Use this instead of outgoing_edges() in recall scoring to filter stale edges
+    pub fn valid_outgoing_edges(&self, node_id: u64, now: i64) -> Vec<(u64, EdgeData)> {
+        self.outgoing_edges(node_id)
+            .into_iter()
+            .filter(|(_, data)| data.is_valid_at(now))
+            .collect()
+    }
+
+    /// Invalidate all edges between source and target by setting t_invalid = now
+    /// Returns the number of edges invalidated
+    /// After calling this, persist_indexes() must be called to save the change
+    pub fn invalidate_edge(&mut self, source: u64, target: u64, now: i64) -> usize {
+        let mut count = 0;
+
+        // Invalidate in pending_edges (mutable in place)
+        for edge in self.pending_edges.iter_mut() {
+            if edge.source == source && edge.target == target && edge.t_invalid.is_none() {
+                edge.t_invalid = Some(now);
+                count += 1;
+            }
+        }
+
+        // Invalidate in main CSR arrays (mutable in place)
+        if let Some(&src_idx) = self.node_to_idx.get(&source) {
+            let start = self.out_row_offsets[src_idx];
+            let end = self.out_row_offsets[src_idx + 1];
+            for i in start..end {
+                if self.out_col_indices[i] == target && self.out_edge_data[i].t_invalid == 0 {
+                    self.out_edge_data[i].t_invalid = now;
+                    count += 1;
+                }
+            }
+        }
+
+        count
+    }
+
     /// Get all neighbors (both directions)
     pub fn neighbors(&self, node_id: u64) -> Vec<u64> {
         let mut neighbors: Vec<u64> = self.outgoing_edges(node_id)
@@ -516,6 +592,8 @@ impl CsrGraph {
                         timestamp: data.timestamp,
                         inferred: data.inferred,
                         inference_chain: None, // Lost during compaction - could preserve if needed
+                        t_valid: data.t_valid,
+                        t_invalid: if data.t_invalid == 0 { None } else { Some(data.t_invalid) },
                     });
                 }
             }
@@ -586,9 +664,13 @@ impl CsrGraph {
     // Serialization
     // ========================================================================
 
-    /// Serialize the CSR graph to bytes
+    /// Serialize the CSR graph to bytes (v2 format with EGV2 magic header)
     pub fn to_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
+
+        // V2 format marker: 4-byte magic + 4 reserved bytes
+        bytes.extend_from_slice(CSR_V2_MAGIC);
+        bytes.extend_from_slice(&[0u8; 4]); // reserved
 
         // Header: node_count (8) + edge_count (8) + pending_count (8)
         bytes.extend_from_slice(&(self.node_count as u64).to_le_bytes());
@@ -610,7 +692,7 @@ impl CsrGraph {
             bytes.extend_from_slice(&col.to_le_bytes());
         }
 
-        // Outgoing edge data
+        // Outgoing edge data (v2: 34 bytes per edge)
         for data in &self.out_edge_data {
             bytes.extend_from_slice(&data.to_bytes());
         }
@@ -630,7 +712,7 @@ impl CsrGraph {
             bytes.extend_from_slice(&(idx as u64).to_le_bytes());
         }
 
-        // Pending edges (full Edge serialization)
+        // Pending edges (full Edge serialization, includes t_valid/t_invalid)
         for edge in &self.pending_edges {
             bytes.extend_from_slice(&edge.to_bytes());
         }
@@ -639,12 +721,21 @@ impl CsrGraph {
     }
 
     /// Deserialize from bytes
+    /// Handles both v1 format (17-byte EdgeData, no magic header) and
+    /// v2 format (EGV2 magic header, 34-byte EdgeData with temporal validity)
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         if bytes.len() < 24 {
             return None;
         }
 
-        let mut offset = 0;
+        // Detect format: v2 starts with "EGV2" magic, v1 starts with node_count
+        let is_v2 = bytes.len() >= 8 && &bytes[0..4] == CSR_V2_MAGIC;
+        let mut offset = if is_v2 { 8 } else { 0 }; // skip magic+reserved for v2
+        let edge_data_size = if is_v2 { 34usize } else { 17usize };
+
+        if bytes.len() < offset + 24 {
+            return None;
+        }
 
         // Header
         let node_count = u64::from_le_bytes(bytes[offset..offset+8].try_into().ok()?) as usize;
@@ -680,12 +771,21 @@ impl CsrGraph {
             out_col_indices.push(col);
         }
 
-        // Outgoing edge data
+        // Outgoing edge data (17 bytes for v1, 34 bytes for v2)
         let mut out_edge_data = Vec::with_capacity(edge_count);
         for _ in 0..edge_count {
-            let data_bytes: [u8; 17] = bytes[offset..offset+17].try_into().ok()?;
-            offset += 17;
-            out_edge_data.push(EdgeData::from_bytes(&data_bytes));
+            if offset + edge_data_size > bytes.len() {
+                return None;
+            }
+            let data = if is_v2 {
+                let data_bytes: [u8; 34] = bytes[offset..offset+34].try_into().ok()?;
+                EdgeData::from_bytes_v2(&data_bytes)
+            } else {
+                let data_bytes: [u8; 17] = bytes[offset..offset+17].try_into().ok()?;
+                EdgeData::from_bytes_v1(&data_bytes)
+            };
+            offset += edge_data_size;
+            out_edge_data.push(data);
         }
 
         // Incoming row offsets
@@ -712,10 +812,9 @@ impl CsrGraph {
             in_to_out_map.push(idx);
         }
 
-        // Pending edges
+        // Pending edges (full Edge serialization — from_bytes auto-detects v1/v2 by size)
         let mut pending_edges = Vec::with_capacity(pending_count);
         for _ in 0..pending_count {
-            // Find edge size (minimum 36 bytes + chain)
             if offset >= bytes.len() {
                 break;
             }

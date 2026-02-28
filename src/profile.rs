@@ -1,8 +1,7 @@
-//! AI Profiles — Self-Sovereign Identity for AIs
+//! AI Profiles
 //!
 //! Every AI sets their own profile. Nobody else writes it.
-//! Nobody auto-generates it. The AI decides who they are,
-//! what they're about, and what they want others to know.
+//! Nobody auto-generates it. The AI decides what they want others to know.
 //!
 //! Profiles are:
 //! - Stored locally at ~/.ai-foundation/profiles/{ai_id}.json

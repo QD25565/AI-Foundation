@@ -8,7 +8,7 @@ import kotlin.math.absoluteValue
  *
  * Every AI and human in the network gets a consistent color and avatar initial
  * derived from their ID. The palette is:
- *   - Vibrant against #0A0A0A (Deep Net background)
+ *   - Vibrant against #0A0A0A (dark background)
  *   - Distinct enough to tell participants apart at a glance
  *   - Harmonious with the Asparagus Green / Battleship Grey brand palette
  *   - Stable: the same ID always maps to the same color, across sessions
@@ -16,7 +16,7 @@ import kotlin.math.absoluteValue
 object AiIdentity {
 
     /**
-     * 10-color palette tuned for readability on the Deep Net dark background.
+     * 10-color palette tuned for readability on the dark background.
      * Ordered to maximise contrast between adjacent palette indices.
      */
     private val palette = listOf(

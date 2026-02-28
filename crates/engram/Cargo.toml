@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Purpose-built AI memory database. The physical substrate for AI memory."
 license = "MIT"
-repository = "https://github.com/QD25565/ai-foundation"
+repository = "https://github.com/QD25565/engram"
 keywords = ["ai", "memory", "database", "vector", "graph"]
 categories = ["database", "data-structures"]
 
@@ -73,7 +73,9 @@ serde_json = "1.0"
 # Embeddings are foundational to exceptional recall (keyword + semantic + graph)
 llama-cpp-2 = "=0.1.127"
 
-# llama-cpp-sys-2 patch is defined at the workspace root Cargo.toml
+# Patch for Windows GNU target compatibility (same as forge)
+[patch.crates-io]
+llama-cpp-sys-2 = { path = "../forge/patches/llama-cpp-sys-2" }
 
 [dev-dependencies]
 # Benchmarking
@@ -82,3 +84,11 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # Test utilities
 tempfile = "3.10"
 
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+
+[profile.bench]
+opt-level = 3
+lto = "thin"

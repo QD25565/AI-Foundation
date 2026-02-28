@@ -1,8 +1,6 @@
 //! Custom widgets for Forge UI
 //!
 //! Gradient-styled widgets that match AI-Foundation branding.
-//!
-//! WIP: components are fully implemented, not yet all wired into the UI.
 #![allow(dead_code)]
 
 use ratatui::{

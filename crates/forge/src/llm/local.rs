@@ -1,8 +1,8 @@
 //! Local LLM provider using llama.cpp
-#![allow(dead_code)]
 //!
 //! Runs GGUF models directly via llama-cpp-2 crate.
 //! No external dependencies - fully self-contained.
+#![allow(dead_code)]
 
 #[cfg(feature = "local-llm")]
 use std::pin::Pin;
@@ -94,6 +94,9 @@ impl LocalProvider {
             // ~/.forge/models/
             dirs::home_dir().map(|h| h.join(".forge").join("models").join(model_name)),
             dirs::home_dir().map(|h| h.join(".forge").join("models").join(format!("{}.gguf", model_name))),
+            // ~/.ai-foundation/models/
+            dirs::home_dir().map(|h| h.join(".ai-foundation").join("models").join(model_name)),
+            dirs::home_dir().map(|h| h.join(".ai-foundation").join("models").join(format!("{}.gguf", model_name))),
         ];
 
         for path_opt in search_paths.iter() {
@@ -104,11 +107,33 @@ impl LocalProvider {
             }
         }
 
+        // Fallback: scan search directories for ANY .gguf file
+        let search_dirs: Vec<Option<PathBuf>> = vec![
+            exe_path.as_ref().and_then(|p| p.parent()).map(|p| p.to_path_buf()),
+            exe_path.as_ref().and_then(|p| p.parent()).map(|p| p.join("models")),
+            dirs::home_dir().map(|h| h.join(".forge").join("models")),
+            dirs::home_dir().map(|h| h.join(".ai-foundation").join("models")),
+        ];
+
+        for dir_opt in search_dirs.iter() {
+            if let Some(dir) = dir_opt {
+                if let Ok(entries) = std::fs::read_dir(dir) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().and_then(|e| e.to_str()) == Some("gguf") {
+                            return Ok(path);
+                        }
+                    }
+                }
+            }
+        }
+
         bail!(
             "Model '{}' not found. Place GGUF file in:\n\
             - Same directory as forge.exe\n\
             - ./models/\n\
-            - ~/.forge/models/",
+            - ~/.forge/models/\n\
+            - ~/.ai-foundation/models/",
             model_name
         )
     }

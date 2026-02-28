@@ -37,8 +37,10 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicU32, Ordering};
+use std::sync::Arc;
 use memmap2::MmapMut;
 use crate::event::{Event, EventHeader, EventPayload};
+use crate::crypto::{TeamEngramCrypto, FLAG_ENCRYPTED};
 
 /// Magic number for event log files
 pub const EVENT_LOG_MAGIC: u64 = 0x4556_4E54_4C4F_4756; // "EVNTLOGV"
@@ -93,6 +95,12 @@ pub enum EventLogError {
 
     #[error("Deserialization error: {0}")]
     Deserialization(String),
+
+    #[error("Encryption error: {0}")]
+    Encryption(String),
+
+    #[error("Decryption error: encrypted event but no decryption key configured")]
+    NoDecryptionKey,
 }
 
 /// Checkpoint - periodic position marker for fast seeking
@@ -191,6 +199,10 @@ pub struct EventLogWriter {
     path: PathBuf,
     file_size: usize,
     next_checkpoint_idx: usize,
+    /// Optional encryption context. When set, all new event payloads are
+    /// encrypted with AES-256-GCM before writing. Already-encrypted events
+    /// (e.g., during compaction passthrough) are written as-is.
+    crypto: Option<Arc<TeamEngramCrypto>>,
 }
 
 impl EventLogWriter {
@@ -253,7 +265,14 @@ impl EventLogWriter {
             path,
             file_size,
             next_checkpoint_idx: 0,
+            crypto: None,
         })
+    }
+
+    /// Set the encryption context for this writer.
+    /// When set, all new event payloads will be encrypted with AES-256-GCM.
+    pub fn set_crypto(&mut self, crypto: Arc<TeamEngramCrypto>) {
+        self.crypto = Some(crypto);
     }
 
     /// Get the header
@@ -271,14 +290,32 @@ impl EventLogWriter {
     /// Assigns a sequence number and writes the event.
     /// Returns the assigned sequence number.
     pub fn append(&mut self, event: &Event) -> EventLogResult<u64> {
-        let payload_bytes = event.payload.to_bytes();
+        // Compress payload if it exceeds the threshold (typically ~3x savings on text)
+        let (mut payload_bytes, compressed) = event.payload.to_bytes_compressed();
         let mut header = event.header.clone();
+
+        // Set compressed flag if payload was compressed
+        if compressed {
+            header.flags |= crate::event::FLAG_COMPRESSED;
+        }
 
         // Assign sequence number
         let sequence = self.header().head_sequence() + 1;
         header.sequence = sequence;
 
-        // Recalculate checksum with new sequence
+        // Encrypt payload if crypto context is configured.
+        // Order: serialize → compress → encrypt (write path)
+        // Reader reverses: decrypt → decompress → deserialize
+        if let Some(crypto) = &self.crypto {
+            payload_bytes = crypto
+                .encrypt_payload(&payload_bytes, sequence, header.event_type)
+                .map_err(|e| EventLogError::Encryption(e.to_string()))?;
+            header.flags |= FLAG_ENCRYPTED;
+        }
+
+        header.payload_len = payload_bytes.len() as u16;
+
+        // Recalculate checksum with final payload (compressed+encrypted)
         header.checksum = header.calculate_checksum(&payload_bytes);
 
         let header_bytes = header.to_bytes();
@@ -325,9 +362,45 @@ impl EventLogWriter {
         Ok(sequence)
     }
 
-    /// Append raw event bytes (for efficiency when forwarding from outbox)
+    /// Append raw event bytes (for efficiency when forwarding from outbox).
+    ///
+    /// If encryption is enabled and the event is NOT already encrypted (checked
+    /// via FLAG_ENCRYPTED in the header flags), the payload will be encrypted
+    /// in-flight. Already-encrypted events (e.g., during compaction passthrough)
+    /// are written as-is to avoid double-encryption.
     pub fn append_raw(&mut self, header_bytes: &[u8; 64], payload_bytes: &[u8], sequence: u64) -> EventLogResult<u64> {
-        let total_size = 4 + 64 + payload_bytes.len();
+        // Check if event is already encrypted (e.g., compaction passthrough)
+        let existing_flags = u16::from_le_bytes([header_bytes[52], header_bytes[53]]);
+        let already_encrypted = existing_flags & FLAG_ENCRYPTED != 0;
+
+        // Encrypt payload if crypto is configured and event is not already encrypted
+        let (final_header_bytes, final_payload);
+        if let Some(crypto) = &self.crypto {
+            if !already_encrypted {
+                let event_type = u16::from_le_bytes([header_bytes[48], header_bytes[49]]);
+                let encrypted = crypto
+                    .encrypt_payload(payload_bytes, sequence, event_type)
+                    .map_err(|e| EventLogError::Encryption(e.to_string()))?;
+
+                // Rebuild header with FLAG_ENCRYPTED set + updated payload_len + checksum
+                let mut header = EventHeader::from_bytes(header_bytes);
+                header.flags |= FLAG_ENCRYPTED;
+                header.payload_len = encrypted.len() as u16;
+                header.checksum = header.calculate_checksum(&encrypted);
+                final_header_bytes = header.to_bytes();
+                final_payload = encrypted;
+            } else {
+                // Already encrypted — passthrough (compaction)
+                final_header_bytes = *header_bytes;
+                final_payload = payload_bytes.to_vec();
+            }
+        } else {
+            // No encryption configured — passthrough
+            final_header_bytes = *header_bytes;
+            final_payload = payload_bytes.to_vec();
+        }
+
+        let total_size = 4 + 64 + final_payload.len();
         let current_offset = self.header().head_offset() as usize;
 
         // Check if we need to grow the file
@@ -343,15 +416,15 @@ impl EventLogWriter {
         }
 
         // Write length prefix
-        let len_bytes = ((64 + payload_bytes.len()) as u32).to_le_bytes();
+        let len_bytes = ((64 + final_payload.len()) as u32).to_le_bytes();
         self.mmap[current_offset..current_offset + 4].copy_from_slice(&len_bytes);
 
-        // Write header (with sequence already set)
-        self.mmap[current_offset + 4..current_offset + 68].copy_from_slice(header_bytes);
+        // Write header
+        self.mmap[current_offset + 4..current_offset + 68].copy_from_slice(&final_header_bytes);
 
         // Write payload
-        self.mmap[current_offset + 68..current_offset + 68 + payload_bytes.len()]
-            .copy_from_slice(payload_bytes);
+        self.mmap[current_offset + 68..current_offset + 68 + final_payload.len()]
+            .copy_from_slice(&final_payload);
 
         // Update header atomically
         let header_ref = self.header();
@@ -426,6 +499,60 @@ impl EventLogWriter {
     pub fn used_space(&self) -> usize {
         self.header().head_offset() as usize
     }
+
+    /// Open or create an event log at a specific file path.
+    /// Used for compaction temp files where the standard path derivation doesn't apply.
+    pub fn open_at_path(path: &Path, initial_size: usize) -> EventLogResult<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        let needs_init = !path.exists()
+            || std::fs::metadata(path).map(|m| m.len() == 0).unwrap_or(true);
+
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .open(path)?;
+
+        let file_size = if needs_init {
+            file.set_len(initial_size as u64)?;
+            initial_size
+        } else {
+            file.metadata()?.len() as usize
+        };
+
+        let mmap = unsafe { MmapMut::map_mut(&file)? };
+
+        if needs_init {
+            let header = unsafe { &mut *(mmap.as_ptr() as *mut EventLogHeader as *mut EventLogHeader) };
+            header.magic = EVENT_LOG_MAGIC;
+            header.version = EVENT_LOG_VERSION;
+            header.flags = AtomicU32::new(0);
+            header.head_sequence = AtomicU64::new(0);
+            header.head_offset = AtomicU64::new(EVENT_LOG_HEADER_SIZE as u64);
+            header.event_count = AtomicU64::new(0);
+            header.created_at = crate::store::now_millis();
+            header.last_write_at = AtomicU64::new(0);
+            header.checkpoints = [Checkpoint::default(); NUM_CHECKPOINTS];
+        } else {
+            let header = unsafe { &*(mmap.as_ptr() as *const EventLogHeader) };
+            if !header.is_valid() {
+                return Err(EventLogError::InvalidMagic);
+            }
+        }
+
+        Ok(Self {
+            mmap,
+            file,
+            path: path.to_path_buf(),
+            file_size,
+            next_checkpoint_idx: 0,
+            crypto: None,
+        })
+    }
+
 }
 
 /// Event Log Reader (used by AIs to read events)
@@ -436,6 +563,9 @@ pub struct EventLogReader {
     position: usize,
     /// Last sequence number read
     last_sequence: u64,
+    /// Optional decryption context. When set, encrypted event payloads
+    /// (FLAG_ENCRYPTED) are decrypted before deserialization.
+    crypto: Option<Arc<TeamEngramCrypto>>,
 }
 
 impl EventLogReader {
@@ -460,7 +590,15 @@ impl EventLogReader {
             path,
             position: EVENT_LOG_HEADER_SIZE,
             last_sequence: 0,
+            crypto: None,
         })
+    }
+
+    /// Set the decryption context for this reader.
+    /// When set, encrypted event payloads (FLAG_ENCRYPTED) are decrypted
+    /// transparently during `try_read()`.
+    pub fn set_crypto(&mut self, crypto: Arc<TeamEngramCrypto>) {
+        self.crypto = Some(crypto);
     }
 
     /// Get the header
@@ -498,7 +636,11 @@ impl EventLogReader {
         Ok(())
     }
 
-    /// Try to read the next event
+    /// Try to read the next event.
+    ///
+    /// If the event payload is encrypted (FLAG_ENCRYPTED), it is decrypted
+    /// transparently before decompression and deserialization.
+    /// Read order: decrypt → decompress → deserialize (reverse of write order).
     pub fn try_read(&mut self) -> EventLogResult<Option<Event>> {
         let raw = match self.try_read_raw()? {
             Some(r) => r,
@@ -515,9 +657,29 @@ impl EventLogReader {
         let header_bytes: [u8; 64] = raw[..64].try_into().unwrap();
         let header = EventHeader::from_bytes(&header_bytes);
 
-        // Parse payload
         let payload_bytes = &raw[64..];
-        match EventPayload::from_bytes(payload_bytes) {
+
+        // Decrypt if FLAG_ENCRYPTED is set (before decompression)
+        let decrypted;
+        let final_payload = if header.flags & FLAG_ENCRYPTED != 0 {
+            if let Some(crypto) = &self.crypto {
+                decrypted = crypto
+                    .decrypt_payload(payload_bytes, header.sequence, header.event_type)
+                    .map_err(|e| EventLogError::Encryption(
+                        format!("Decryption failed for seq {}: {}", header.sequence, e)
+                    ))?;
+                &decrypted
+            } else {
+                return Err(EventLogError::NoDecryptionKey);
+            }
+        } else {
+            payload_bytes
+        };
+
+        // Decompress + deserialize (from_bytes_with_flags handles FLAG_COMPRESSED)
+        // Note: header.flags still has FLAG_ENCRYPTED set, but from_bytes_with_flags
+        // only checks FLAG_COMPRESSED — the encrypted bit is safely ignored.
+        match EventPayload::from_bytes_with_flags(final_payload, header.flags) {
             Some(payload) => Ok(Some(Event { header, payload })),
             None => Err(EventLogError::Deserialization(
                 "Failed to deserialize event payload".to_string()
@@ -600,17 +762,241 @@ impl EventLogReader {
         self.mmap = unsafe { memmap2::Mmap::map(&file)? };
         Ok(())
     }
+
+    /// Open an existing event log at a specific file path.
+    pub fn open_at_path(path: &Path) -> EventLogResult<Self> {
+        let file = OpenOptions::new()
+            .read(true)
+            .open(path)?;
+
+        let mmap = unsafe { memmap2::Mmap::map(&file)? };
+
+        let header = unsafe { &*(mmap.as_ptr() as *const EventLogHeader) };
+        if !header.is_valid() {
+            return Err(EventLogError::InvalidMagic);
+        }
+
+        Ok(Self {
+            mmap,
+            path: path.to_path_buf(),
+            position: EVENT_LOG_HEADER_SIZE,
+            last_sequence: 0,
+            crypto: None,
+        })
+    }
+}
+
+// ─── COMPACTION ─────────────────────────────────────────────────────────────
+
+/// Retention policy for event log compaction.
+/// Ephemeral events older than their retention period are removed.
+/// Non-ephemeral events (DMs, dialogues, tasks, etc.) are always kept.
+pub struct CompactionPolicy {
+    /// Max age for PRESENCE_UPDATE events (hours). Default: 24.
+    pub presence_hours: u64,
+    /// Max age for DM_READ events (hours). Default: 168 (7 days).
+    pub dm_read_hours: u64,
+    /// Max age for ROOM_JOIN/LEAVE/MUTE events (hours). Default: 168.
+    pub room_ephemeral_hours: u64,
+    /// Max age for FILE_ACTION events (hours). Default: 168.
+    pub file_action_hours: u64,
+}
+
+impl Default for CompactionPolicy {
+    fn default() -> Self {
+        Self {
+            presence_hours: 24,
+            dm_read_hours: 168,
+            room_ephemeral_hours: 168,
+            file_action_hours: 168,
+        }
+    }
+}
+
+/// Statistics from a compaction run.
+pub struct CompactionStats {
+    pub events_kept: u64,
+    pub events_removed: u64,
+    /// Used bytes in original log (not file size).
+    pub bytes_before: u64,
+    /// Used bytes in compacted log (not file size).
+    pub bytes_after: u64,
+}
+
+/// Get maximum retention hours for an event type.
+/// Returns u64::MAX for non-ephemeral types (always kept).
+fn retention_hours_for(evt_type: u16, policy: &CompactionPolicy) -> u64 {
+    use crate::event::event_type as et;
+    match evt_type {
+        et::PRESENCE_UPDATE => policy.presence_hours,
+        et::DM_READ => policy.dm_read_hours,
+        et::ROOM_JOIN | et::ROOM_LEAVE | et::ROOM_MUTE => policy.room_ephemeral_hours,
+        et::FILE_ACTION => policy.file_action_hours,
+        // Deprecated — always remove
+        et::LOCK_ACQUIRE | et::LOCK_RELEASE | et::PHEROMONE_DEPOSIT => 0,
+        // Everything else: keep forever
+        _ => u64::MAX,
+    }
+}
+
+/// Find the minimum cursor across all AI view engines.
+/// Returns u64::MAX if no cursors exist (safe default: all events kept).
+fn find_min_cursor(base_dir: &Path) -> EventLogResult<u64> {
+    let view_dir = base_dir.join("views");
+
+    if !view_dir.exists() {
+        return Ok(u64::MAX);
+    }
+
+    let mut min_cursor = u64::MAX;
+
+    for entry in std::fs::read_dir(&view_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("cursor") {
+            if let Ok(bytes) = std::fs::read(&path) {
+                if bytes.len() == 8 {
+                    let cursor = u64::from_le_bytes(bytes.try_into().unwrap());
+                    if cursor < min_cursor {
+                        min_cursor = cursor;
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(min_cursor)
+}
+
+/// Compact the event log, removing expired ephemeral events.
+///
+/// **Stop-the-world**: the caller must ensure no writer is active during
+/// compaction (the sequencer should be paused).
+///
+/// Algorithm:
+/// 1. Find minimum cursor across all AI views
+/// 2. Read all events from current log
+/// 3. Write survivors to temp file (preserving original sequence numbers)
+/// 4. Atomic swap: rename temp → main
+///
+/// Safety: events at or above min_cursor are always kept regardless of type
+/// or age. Only ephemeral events below min_cursor AND older than their
+/// retention period are removed.
+pub fn compact_event_log(base_dir: &Path, policy: &CompactionPolicy) -> EventLogResult<CompactionStats> {
+    let log_path = event_log_path(Some(base_dir));
+    if !log_path.exists() {
+        return Ok(CompactionStats {
+            events_kept: 0,
+            events_removed: 0,
+            bytes_before: 0,
+            bytes_after: 0,
+        });
+    }
+
+    let min_cursor = find_min_cursor(base_dir)?;
+
+    // No cursors = no AI has synced yet. Cannot safely compact anything
+    // because a new AI could start and need the full event history.
+    if min_cursor == u64::MAX {
+        let reader = EventLogReader::open_at_path(&log_path)?;
+        let used = reader.header().head_offset();
+        return Ok(CompactionStats {
+            events_kept: reader.event_count(),
+            events_removed: 0,
+            bytes_before: used,
+            bytes_after: used,
+        });
+    }
+
+    let now_micros = crate::store::now_millis() * 1000;
+
+    // Open reader on current log
+    let mut reader = EventLogReader::open_at_path(&log_path)?;
+    let bytes_before = reader.header().head_offset();
+
+    // Create temp file for compacted log
+    let temp_path = log_path.with_extension("compact.tmp");
+    let mut writer = EventLogWriter::open_at_path(&temp_path, DEFAULT_INITIAL_SIZE)?;
+
+    let mut events_kept = 0u64;
+    let mut events_removed = 0u64;
+
+    loop {
+        let raw = match reader.try_read_raw()? {
+            Some(r) => r,
+            None => break,
+        };
+
+        if raw.len() < 64 {
+            continue; // skip corrupted
+        }
+
+        // Parse header fields from raw bytes (no full deserialization)
+        let sequence = u64::from_le_bytes(raw[0..8].try_into().unwrap());
+        let timestamp_micros = u64::from_le_bytes(raw[8..16].try_into().unwrap());
+        let evt_type = u16::from_le_bytes(raw[48..50].try_into().unwrap());
+
+        // Safety: NEVER remove events at or above min_cursor
+        let should_keep = if sequence >= min_cursor {
+            true
+        } else {
+            let max_age = retention_hours_for(evt_type, policy);
+            if max_age == u64::MAX {
+                true // non-ephemeral, always keep
+            } else if max_age == 0 {
+                false // deprecated, always remove
+            } else {
+                let age_hours = if now_micros > timestamp_micros {
+                    (now_micros - timestamp_micros) / 3_600_000_000
+                } else {
+                    0 // future timestamp, keep
+                };
+                age_hours < max_age
+            }
+        };
+
+        if should_keep {
+            let header_bytes: [u8; 64] = raw[..64].try_into().unwrap();
+            let payload_bytes = &raw[64..];
+            writer.append_raw(&header_bytes, payload_bytes, sequence)?;
+            events_kept += 1;
+        } else {
+            events_removed += 1;
+        }
+    }
+
+    let bytes_after = writer.used_space() as u64;
+    writer.sync()?;
+    drop(writer);
+    drop(reader);
+
+    // Atomic swap with rollback on failure
+    let backup_path = log_path.with_extension("compact.bak");
+    std::fs::rename(&log_path, &backup_path)?;
+    if let Err(e) = std::fs::rename(&temp_path, &log_path) {
+        // Rollback: restore backup — log failure but still return the original error
+        if let Err(rb_err) = std::fs::rename(&backup_path, &log_path) {
+            eprintln!("[COMPACTION] CRITICAL: rollback rename also failed: {}. Backup at {:?}", rb_err, backup_path);
+        }
+        return Err(EventLogError::Io(e));
+    }
+    if let Err(e) = std::fs::remove_file(&backup_path) {
+        eprintln!("[COMPACTION] Failed to remove backup file {:?}: {}", backup_path, e);
+    }
+
+    Ok(CompactionStats {
+        events_kept,
+        events_removed,
+        bytes_before,
+        bytes_after,
+    })
 }
 
 /// Get the event log file path
 pub fn event_log_path(base_dir: Option<&Path>) -> PathBuf {
     let base = base_dir
         .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| {
-            dirs::data_local_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".ai-foundation")
-        });
+        .unwrap_or_else(|| crate::store::ai_foundation_base_dir());
 
     base.join("shared").join("events").join("master.eventlog")
 }
@@ -645,11 +1031,11 @@ mod tests {
         // Write events
         let mut writer = EventLogWriter::open(Some(base)).unwrap();
 
-        let event1 = Event::broadcast("ai-1", "general", "Hello!");
+        let event1 = Event::broadcast("beta-002", "general", "Hello!");
         let seq1 = writer.append(&event1).unwrap();
         assert_eq!(seq1, 1);
 
-        let event2 = Event::broadcast("ai-2", "general", "Hi there!");
+        let event2 = Event::broadcast("alpha-001", "general", "Hi there!");
         let seq2 = writer.append(&event2).unwrap();
         assert_eq!(seq2, 2);
 
@@ -726,5 +1112,429 @@ mod tests {
     fn test_event_log_header_size() {
         // Verify header fits in 4KB
         assert!(std::mem::size_of::<EventLogHeader>() <= EVENT_LOG_HEADER_SIZE);
+    }
+
+    #[test]
+    fn test_append_raw_preserves_sequence() {
+        let tmp = TempDir::new().unwrap();
+
+        // Write events to source log
+        let src_path = tmp.path().join("source.eventlog");
+        let mut writer = EventLogWriter::open_at_path(&src_path, 1024 * 1024).unwrap();
+
+        let e1 = Event::broadcast("ai-1", "general", "Hello");
+        let e2 = Event::broadcast("ai-2", "general", "World");
+        let seq1 = writer.append(&e1).unwrap();
+        let seq2 = writer.append(&e2).unwrap();
+        writer.sync().unwrap();
+        drop(writer);
+
+        // Read raw and write to dest log
+        let mut reader = EventLogReader::open_at_path(&src_path).unwrap();
+        let dest_path = tmp.path().join("dest.eventlog");
+        let mut dest = EventLogWriter::open_at_path(&dest_path, 1024 * 1024).unwrap();
+
+        let raw1 = reader.try_read_raw().unwrap().unwrap();
+        let raw2 = reader.try_read_raw().unwrap().unwrap();
+        let h1: [u8; 64] = raw1[..64].try_into().unwrap();
+        let h2: [u8; 64] = raw2[..64].try_into().unwrap();
+        let wrote1 = dest.append_raw(&h1, &raw1[64..], seq1).unwrap();
+        let wrote2 = dest.append_raw(&h2, &raw2[64..], seq2).unwrap();
+        dest.sync().unwrap();
+
+        // Sequences must be preserved
+        assert_eq!(wrote1, seq1);
+        assert_eq!(wrote2, seq2);
+        assert_eq!(dest.event_count(), 2);
+        drop(dest);
+
+        // Verify we can read them back with correct sequences
+        let mut check = EventLogReader::open_at_path(&dest_path).unwrap();
+        let r1 = check.try_read().unwrap().unwrap();
+        let r2 = check.try_read().unwrap().unwrap();
+        assert_eq!(r1.header.sequence, seq1);
+        assert_eq!(r2.header.sequence, seq2);
+        assert_eq!(r1.header.event_type, event_type::BROADCAST);
+    }
+
+    #[test]
+    fn test_compact_removes_old_presence() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        // Write a mix of events: 5 presence + 5 broadcasts
+        let mut writer = EventLogWriter::open(Some(base)).unwrap();
+        for i in 0..10 {
+            let event = if i % 2 == 0 {
+                Event::presence_update("ai-1", "online", Some("working"))
+            } else {
+                Event::broadcast("ai-1", "general", &format!("msg {}", i))
+            };
+            writer.append(&event).unwrap();
+        }
+        writer.sync().unwrap();
+        assert_eq!(writer.event_count(), 10);
+        drop(writer);
+
+        // Create a cursor file showing all events processed
+        let view_dir = base.join("views");
+        std::fs::create_dir_all(&view_dir).unwrap();
+        std::fs::write(view_dir.join("ai-1.cursor"), &10u64.to_le_bytes()).unwrap();
+
+        // Compact with 0-hour presence retention (remove all old presence)
+        let policy = CompactionPolicy {
+            presence_hours: 0,
+            ..Default::default()
+        };
+        let stats = compact_event_log(base, &policy).unwrap();
+
+        // 5 presence events removed, 5 broadcasts kept
+        assert_eq!(stats.events_removed, 5);
+        assert_eq!(stats.events_kept, 5);
+        assert!(stats.bytes_after < stats.bytes_before);
+
+        // Verify compacted log has only broadcasts
+        let mut reader = EventLogReader::open(Some(base)).unwrap();
+        let mut count = 0;
+        while let Some(event) = reader.try_read().unwrap() {
+            assert_eq!(event.header.event_type, event_type::BROADCAST);
+            count += 1;
+        }
+        assert_eq!(count, 5);
+    }
+
+    #[test]
+    fn test_compact_keeps_events_above_min_cursor() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        // Write 10 presence events
+        let mut writer = EventLogWriter::open(Some(base)).unwrap();
+        for _ in 0..10 {
+            let event = Event::presence_update("ai-1", "online", None);
+            writer.append(&event).unwrap();
+        }
+        writer.sync().unwrap();
+        drop(writer);
+
+        // Cursor at sequence 5 — events 6-10 must be kept even if ephemeral
+        let view_dir = base.join("views");
+        std::fs::create_dir_all(&view_dir).unwrap();
+        std::fs::write(view_dir.join("ai-1.cursor"), &5u64.to_le_bytes()).unwrap();
+
+        let policy = CompactionPolicy {
+            presence_hours: 0,
+            ..Default::default()
+        };
+        let stats = compact_event_log(base, &policy).unwrap();
+
+        // Events 1-4 removed (below cursor, ephemeral, expired)
+        // Event 5 kept (== min_cursor)
+        // Events 6-10 kept (above min_cursor)
+        assert_eq!(stats.events_removed, 4);
+        assert_eq!(stats.events_kept, 6);
+    }
+
+    #[test]
+    fn test_compact_no_cursors_keeps_everything() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        // Write 5 presence events
+        let mut writer = EventLogWriter::open(Some(base)).unwrap();
+        for _ in 0..5 {
+            writer.append(&Event::presence_update("ai-1", "idle", None)).unwrap();
+        }
+        writer.sync().unwrap();
+        drop(writer);
+
+        // No cursor files — min_cursor = u64::MAX, everything kept
+        let policy = CompactionPolicy { presence_hours: 0, ..Default::default() };
+        let stats = compact_event_log(base, &policy).unwrap();
+
+        assert_eq!(stats.events_removed, 0);
+        assert_eq!(stats.events_kept, 5);
+    }
+
+    #[test]
+    fn test_compact_deprecated_always_removed() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        let mut writer = EventLogWriter::open(Some(base)).unwrap();
+
+        // Write a broadcast (kept) and a DM (kept)
+        writer.append(&Event::broadcast("ai-1", "general", "keep me")).unwrap();
+        writer.append(&Event::direct_message("ai-1", "ai-2", "keep me too")).unwrap();
+
+        // Write a lock acquire event (deprecated — construct manually)
+        let lock_event = Event::new("ai-1", EventPayload::LockAcquire(
+            crate::event::LockAcquirePayload {
+                resource: "/tmp/test".to_string(),
+                duration_seconds: 60,
+                reason: "test".to_string(),
+            }
+        ));
+        writer.append(&lock_event).unwrap();
+
+        writer.sync().unwrap();
+        drop(writer);
+
+        // Cursor past all events
+        let view_dir = base.join("views");
+        std::fs::create_dir_all(&view_dir).unwrap();
+        std::fs::write(view_dir.join("ai-1.cursor"), &10u64.to_le_bytes()).unwrap();
+
+        let stats = compact_event_log(base, &CompactionPolicy::default()).unwrap();
+
+        // Lock event removed (deprecated), broadcast + DM kept
+        assert_eq!(stats.events_removed, 1);
+        assert_eq!(stats.events_kept, 2);
+    }
+
+    // ── Encryption at rest tests ─────────────────────────────────────────
+
+    fn test_crypto() -> Arc<TeamEngramCrypto> {
+        let mut key = [0u8; 32];
+        for (i, b) in key.iter_mut().enumerate() {
+            *b = i as u8;
+        }
+        Arc::new(TeamEngramCrypto::new(&key))
+    }
+
+    #[test]
+    fn test_encrypted_write_read_round_trip() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+        let crypto = test_crypto();
+
+        // Write encrypted events
+        let mut writer = EventLogWriter::open(Some(base)).unwrap();
+        writer.set_crypto(crypto.clone());
+
+        let event1 = Event::broadcast("ai-1", "general", "Encrypted hello!");
+        let event2 = Event::direct_message("ai-1", "ai-2", "Secret message");
+        let seq1 = writer.append(&event1).unwrap();
+        let seq2 = writer.append(&event2).unwrap();
+        assert_eq!(seq1, 1);
+        assert_eq!(seq2, 2);
+        writer.sync().unwrap();
+        drop(writer);
+
+        // Read with crypto — should decrypt transparently
+        let mut reader = EventLogReader::open(Some(base)).unwrap();
+        reader.set_crypto(crypto);
+
+        let read1 = reader.try_read().unwrap().unwrap();
+        assert_eq!(read1.header.sequence, 1);
+        assert_eq!(read1.header.event_type, event_type::BROADCAST);
+        assert!(read1.header.flags & FLAG_ENCRYPTED != 0);
+
+        let read2 = reader.try_read().unwrap().unwrap();
+        assert_eq!(read2.header.sequence, 2);
+        assert_eq!(read2.header.event_type, event_type::DIRECT_MESSAGE);
+    }
+
+    #[test]
+    fn test_encrypted_read_without_key_fails() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+        let crypto = test_crypto();
+
+        // Write encrypted
+        let mut writer = EventLogWriter::open(Some(base)).unwrap();
+        writer.set_crypto(crypto);
+        writer.append(&Event::broadcast("ai-1", "general", "secret")).unwrap();
+        writer.sync().unwrap();
+        drop(writer);
+
+        // Read WITHOUT crypto — should fail with NoDecryptionKey
+        let mut reader = EventLogReader::open(Some(base)).unwrap();
+        let result = reader.try_read();
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(err_msg.contains("no decryption key") || err_msg.contains("Decryption"));
+    }
+
+    #[test]
+    fn test_encrypted_read_wrong_key_fails() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+        let crypto = test_crypto();
+
+        // Write encrypted
+        let mut writer = EventLogWriter::open(Some(base)).unwrap();
+        writer.set_crypto(crypto);
+        writer.append(&Event::broadcast("ai-1", "general", "secret")).unwrap();
+        writer.sync().unwrap();
+        drop(writer);
+
+        // Read with wrong key — GCM auth should fail
+        let mut wrong_key = [0u8; 32];
+        wrong_key[0] = 0xFF;
+        let wrong_crypto = Arc::new(TeamEngramCrypto::new(&wrong_key));
+        let mut reader = EventLogReader::open(Some(base)).unwrap();
+        reader.set_crypto(wrong_crypto);
+        let result = reader.try_read();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_unencrypted_readable_without_key() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        // Write WITHOUT encryption
+        let mut writer = EventLogWriter::open(Some(base)).unwrap();
+        writer.append(&Event::broadcast("ai-1", "general", "plaintext")).unwrap();
+        writer.sync().unwrap();
+        drop(writer);
+
+        // Read without crypto — should work fine (backward compat)
+        let mut reader = EventLogReader::open(Some(base)).unwrap();
+        let event = reader.try_read().unwrap().unwrap();
+        assert_eq!(event.header.sequence, 1);
+        assert_eq!(event.header.flags & FLAG_ENCRYPTED, 0);
+    }
+
+    #[test]
+    fn test_mixed_encrypted_unencrypted_events() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+        let crypto = test_crypto();
+
+        // Write 2 unencrypted events
+        let mut writer = EventLogWriter::open(Some(base)).unwrap();
+        writer.append(&Event::broadcast("ai-1", "general", "plain 1")).unwrap();
+        writer.append(&Event::broadcast("ai-1", "general", "plain 2")).unwrap();
+
+        // Enable encryption mid-stream, write 2 more
+        writer.set_crypto(crypto.clone());
+        writer.append(&Event::broadcast("ai-1", "general", "encrypted 3")).unwrap();
+        writer.append(&Event::broadcast("ai-1", "general", "encrypted 4")).unwrap();
+        writer.sync().unwrap();
+        drop(writer);
+
+        // Read all 4 with crypto — should handle both transparently
+        let mut reader = EventLogReader::open(Some(base)).unwrap();
+        reader.set_crypto(crypto);
+
+        let e1 = reader.try_read().unwrap().unwrap();
+        assert_eq!(e1.header.flags & FLAG_ENCRYPTED, 0); // plain
+
+        let e2 = reader.try_read().unwrap().unwrap();
+        assert_eq!(e2.header.flags & FLAG_ENCRYPTED, 0); // plain
+
+        let e3 = reader.try_read().unwrap().unwrap();
+        assert!(e3.header.flags & FLAG_ENCRYPTED != 0); // encrypted
+
+        let e4 = reader.try_read().unwrap().unwrap();
+        assert!(e4.header.flags & FLAG_ENCRYPTED != 0); // encrypted
+
+        assert!(!reader.has_more());
+    }
+
+    #[test]
+    fn test_append_raw_encrypts_fresh_payload() {
+        let tmp = TempDir::new().unwrap();
+        let crypto = test_crypto();
+
+        // Write unencrypted to source
+        let src_path = tmp.path().join("src.eventlog");
+        let mut src_writer = EventLogWriter::open_at_path(&src_path, 1024 * 1024).unwrap();
+        let event = Event::broadcast("ai-1", "general", "hello raw");
+        src_writer.append(&event).unwrap();
+        src_writer.sync().unwrap();
+        drop(src_writer);
+
+        // Read raw, then write to encrypted dest via append_raw
+        let mut reader = EventLogReader::open_at_path(&src_path).unwrap();
+        let raw = reader.try_read_raw().unwrap().unwrap();
+        let h: [u8; 64] = raw[..64].try_into().unwrap();
+        let payload = &raw[64..];
+
+        // Verify source is NOT encrypted
+        let src_flags = u16::from_le_bytes([h[52], h[53]]);
+        assert_eq!(src_flags & FLAG_ENCRYPTED, 0);
+
+        let dest_path = tmp.path().join("dest.eventlog");
+        let mut dest_writer = EventLogWriter::open_at_path(&dest_path, 1024 * 1024).unwrap();
+        dest_writer.set_crypto(crypto.clone());
+        dest_writer.append_raw(&h, payload, 1).unwrap();
+        dest_writer.sync().unwrap();
+        drop(dest_writer);
+
+        // Read dest with crypto — should decrypt successfully
+        let mut dest_reader = EventLogReader::open_at_path(&dest_path).unwrap();
+        dest_reader.set_crypto(crypto);
+        let decrypted = dest_reader.try_read().unwrap().unwrap();
+        assert_eq!(decrypted.header.event_type, event_type::BROADCAST);
+        assert!(decrypted.header.flags & FLAG_ENCRYPTED != 0);
+    }
+
+    #[test]
+    fn test_append_raw_passthrough_already_encrypted() {
+        let tmp = TempDir::new().unwrap();
+        let crypto = test_crypto();
+
+        // Write encrypted to source
+        let src_path = tmp.path().join("src.eventlog");
+        let mut src_writer = EventLogWriter::open_at_path(&src_path, 1024 * 1024).unwrap();
+        src_writer.set_crypto(crypto.clone());
+        src_writer.append(&Event::broadcast("ai-1", "general", "already encrypted")).unwrap();
+        src_writer.sync().unwrap();
+        drop(src_writer);
+
+        // Read raw (encrypted bytes)
+        let mut reader = EventLogReader::open_at_path(&src_path).unwrap();
+        let raw = reader.try_read_raw().unwrap().unwrap();
+        let h: [u8; 64] = raw[..64].try_into().unwrap();
+        let payload = &raw[64..];
+
+        // Verify source IS encrypted
+        let src_flags = u16::from_le_bytes([h[52], h[53]]);
+        assert!(src_flags & FLAG_ENCRYPTED != 0);
+
+        // Write to dest (also with crypto) — should NOT double-encrypt
+        let dest_path = tmp.path().join("dest.eventlog");
+        let mut dest_writer = EventLogWriter::open_at_path(&dest_path, 1024 * 1024).unwrap();
+        dest_writer.set_crypto(crypto.clone());
+        dest_writer.append_raw(&h, payload, 1).unwrap();
+        dest_writer.sync().unwrap();
+        drop(dest_writer);
+
+        // Read with crypto — if double-encrypted, this would fail
+        let mut dest_reader = EventLogReader::open_at_path(&dest_path).unwrap();
+        dest_reader.set_crypto(crypto);
+        let event = dest_reader.try_read().unwrap().unwrap();
+        assert_eq!(event.header.event_type, event_type::BROADCAST);
+    }
+
+    #[test]
+    fn test_encrypted_many_events() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+        let crypto = test_crypto();
+
+        let mut writer = EventLogWriter::open(Some(base)).unwrap();
+        writer.set_crypto(crypto.clone());
+
+        for i in 1..=50 {
+            let event = Event::broadcast("test-ai", "general", &format!("Encrypted msg {}", i));
+            let seq = writer.append(&event).unwrap();
+            assert_eq!(seq, i);
+        }
+        writer.sync().unwrap();
+        drop(writer);
+
+        let mut reader = EventLogReader::open(Some(base)).unwrap();
+        reader.set_crypto(crypto);
+        let mut count = 0u64;
+        while let Some(event) = reader.try_read().unwrap() {
+            count += 1;
+            assert_eq!(event.header.sequence, count);
+            assert!(event.header.flags & FLAG_ENCRYPTED != 0);
+        }
+        assert_eq!(count, 50);
     }
 }

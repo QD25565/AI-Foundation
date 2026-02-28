@@ -89,7 +89,8 @@ pub struct DialogueMessage {
 pub struct DialogueState {
     pub id: u64,
     pub initiator: String,
-    pub responder: String,
+    pub responder: String,     // First non-initiator (kept for display/compat)
+    pub participants: Vec<String>,  // Full ordered list; round-robin turn order
     pub topic: String,
     pub status: String,        // "active", "resolved", "abandoned", "merged:XXXX"
     pub current_turn: String,  // AI who should respond next
@@ -141,6 +142,7 @@ pub struct BatchState {
 pub struct FileClaimState {
     pub path: String,
     pub holder: String,
+    pub working_on: String,
     pub duration_seconds: u32,
     pub claimed_at: u64,       // Timestamp in microseconds
 }
@@ -155,8 +157,8 @@ pub struct PresenceState {
     pub last_presence_update: u64,  // Last PRESENCE_UPDATE event
 }
 
-// LockState removed — locks deprecated (Feb 2026, architecture decision)
-// PheromoneState removed — stigmergy deprecated (Feb 2026, architecture decision)
+// LockState removed — locks deprecated (Feb 2026, QD directive)
+// PheromoneState removed — stigmergy deprecated (Feb 2026, QD directive)
 
 /// Cached file action
 #[derive(Debug, Clone)]
@@ -166,6 +168,30 @@ pub struct FileActionState {
     pub path: String,
     pub action: String,
     pub timestamp: u64,
+}
+
+/// Cached project state
+#[derive(Debug, Clone)]
+pub struct ProjectState {
+    pub id: u64,            // Canonical ID = event timestamp
+    pub name: String,
+    pub goal: String,
+    pub root_directory: String,
+    pub status: String,     // "active", "archived"
+    pub is_deleted: bool,
+    pub created_at: u64,
+}
+
+/// Cached feature state
+#[derive(Debug, Clone)]
+pub struct FeatureState {
+    pub id: u64,            // Canonical ID = event timestamp
+    pub project_id: u64,   // Canonical project ID (timestamp)
+    pub name: String,
+    pub overview: String,
+    pub directory: Option<String>,
+    pub is_deleted: bool,
+    pub created_at: u64,
 }
 
 /// Cached room state
@@ -178,30 +204,9 @@ pub struct RoomState {
     pub messages: VecDeque<(u64, String, String, u64)>,  // (seq, from_ai, content, timestamp)
     pub created_at: u64,
     pub is_closed: bool,
-}
-
-/// Cached project state
-#[derive(Debug, Clone)]
-pub struct ProjectState {
-    pub id: u64,
-    pub name: String,
-    pub goal: String,
-    pub root_directory: String,
-    pub status: String,
-    pub is_deleted: bool,
-    pub created_at: u64,
-}
-
-/// Cached feature state
-#[derive(Debug, Clone)]
-pub struct FeatureState {
-    pub id: u64,
-    pub project_id: u64,
-    pub name: String,
-    pub overview: String,
-    pub directory: Option<String>,
-    pub is_deleted: bool,
-    pub created_at: u64,
+    pub mutes: HashMap<String, u64>,       // ai_id → expires_at_millis (lazy expiry)
+    pub conclusion: Option<String>,
+    pub pinned_messages: Vec<u64>,         // room message seq IDs (room-native only)
 }
 
 // ============== END CACHE STRUCTS ==============
@@ -296,14 +301,14 @@ pub struct ViewEngine {
     /// Active rooms
     rooms: HashMap<u64, RoomState>,
 
-    /// Per-AI trust scores (TIP aggregation)
-    ai_trust: HashMap<String, TrustScore>,
-
     /// All projects (id -> state)
     projects: HashMap<u64, ProjectState>,
 
     /// All features (id -> state)
     features: HashMap<u64, FeatureState>,
+
+    /// Per-AI trust scores (TIP aggregation)
+    ai_trust: HashMap<String, TrustScore>,
 }
 
 impl ViewEngine {
@@ -336,9 +341,9 @@ impl ViewEngine {
             presences: HashMap::new(),
             file_actions: VecDeque::new(),
             rooms: HashMap::new(),
-            ai_trust: HashMap::new(),
             projects: HashMap::new(),
             features: HashMap::new(),
+            ai_trust: HashMap::new(),
         })
     }
 
@@ -500,8 +505,19 @@ impl ViewEngine {
             // ============== DIALOGUES ==============
             event_type::DIALOGUE_START => {
                 if let EventPayload::DialogueStart(payload) = &event.payload {
+                    // Build ordered participant list: initiator first, then others from payload.
+                    let mut participants: Vec<String> = vec![source_ai.clone()];
+                    for p in &payload.participants {
+                        let p = p.trim();
+                        if !p.is_empty() && p != source_ai.as_str() {
+                            participants.push(p.to_string());
+                        }
+                    }
+                    let first_responder = participants.get(1).cloned()
+                        .unwrap_or_else(|| participants[0].clone());
+
                     // Update stats for dialogues involving this AI
-                    if source_ai == self.ai_id || payload.responder == self.ai_id {
+                    if participants.contains(&self.ai_id) {
                         self.stats.active_dialogues += 1;
                     }
 
@@ -514,13 +530,18 @@ impl ViewEngine {
                         timestamp,
                     });
 
-                    self.dialogues.insert(sequence, DialogueState {
-                        id: sequence,
+                    // Key by timestamp (= ID returned to caller by v2_client.start_dialogue).
+                    // All update events (DIALOGUE_RESPOND, DIALOGUE_END, DIALOGUE_MERGE)
+                    // carry the caller-facing ID which is the creation timestamp, not the
+                    // event log sequence number.
+                    self.dialogues.insert(timestamp, DialogueState {
+                        id: timestamp,
                         initiator: source_ai.clone(),
-                        responder: payload.responder.clone(),
+                        responder: first_responder.clone(),
+                        participants,
                         topic: payload.topic.clone(),
                         status: "active".to_string(),
-                        current_turn: payload.responder.clone(),  // Responder goes first
+                        current_turn: first_responder,  // First non-initiator goes first
                         messages,
                         created_at: timestamp,
                         updated_at: timestamp,
@@ -539,12 +560,12 @@ impl ViewEngine {
                             timestamp,
                         });
 
-                        // Update turn
-                        if source_ai == dialogue.responder {
-                            dialogue.current_turn = dialogue.initiator.clone();
-                        } else {
-                            dialogue.current_turn = dialogue.responder.clone();
-                        }
+                        // Round-robin turn: find current speaker, advance to next
+                        let current_idx = dialogue.participants.iter()
+                            .position(|p| p == &source_ai)
+                            .unwrap_or(0);
+                        let next_idx = (current_idx + 1) % dialogue.participants.len();
+                        dialogue.current_turn = dialogue.participants[next_idx].clone();
                         dialogue.updated_at = timestamp;
                     }
                 }
@@ -587,8 +608,10 @@ impl ViewEngine {
                 if let EventPayload::VoteCreate(payload) = &event.payload {
                     self.stats.pending_votes += 1;
 
-                    self.votes.insert(sequence, VoteState {
-                        id: sequence,
+                    // Key by timestamp — consistent with tasks/rooms/dialogues.
+                    // VOTE_CAST and VOTE_CLOSE payloads carry the caller-facing timestamp ID.
+                    self.votes.insert(timestamp, VoteState {
+                        id: timestamp,
                         creator: source_ai.clone(),
                         topic: payload.topic.clone(),
                         options: payload.options.clone(),
@@ -630,6 +653,7 @@ impl ViewEngine {
                     self.file_claims.insert(payload.path.clone(), FileClaimState {
                         path: payload.path.clone(),
                         holder: source_ai.clone(),
+                        working_on: payload.working_on.clone(),
                         duration_seconds: payload.duration_seconds,
                         claimed_at: timestamp,
                     });
@@ -645,8 +669,10 @@ impl ViewEngine {
             // ============== TASKS ==============
             event_type::TASK_CREATE => {
                 if let EventPayload::TaskCreate(payload) = &event.payload {
-                    self.tasks.insert(sequence, TaskState {
-                        id: sequence,
+                    // Key by timestamp — TASK_CLAIM/START/COMPLETE/BLOCK/UNBLOCK payloads
+                    // all carry the caller-facing timestamp ID, not the event log sequence.
+                    self.tasks.insert(timestamp, TaskState {
+                        id: timestamp,
                         description: payload.description.clone(),
                         priority: payload.priority,
                         status: "pending".to_string(),
@@ -718,9 +744,9 @@ impl ViewEngine {
             // ============== BATCHES ==============
             event_type::BATCH_CREATE => {
                 if let EventPayload::BatchCreate(payload) = &event.payload {
-                    // Parse tasks: "1:desc,2:desc" -> [("1", "desc"), ...]
+                    // Parse tasks: "1:desc|2:desc" -> [("1", "desc"), ...]
                     let tasks: Vec<(String, String)> = payload.tasks
-                        .split(',')
+                        .split('|')
                         .filter_map(|t| {
                             let parts: Vec<&str> = t.splitn(2, ':').collect();
                             if parts.len() == 2 {
@@ -779,14 +805,19 @@ impl ViewEngine {
             // ============== ROOMS ==============
             event_type::ROOM_CREATE => {
                 if let EventPayload::RoomCreate(payload) = &event.payload {
-                    self.rooms.insert(sequence, RoomState {
-                        id: sequence,
+                    // Key by timestamp — all ROOM_* update events carry room_id as a string
+                    // which is the caller-facing timestamp ID from create_room().
+                    self.rooms.insert(timestamp, RoomState {
+                        id: timestamp,
                         name: payload.name.clone(),
                         topic: payload.topic.clone().unwrap_or_default(),
                         members: vec![source_ai.clone()],
                         messages: VecDeque::new(),
                         created_at: timestamp,
                         is_closed: false,
+                        mutes: HashMap::new(),
+                        conclusion: None,
+                        pinned_messages: Vec::new(),
                     });
                 }
             }
@@ -842,6 +873,50 @@ impl ViewEngine {
                 }
             }
 
+            event_type::ROOM_MUTE => {
+                if let EventPayload::RoomMute(payload) = &event.payload {
+                    if let Ok(room_id) = payload.room_id.parse::<u64>() {
+                        if let Some(room) = self.rooms.get_mut(&room_id) {
+                            let expires_at = timestamp / 1000 + (payload.minutes as u64 * 60_000);
+                            room.mutes.insert(payload.target_ai.clone(), expires_at);
+                        }
+                    }
+                }
+            }
+
+            event_type::ROOM_CONCLUDE => {
+                if let EventPayload::RoomConclude(payload) = &event.payload {
+                    if let Ok(room_id) = payload.room_id.parse::<u64>() {
+                        if let Some(room) = self.rooms.get_mut(&room_id) {
+                            room.conclusion = payload.conclusion.clone();
+                            room.is_closed = true;
+                        }
+                    }
+                }
+            }
+
+            event_type::ROOM_PIN_MESSAGE => {
+                if let EventPayload::RoomPinMessage(payload) = &event.payload {
+                    if let Ok(room_id) = payload.room_id.parse::<u64>() {
+                        if let Some(room) = self.rooms.get_mut(&room_id) {
+                            if !room.pinned_messages.contains(&payload.msg_seq_id) {
+                                room.pinned_messages.push(payload.msg_seq_id);
+                            }
+                        }
+                    }
+                }
+            }
+
+            event_type::ROOM_UNPIN_MESSAGE => {
+                if let EventPayload::RoomUnpinMessage(payload) = &event.payload {
+                    if let Ok(room_id) = payload.room_id.parse::<u64>() {
+                        if let Some(room) = self.rooms.get_mut(&room_id) {
+                            room.pinned_messages.retain(|&id| id != payload.msg_seq_id);
+                        }
+                    }
+                }
+            }
+
             // ============== FILE ACTIONS ==============
             event_type::FILE_ACTION => {
                 if let EventPayload::FileAction(payload) = &event.payload {
@@ -862,19 +937,6 @@ impl ViewEngine {
             // Stigmergy deprecated — PHEROMONE_DEPOSIT events ignored (Feb 2026)
             event_type::PHEROMONE_DEPOSIT => {}
 
-            // ============== TRUST ==============
-            event_type::TRUST_RECORD => {
-                if let EventPayload::TrustRecord(payload) = &event.payload {
-                    // Only record trust events where I am the rater
-                    if source_ai == self.ai_id {
-                        let score = self.ai_trust
-                            .entry(payload.target_ai.clone())
-                            .or_default();
-                        score.record(payload.is_success, payload.weight);
-                    }
-                }
-            }
-
             // ============== PROJECTS ==============
             event_type::PROJECT_CREATE => {
                 if let EventPayload::ProjectCreate(payload) = &event.payload {
@@ -889,6 +951,7 @@ impl ViewEngine {
                     });
                 }
             }
+
             event_type::PROJECT_UPDATE => {
                 if let EventPayload::ProjectUpdate(payload) = &event.payload {
                     if let Some(project) = self.projects.get_mut(&payload.project_id) {
@@ -901,6 +964,7 @@ impl ViewEngine {
                     }
                 }
             }
+
             event_type::PROJECT_DELETE => {
                 if let EventPayload::ProjectDelete(payload) = &event.payload {
                     if let Some(project) = self.projects.get_mut(&payload.project_id) {
@@ -908,6 +972,7 @@ impl ViewEngine {
                     }
                 }
             }
+
             event_type::PROJECT_RESTORE => {
                 if let EventPayload::ProjectRestore(payload) = &event.payload {
                     if let Some(project) = self.projects.get_mut(&payload.project_id) {
@@ -915,6 +980,7 @@ impl ViewEngine {
                     }
                 }
             }
+
             // ============== FEATURES ==============
             event_type::FEATURE_CREATE => {
                 if let EventPayload::FeatureCreate(payload) = &event.payload {
@@ -929,6 +995,7 @@ impl ViewEngine {
                     });
                 }
             }
+
             event_type::FEATURE_UPDATE => {
                 if let EventPayload::FeatureUpdate(payload) = &event.payload {
                     if let Some(feature) = self.features.get_mut(&payload.feature_id) {
@@ -938,12 +1005,13 @@ impl ViewEngine {
                         if let Some(overview) = &payload.overview {
                             feature.overview = overview.clone();
                         }
-                        if let Some(directory) = &payload.directory {
-                            feature.directory = Some(directory.clone());
+                        if payload.directory.is_some() {
+                            feature.directory = payload.directory.clone();
                         }
                     }
                 }
             }
+
             event_type::FEATURE_DELETE => {
                 if let EventPayload::FeatureDelete(payload) = &event.payload {
                     if let Some(feature) = self.features.get_mut(&payload.feature_id) {
@@ -951,10 +1019,24 @@ impl ViewEngine {
                     }
                 }
             }
+
             event_type::FEATURE_RESTORE => {
                 if let EventPayload::FeatureRestore(payload) = &event.payload {
                     if let Some(feature) = self.features.get_mut(&payload.feature_id) {
                         feature.is_deleted = false;
+                    }
+                }
+            }
+
+            // ============== TRUST ==============
+            event_type::TRUST_RECORD => {
+                if let EventPayload::TrustRecord(payload) = &event.payload {
+                    // Only record trust events where I am the rater
+                    if source_ai == self.ai_id {
+                        let score = self.ai_trust
+                            .entry(payload.target_ai.clone())
+                            .or_default();
+                        score.record(payload.is_success, payload.weight);
                     }
                 }
             }
@@ -1091,7 +1173,6 @@ impl ViewEngine {
     pub fn get_pending_dm_senders(&self) -> Vec<String> {
         // Track last DM timestamp per sender
         let mut last_from: HashMap<&str, u64> = HashMap::new();
-        let _last_to: HashMap<&str, u64> = HashMap::new();
 
         // From our cached DMs (these are DMs TO us)
         for dm in &self.recent_dms {
@@ -1152,16 +1233,16 @@ impl ViewEngine {
             .collect()
     }
 
-    /// Get dialogue invites (new dialogues where I'm responder and haven't responded)
+    /// Get dialogue invites — dialogues where it's currently my turn.
+    ///
+    /// For n-party round-robin dialogues, "invite" means "it's your turn now",
+    /// regardless of participant position or how many messages have been exchanged.
+    /// The old bilateral conditions (responder check, messages.len()==1) are wrong
+    /// for 3+ participant dialogues where any participant can be mid-dialogue.
     pub fn get_dialogue_invites(&self) -> Vec<&DialogueState> {
         self.dialogues
             .values()
-            .filter(|d| {
-                d.status == "active"
-                    && d.responder == self.ai_id
-                    && d.current_turn == self.ai_id
-                    && d.messages.len() == 1  // Only topic, no responses yet
-            })
+            .filter(|d| d.status == "active" && d.current_turn == self.ai_id)
             .collect()
     }
 
@@ -1349,6 +1430,31 @@ impl ViewEngine {
             .collect()
     }
 
+    // === Projects ===
+
+    /// Get all projects (including deleted — callers filter is_deleted as needed)
+    pub fn get_all_projects(&self) -> &HashMap<u64, ProjectState> {
+        &self.projects
+    }
+
+    /// Get a project by its canonical ID (timestamp)
+    pub fn get_project(&self, id: u64) -> Option<&ProjectState> {
+        self.projects.get(&id)
+    }
+
+    /// Get all features for a project
+    pub fn get_features_for_project(&self, project_id: u64) -> Vec<&FeatureState> {
+        self.features
+            .values()
+            .filter(|f| f.project_id == project_id)
+            .collect()
+    }
+
+    /// Get a feature by its canonical ID (timestamp)
+    pub fn get_feature(&self, id: u64) -> Option<&FeatureState> {
+        self.features.get(&id)
+    }
+
     // ============== END CONTENT CACHE QUERY METHODS ==============
 
     /// Rebuild view from scratch (clears caches and replays from beginning)
@@ -1374,35 +1480,15 @@ impl ViewEngine {
         self.presences.clear();
         self.file_actions.clear();
         self.rooms.clear();
-        self.ai_trust.clear();
         self.projects.clear();
         self.features.clear();
+        self.ai_trust.clear();
     }
 
     /// Warm cache by replaying last N events from event log
     ///
     /// This populates all content caches so query methods return O(1) results
     /// instead of scanning the entire event log.
-    // ============== PROJECT QUERIES ==============
-
-    pub fn get_all_projects(&self) -> &HashMap<u64, ProjectState> {
-        &self.projects
-    }
-
-    pub fn get_project(&self, id: u64) -> Option<&ProjectState> {
-        self.projects.get(&id)
-    }
-
-    // ============== FEATURE QUERIES ==============
-
-    pub fn get_features_for_project(&self, project_id: u64) -> Vec<&FeatureState> {
-        self.features.values().filter(|f| f.project_id == project_id).collect()
-    }
-
-    pub fn get_feature(&self, id: u64) -> Option<&FeatureState> {
-        self.features.get(&id)
-    }
-
     pub fn warm_cache(&mut self, event_log: &mut EventLogReader) -> ViewResult<u64> {
         let head = event_log.head_sequence();
 
@@ -1449,9 +1535,9 @@ mod tests {
     #[test]
     fn test_apply_dm_to_me() {
         let dir = tempdir().unwrap();
-        let mut view = ViewEngine::open("ai-1", dir.path()).unwrap();
+        let mut view = ViewEngine::open("beta-002", dir.path()).unwrap();
 
-        let event = Event::direct_message("ai-2", "ai-1", "Hello!");
+        let event = Event::direct_message("alpha-001", "beta-002", "Hello!");
         view.apply_event(&event).unwrap();
 
         assert_eq!(view.unread_dm_count(), 1);
@@ -1460,9 +1546,9 @@ mod tests {
     #[test]
     fn test_apply_dm_not_to_me() {
         let dir = tempdir().unwrap();
-        let mut view = ViewEngine::open("ai-1", dir.path()).unwrap();
+        let mut view = ViewEngine::open("beta-002", dir.path()).unwrap();
 
-        let event = Event::direct_message("ai-2", "ai-3", "Hello!");
+        let event = Event::direct_message("alpha-001", "gamma-003", "Hello!");
         view.apply_event(&event).unwrap();
 
         assert_eq!(view.unread_dm_count(), 0);
@@ -1471,9 +1557,9 @@ mod tests {
     #[test]
     fn test_apply_dialogue_start() {
         let dir = tempdir().unwrap();
-        let mut view = ViewEngine::open("ai-1", dir.path()).unwrap();
+        let mut view = ViewEngine::open("beta-002", dir.path()).unwrap();
 
-        let event = Event::dialogue_start("ai-2", "ai-1", "API review");
+        let event = Event::dialogue_start("alpha-001", &["alpha-001".to_string(), "beta-002".to_string()], "API review", true);
         view.apply_event(&event).unwrap();
 
         assert_eq!(view.active_dialogue_count(), 1);
@@ -1482,18 +1568,56 @@ mod tests {
     #[test]
     fn test_apply_vote() {
         let dir = tempdir().unwrap();
-        let mut view = ViewEngine::open("ai-1", dir.path()).unwrap();
+        let mut view = ViewEngine::open("beta-002", dir.path()).unwrap();
 
-        let event = Event::vote_create("ai-2", "Use REST?", vec!["Yes".to_string(), "No".to_string()], 3);
+        let event = Event::vote_create("alpha-001", "Use REST?", vec!["Yes".to_string(), "No".to_string()], 3);
         view.apply_event(&event).unwrap();
         assert_eq!(view.pending_vote_count(), 1);
 
-        let vote = Event::vote_cast("ai-1", 1, "Yes");
+        let vote = Event::vote_cast("beta-002", 1, "Yes");
         view.apply_event(&vote).unwrap();
         assert_eq!(view.pending_vote_count(), 0);
     }
 
     // test_apply_lock removed — locks deprecated (Feb 2026)
+
+    #[test]
+    fn test_sync_no_duplicate_on_incremental_sync() {
+        // Regression test for Bug 4: seek_to_sequence(cursor) positions the reader
+        // AT the cursor event, so without the `sequence <= cursor` guard the cursor
+        // event gets re-applied on every subsequent sync, duplicating append-only
+        // caches (broadcasts, DMs, etc.).
+        use crate::event_log::EventLogWriter;
+        let dir = tempdir().unwrap();
+
+        // Write 2 broadcasts and do an initial sync
+        {
+            let mut writer = EventLogWriter::open(Some(dir.path())).unwrap();
+            writer.append(&Event::broadcast("alpha-001", "general", "msg-1")).unwrap();
+            writer.append(&Event::broadcast("alpha-001", "general", "msg-2")).unwrap();
+            writer.sync().unwrap();
+        }
+
+        let mut view = ViewEngine::open("test-ai", dir.path()).unwrap();
+        let mut reader = EventLogReader::open(Some(dir.path())).unwrap();
+        let applied = view.sync(&mut reader).unwrap();
+        assert_eq!(applied, 2, "Initial sync should apply both events");
+        assert_eq!(view.cursor(), 2);
+
+        // Write a third broadcast and sync again
+        {
+            let mut writer = EventLogWriter::open(Some(dir.path())).unwrap();
+            writer.append(&Event::broadcast("alpha-001", "general", "msg-3")).unwrap();
+            writer.sync().unwrap();
+        }
+
+        let mut reader2 = EventLogReader::open(Some(dir.path())).unwrap();
+        let applied2 = view.sync(&mut reader2).unwrap();
+        // Without the cursor guard, seek_to_sequence(2) positions AT seq-2, which
+        // try_read() then re-applies — returning 2 instead of the correct 1.
+        assert_eq!(applied2, 1, "Incremental sync must NOT re-apply the cursor event");
+        assert_eq!(view.cursor(), 3);
+    }
 
     #[test]
     fn test_cursor_persistence() {
@@ -1514,37 +1638,37 @@ mod tests {
     #[test]
     fn test_trust_aggregation() {
         let dir = tempdir().unwrap();
-        let mut view = ViewEngine::open("ai-3", dir.path()).unwrap();
+        let mut view = ViewEngine::open("gamma-003", dir.path()).unwrap();
 
-        // Record positive trust for ai-2
-        let event = Event::trust_record("ai-3", "ai-2", true, "helpful answer", 5);
+        // Record positive trust for alpha-001
+        let event = Event::trust_record("gamma-003", "alpha-001", true, "helpful answer", 5);
         view.apply_event(&event).unwrap();
 
         // Check trust score
-        let (alpha, beta) = view.get_ai_trust("ai-2");
+        let (alpha, beta) = view.get_ai_trust("alpha-001");
         assert_eq!(alpha, 5);
         assert_eq!(beta, 0);
-        assert!((view.get_ai_trust_value("ai-2") - 1.0).abs() < 0.001);
+        assert!((view.get_ai_trust_value("alpha-001") - 1.0).abs() < 0.001);
 
         // Record negative trust
-        let event2 = Event::trust_record("ai-3", "ai-2", false, "bad advice", 2);
+        let event2 = Event::trust_record("gamma-003", "alpha-001", false, "bad advice", 2);
         view.apply_event(&event2).unwrap();
 
-        let (alpha, beta) = view.get_ai_trust("ai-2");
+        let (alpha, beta) = view.get_ai_trust("alpha-001");
         assert_eq!(alpha, 5);
         assert_eq!(beta, 2);
         // Trust = 5/(5+2) = 0.714...
-        let trust = view.get_ai_trust_value("ai-2");
+        let trust = view.get_ai_trust_value("alpha-001");
         assert!(trust > 0.7 && trust < 0.72);
     }
 
     #[test]
     fn test_trust_only_records_own_events() {
         let dir = tempdir().unwrap();
-        let mut view = ViewEngine::open("ai-3", dir.path()).unwrap();
+        let mut view = ViewEngine::open("gamma-003", dir.path()).unwrap();
 
         // Event from another AI should NOT affect my view
-        let event = Event::trust_record("ai-1", "ai-2", true, "helpful", 5);
+        let event = Event::trust_record("beta-002", "alpha-001", true, "helpful", 5);
         view.apply_event(&event).unwrap();
 
         // Should have no trust data since I didn't rate

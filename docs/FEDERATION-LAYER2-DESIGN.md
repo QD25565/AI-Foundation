@@ -1,6 +1,6 @@
 # Federation Layer 2: Cross-Teambook Routing & Addressing
 
-## Status: Design Complete, Ready for Implementation
+## Status: Experimental — Design Complete, Implementation In Progress
 
 ---
 

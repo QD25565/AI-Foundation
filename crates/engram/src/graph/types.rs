@@ -347,26 +347,33 @@ pub struct Edge {
     pub weight: f32,
     /// Confidence in this edge's correctness (0.0 - 1.0)
     pub confidence: f32,
-    /// When this edge was created (Unix timestamp)
+    /// When this edge was created (Unix timestamp seconds)
     pub timestamp: i64,
     /// Was this edge inferred (true) or explicit (false)?
     pub inferred: bool,
     /// If inferred, the chain of edges that led to this inference
     pub inference_chain: Option<Vec<u64>>,
+    /// When this edge became valid (Unix timestamp seconds, 0 = from creation)
+    pub t_valid: i64,
+    /// When this edge expired (Unix timestamp seconds, None = never expires)
+    pub t_invalid: Option<i64>,
 }
 
 impl Edge {
     /// Create a new explicit (non-inferred) edge
     pub fn new(source: u64, target: u64, edge_type: EdgeType, weight: f32) -> Self {
+        let now = chrono::Utc::now().timestamp();
         Self {
             source,
             target,
             edge_type,
             weight,
             confidence: 1.0,
-            timestamp: chrono::Utc::now().timestamp(),
+            timestamp: now,
             inferred: false,
             inference_chain: None,
+            t_valid: now,
+            t_invalid: None,
         }
     }
 
@@ -378,15 +385,18 @@ impl Edge {
         weight: f32,
         confidence: f32,
     ) -> Self {
+        let now = chrono::Utc::now().timestamp();
         Self {
             source,
             target,
             edge_type,
             weight,
             confidence,
-            timestamp: chrono::Utc::now().timestamp(),
+            timestamp: now,
             inferred: false,
             inference_chain: None,
+            t_valid: now,
+            t_invalid: None,
         }
     }
 
@@ -399,16 +409,27 @@ impl Edge {
         confidence: f32,
         chain: Vec<u64>,
     ) -> Self {
+        let now = chrono::Utc::now().timestamp();
         Self {
             source,
             target,
             edge_type,
             weight,
             confidence,
-            timestamp: chrono::Utc::now().timestamp(),
+            timestamp: now,
             inferred: true,
             inference_chain: Some(chain),
+            t_valid: now,
+            t_invalid: None,
         }
+    }
+
+    /// Check if this edge is valid at the given Unix timestamp
+    /// t_valid == 0 means "valid from beginning of time" (backward compat default)
+    /// t_invalid == None means "never expires"
+    pub fn is_valid_at(&self, now: i64) -> bool {
+        (self.t_valid == 0 || self.t_valid <= now)
+            && self.t_invalid.map_or(true, |ti| ti > now)
     }
 
     /// Get the effective strength (weight * confidence * type factor)
@@ -417,9 +438,10 @@ impl Edge {
     }
 
     /// Serialize edge to bytes (for storage)
-    /// Format: source(8) + target(8) + type(1) + weight(4) + confidence(4) + timestamp(8) + inferred(1) + chain_len(2) + chain(8*n)
+    /// Format v2: source(8) + target(8) + type(1) + weight(4) + confidence(4) + timestamp(8) + inferred(1) + chain_len(2) + chain(8*n) + t_valid(8) + t_invalid(8)
+    /// t_invalid is stored as i64 where 0 = None (never expires)
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(36);
+        let mut bytes = Vec::with_capacity(52);
 
         bytes.extend_from_slice(&self.source.to_le_bytes());
         bytes.extend_from_slice(&self.target.to_le_bytes());
@@ -439,10 +461,15 @@ impl Edge {
             bytes.extend_from_slice(&0u16.to_le_bytes());
         }
 
+        // Temporal validity fields (v2 addition)
+        bytes.extend_from_slice(&self.t_valid.to_le_bytes());
+        bytes.extend_from_slice(&self.t_invalid.unwrap_or(0).to_le_bytes());
+
         bytes
     }
 
     /// Deserialize edge from bytes
+    /// Handles both v1 format (no temporal fields) and v2 format (with t_valid/t_invalid)
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
         if bytes.len() < 36 {
             return None;
@@ -469,6 +496,17 @@ impl Edge {
             None
         };
 
+        // v2 temporal validity fields — present only if there are 16+ bytes after the chain
+        let base_end = 36 + chain_len * 8;
+        let (t_valid, t_invalid) = if bytes.len() >= base_end + 16 {
+            let tv = i64::from_le_bytes(bytes[base_end..base_end + 8].try_into().ok()?);
+            let ti_raw = i64::from_le_bytes(bytes[base_end + 8..base_end + 16].try_into().ok()?);
+            (tv, if ti_raw == 0 { None } else { Some(ti_raw) })
+        } else {
+            // v1 format: edge is valid from creation, never expires
+            (timestamp, None)
+        };
+
         Some(Self {
             source,
             target,
@@ -478,12 +516,14 @@ impl Edge {
             timestamp,
             inferred,
             inference_chain,
+            t_valid,
+            t_invalid,
         })
     }
 
-    /// Get byte size for this edge
+    /// Get byte size for this edge (v2 format)
     pub fn byte_size(&self) -> usize {
-        36 + self.inference_chain.as_ref().map_or(0, |c| c.len() * 8)
+        36 + self.inference_chain.as_ref().map_or(0, |c| c.len() * 8) + 16
     }
 }
 

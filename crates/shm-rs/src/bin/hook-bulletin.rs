@@ -15,7 +15,8 @@ use shm::bulletin::BulletinBoard;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, HashMap};
 use std::env;
-use std::io::{self, Read};
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Read};
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Instant, SystemTime};
@@ -109,6 +110,10 @@ struct SeenState {
     /// Legacy field for migration (remove after all instances migrate)
     #[serde(skip_serializing)]
     dm_ids: Option<HashSet<i64>>,
+
+    /// Set of federation event IDs we've already output (dedup by ID, pruned after 48h)
+    #[serde(default)]
+    fed_event_ids: HashSet<String>,
 }
 
 /// Get the path for per-AI state file
@@ -146,6 +151,64 @@ fn save_state(ai_id: &str, state: &SeenState) {
         let _ = std::fs::create_dir_all(parent);
     }
     let _ = std::fs::write(&path, serde_json::to_string(state).unwrap_or_default());
+}
+
+/// An event received from a remote Teambook via the federation inbox.
+///
+/// Written to `~/.ai-foundation/federation/inbox.jsonl` by the federation inbox endpoint
+/// (Phase 1 step 6). One JSON object per line, append-only.
+///
+/// Contract: only semantic summaries cross the boundary — never file names, tool usages,
+/// or raw operational events (per FEDERATION-ARCHITECTURE-DESIGN.md taxonomy).
+#[derive(Deserialize)]
+struct FederationInboxEvent {
+    /// Unique event ID (content hash or UUID — used for deduplication)
+    id: String,
+    /// Source Teambook name (e.g., "Office-PC")
+    source_teambook: String,
+    /// Source AI ID, if applicable (e.g., "alpha-001")
+    #[serde(default)]
+    source_ai: Option<String>,
+    /// Event type tag (e.g., "FEDERATED_PRESENCE", "FEDERATED_BROADCAST", "FEDERATED_TASK_COMPLETE")
+    event_type: String,
+    /// Human-readable summary — the only payload that crosses the federation boundary
+    summary: String,
+    /// Unix timestamp (seconds) of when the event was created at the source Teambook
+    created_at: u64,
+}
+
+/// Path to the federation inbox event log.
+/// Written by the federation inbox endpoint; read here for bulletin injection.
+fn federation_inbox_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".ai-foundation")
+        .join("federation")
+        .join("inbox.jsonl")
+}
+
+/// Read federation events from the inbox JSONL file, returning all events
+/// created within `max_age_secs` of `now_secs`, in file (creation) order.
+///
+/// Silently skips malformed lines — federation events must never crash the bulletin.
+fn read_federation_events(max_age_secs: u64, now_secs: u64) -> Vec<FederationInboxEvent> {
+    let path = federation_inbox_path();
+    if !path.exists() {
+        return Vec::new();
+    }
+
+    let file = match File::open(&path) {
+        Ok(f) => f,
+        Err(_) => return Vec::new(),
+    };
+
+    BufReader::new(file)
+        .lines()
+        .filter_map(|line| line.ok())
+        .filter(|line| !line.trim().is_empty())
+        .filter_map(|line| serde_json::from_str::<FederationInboxEvent>(&line).ok())
+        .filter(|event| now_secs.saturating_sub(event.created_at) <= max_age_secs)
+        .collect()
 }
 
 /// Format awareness output - |NEW DMs| ONLY (2-view max, 24h age-out)
@@ -299,8 +362,32 @@ fn format_filtered_output(
         None
     };
 
+    // Federation events — semantic summaries from remote Teambooks.
+    // Read once with a 48h window: 24h for display, 48h for pruning seen IDs.
+    // Never shows file names, tool calls, or raw ops — taxonomy enforced at the inbox (step 6).
+    let all_fed_events = read_federation_events(48 * 3600, now_secs);
+    let display_cutoff_secs = 24 * 3600u64;
+    for event in &all_fed_events {
+        let age_secs = now_secs.saturating_sub(event.created_at);
+        if age_secs <= display_cutoff_secs && !state.fed_event_ids.contains(&event.id) {
+            let source = match &event.source_ai {
+                Some(ai) => format!("{}@{}", ai, event.source_teambook),
+                None => event.source_teambook.clone(),
+            };
+            parts.push(format!("[{}] {}: {}", event.event_type, source, event.summary));
+            state.fed_event_ids.insert(event.id.clone());
+            state_modified = true;
+        }
+    }
+    let fed_output = if !parts.is_empty() {
+        Some(format!("|FEDERATION|{}", parts.join(" | ")))
+    } else {
+        None
+    };
+    parts.clear();
+
     // Combine all outputs - always include time if we have ANY output
-    let all_outputs = [dm_output, bc_output, vote_output, dialogue_output, lock_output, file_output];
+    let all_outputs = [dm_output, bc_output, vote_output, dialogue_output, lock_output, file_output, fed_output];
     let has_output = all_outputs.iter().any(|o| o.is_some());
 
     let mut all_parts = Vec::new();
@@ -471,8 +558,17 @@ Fix: Ensure daemon is running and has written to bulletin.
     state.broadcast_ids.retain(|id| current_broadcast_ids.contains(id));
     let bc_pruned = state.broadcast_ids.len() != old_bc_count;
 
+    // Prune federation event IDs for events older than 48h (keeps state bounded)
+    let current_fed_ids: HashSet<String> = read_federation_events(48 * 3600, now_secs)
+        .into_iter()
+        .map(|e| e.id)
+        .collect();
+    let old_fed_count = state.fed_event_ids.len();
+    state.fed_event_ids.retain(|id| current_fed_ids.contains(id));
+    let fed_pruned = state.fed_event_ids.len() != old_fed_count;
+
     // Save state if modified
-    if state_modified || bc_pruned || state.last_sequence != current_seq {
+    if state_modified || bc_pruned || fed_pruned || state.last_sequence != current_seq {
         state.last_sequence = current_seq;
         save_state(&ai_id, &state);
     }

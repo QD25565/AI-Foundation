@@ -83,18 +83,20 @@ pub async fn notebook(args: &[&str]) -> String {
     run_cli(&exe_name("notebook-cli"), args).await
 }
 
-/// Run a visionbook CLI command and return output
-///
-/// VisionEngram visual memory: attach images to notes, AI-optimized thumbnails.
-///
-/// # Arguments
-/// * `args` - Command arguments (e.g., ["attach", "1005", "image.png"])
-///
-/// # Returns
-/// * CLI stdout on success
-/// * Formatted error message on failure
-pub async fn visionbook(args: &[&str]) -> String {
-    run_cli(&exe_name("visionbook"), args).await
+/// Run a profile CLI command and return output
+pub async fn profile(args: &[&str]) -> String {
+    run_cli(&exe_name("profile-cli"), args).await
+}
+
+/// Run a forge CLI command and return output
+/// Uses forge-local (with llama.cpp) if available, falls back to forge (API-only)
+pub async fn forge(args: &[&str]) -> String {
+    let bin_dir = get_bin_dir();
+    let local_path = bin_dir.join(exe_name("forge-local"));
+    if local_path.exists() {
+        return run_cli(&exe_name("forge-local"), args).await;
+    }
+    run_cli(&exe_name("forge"), args).await
 }
 
 /// Run a CLI command and return its output
@@ -183,20 +185,6 @@ mod tests {
     }
 }
 
-/// Run a firebase CLI command and return output
-///
-/// Firebase API access: Crashlytics, Firestore, Auth
-///
-/// # Arguments
-/// * `args` - Command arguments (e.g., ["crashlytics", "list"])
-///
-/// # Returns
-/// * CLI stdout on success
-/// * Formatted error message on failure
-pub async fn firebase(args: &[&str]) -> String {
-    run_cli(&exe_name("firebase"), args).await
-}
-
 // ============== Caller-ID variants (for HTTP API) ==============
 //
 // These run the same CLIs but with an explicit caller_id instead of
@@ -259,11 +247,6 @@ pub async fn teambook_as(args: &[&str], caller_id: &str) -> String {
 /// Run a notebook CLI command as a specific user
 pub async fn notebook_as(args: &[&str], caller_id: &str) -> String {
     run_cli_as(&exe_name("notebook-cli"), args, caller_id).await
-}
-
-/// Run a visionbook CLI command as a specific user
-pub async fn visionbook_as(args: &[&str], caller_id: &str) -> String {
-    run_cli_as(&exe_name("visionbook"), args, caller_id).await
 }
 
 // ============== Federation-Aware Send (for MCP tools) ==============

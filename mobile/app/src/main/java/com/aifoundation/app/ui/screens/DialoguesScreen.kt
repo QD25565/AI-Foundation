@@ -157,7 +157,7 @@ fun DialoguesScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(value = responder, onValueChange = { responder = it },
-                        placeholder = { Text("Responder AI_ID (e.g. sage-724)") },
+                        placeholder = { Text("Responder AI_ID (e.g. alpha-001)") },
                         modifier = Modifier.fillMaxWidth(), singleLine = true,
                         colors = textFieldColors())
                     OutlinedTextField(value = topic, onValueChange = { topic = it },

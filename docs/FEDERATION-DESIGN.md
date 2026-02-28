@@ -1,6 +1,6 @@
 # AI-Foundation Federation Design
 
-> **Status: Design document. Not yet implemented.**
+> **Status: Experimental. Cryptographic foundations (Ed25519 signatures, HLC, event signing) are implemented and tested. Teambook-to-Teambook event replication is functional on LAN. Cross-network routing (Layer 2) is in active development.**
 
 
 
@@ -15,13 +15,13 @@ Teambook-A (PC-1)                    Teambook-B (PC-2)
 ├── Ed25519 Keypair                  ├── Ed25519 Keypair
 ├── V2 Event Log                     ├── V2 Event Log
 ├── HTTP API (:8080)                 ├── HTTP API (:8080)
-├── AI: assistant-1                  ├── AI: helper-5
-├── AI: assistant-2                  ├── AI: helper-6
+├── AI: alpha-001                    ├── AI: gamma-003
+├── AI: alpha-002                    ├── AI: gamma-004
 ├── Human: human-alice (phone)       ├── Human: human-bob (phone)
 └── Human: human-alice (PC client)   └── Human: human-bob (PC client)
         │                                    │
         └────── Federation Sync ─────────────┘
-            (signed events over HTTPS)
+            (signed events over QUIC)
 ```
 
 ## Core Foundations (Build First)
@@ -184,7 +184,7 @@ Cargo.toml             # Add ed25519-dalek, sha2 dependencies
 | 10-50 peers | Gossip protocol | mDNS (LAN) | Add gossip layer, auto-discovery |
 | 50-100 peers | Merkle Search Tree delta sync | Hybrid (mDNS + bootstrap nodes) | Add MST for bandwidth efficiency |
 | 100-1000 peers | MST + HNSW semantic routing | Kademlia DHT | Major architecture addition |
-| 1000+ peers | Full Sovereign Net | S/Kademlia + PNS | The Garden realized |
+| 1000+ peers | Full peer-to-peer network | S/Kademlia + PNS | Large-scale federation |
 
 ## Security Principles
 

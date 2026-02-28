@@ -1,0 +1,239 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release binaries
+        run: cargo build --release
+
+      - name: Collect binaries
+        shell: pwsh
+        run: |
+          $version = (Get-Content version.txt).Trim()
+          $outDir = "staging/ai-foundation-v$version/bin"
+          New-Item -ItemType Directory -Path $outDir -Force
+          $binaries = @(
+            "notebook-cli", "teambook", "session-start",
+            "v2-daemon", "ai-foundation-mcp", "forge", "forge-local"
+          )
+          foreach ($bin in $binaries) {
+            $src = "target/release/$bin.exe"
+            if (Test-Path $src) {
+              Copy-Item $src "$outDir/$bin.exe"
+              Write-Host "Collected: $bin.exe"
+            }
+          }
+
+      - name: Generate manifest
+        run: python sign.py --bin-dir staging/ai-foundation-v*/bin
+
+      - name: Create archive
+        shell: pwsh
+        run: |
+          $version = (Get-Content version.txt).Trim()
+          Compress-Archive -Path "staging/*" -DestinationPath "ai-foundation-v$version-windows-x64.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: ai-foundation-v*-windows-x64.zip
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: linux-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release binaries
+        run: cargo build --release
+
+      - name: Collect and package
+        run: |
+          VERSION=$(cat version.txt | tr -d '[:space:]')
+          STAGING="staging/ai-foundation-v${VERSION}"
+          mkdir -p "$STAGING"
+          for bin in notebook-cli teambook session-start v2-daemon ai-foundation-mcp forge forge-local; do
+            src="target/release/${bin}"
+            if [ -f "$src" ]; then
+              cp "$src" "$STAGING/"
+              chmod +x "$STAGING/$bin"
+              echo "Collected: $bin"
+            fi
+          done
+          python3 sign.py --bin-dir "$STAGING"
+          tar -czf "ai-foundation-v${VERSION}-linux-x64.tar.gz" -C staging .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: ai-foundation-v*-linux-x64.tar.gz
+
+  build-macos:
+    strategy:
+      matrix:
+        include:
+          - runner: macos-latest
+            arch: aarch64
+          - runner: macos-13
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: macos-${{ matrix.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build release binaries
+        run: cargo build --release
+
+      - name: Collect and package
+        run: |
+          VERSION=$(cat version.txt | tr -d '[:space:]')
+          STAGING="staging/ai-foundation-v${VERSION}"
+          mkdir -p "$STAGING"
+          for bin in notebook-cli teambook session-start v2-daemon ai-foundation-mcp forge forge-local; do
+            src="target/release/${bin}"
+            if [ -f "$src" ]; then
+              cp "$src" "$STAGING/"
+              chmod +x "$STAGING/$bin"
+              echo "Collected: $bin"
+            fi
+          done
+          python3 sign.py --bin-dir "$STAGING"
+          tar -czf "ai-foundation-v${VERSION}-macos-${{ matrix.arch }}.tar.gz" -C staging .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: ai-foundation-v*-macos-${{ matrix.arch }}.tar.gz
+
+  publish:
+    needs: [build-windows, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+
+      - name: Generate release manifest
+        run: |
+          VERSION=$(cat version.txt | tr -d '[:space:]')
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+
+          # Generate SHA256 checksums
+          cd dist
+          find . -type f \( -name "*.zip" -o -name "*.tar.gz" \) -exec mv {} . \;
+          sha256sum ai-foundation-v* > checksums-sha256.txt
+          cat checksums-sha256.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "AI-Foundation v${{ env.VERSION }}"
+          body: |
+            ## AI-Foundation v${{ env.VERSION }}
+
+            ### Install
+
+            **One-line install:**
+            ```bash
+            # Linux / macOS
+            curl -fsSL https://github.com/QD25565/ai-foundation/raw/main/install.sh | bash
+
+            # Windows (PowerShell)
+            irm https://github.com/QD25565/ai-foundation/raw/main/install.ps1 | iex
+            ```
+
+            **Package managers:**
+            ```bash
+            # Scoop (Windows)
+            scoop bucket add ai-foundation https://github.com/QD25565/ai-foundation
+            scoop install ai-foundation
+
+            # Homebrew (macOS/Linux)
+            brew install QD25565/tap/ai-foundation
+            ```
+
+            ### Checksums
+            See `checksums-sha256.txt` for SHA256 hashes of all archives.
+          files: |
+            dist/ai-foundation-v*-windows-x64.zip
+            dist/ai-foundation-v*-linux-x64.tar.gz
+            dist/ai-foundation-v*-macos-aarch64.tar.gz
+            dist/ai-foundation-v*-macos-x64.tar.gz
+            dist/checksums-sha256.txt
+          draft: false
+          prerelease: false
+
+      - name: Update Scoop manifest
+        run: |
+          VERSION=$(cat version.txt | tr -d '[:space:]')
+          HASH=$(sha256sum dist/ai-foundation-v${VERSION}-windows-x64.zip | cut -d' ' -f1)
+          python3 -c "
+          import json
+          m = json.load(open('packaging/scoop/ai-foundation.json'))
+          m['version'] = '${VERSION}'
+          m['architecture']['64bit']['hash'] = '${HASH}'
+          m['architecture']['64bit']['url'] = 'https://github.com/QD25565/ai-foundation/releases/download/v${VERSION}/ai-foundation-v${VERSION}-windows-x64.zip'
+          json.dump(m, open('packaging/scoop/ai-foundation.json', 'w'), indent=4)
+          "
+
+      - name: Commit manifest updates
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add packaging/scoop/ai-foundation.json
+          git diff --cached --quiet || git commit -m "chore: update scoop manifest for v${{ env.VERSION }}"
+          git push origin HEAD:main || true

@@ -266,7 +266,7 @@ private val DeepNetLightColorScheme = lightColorScheme(
 
 @Composable
 fun AIFoundationTheme(
-    darkTheme: Boolean = true, // Deep Net defaults to dark
+    darkTheme: Boolean = true, // Defaults to dark
     content: @Composable () -> Unit
 ) {
     val colorScheme = if (darkTheme) DeepNetDarkColorScheme else DeepNetLightColorScheme

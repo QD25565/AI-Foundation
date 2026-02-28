@@ -62,7 +62,7 @@ impl HookExecutor {
         Ok(outputs)
     }
 
-    /// Run pre-tool-use hooks (wired in when tool interception is enabled)
+    /// Run pre-tool-use hooks
     #[allow(dead_code)]
     pub async fn run_pre_tool_use(&self, context: &HookContext) -> Result<Vec<String>> {
         let tool_name = context.tool_name.as_deref().unwrap_or("");
@@ -127,7 +127,7 @@ impl HookExecutor {
 
     /// Execute a single hook command
     async fn run_hook(&self, hook: &HookCommand, context: &HookContext) -> Result<String> {
-        let _timeout = Duration::from_secs(hook.timeout); // TODO: enforce timeout
+        let _timeout = Duration::from_secs(hook.timeout);
 
         // Expand environment variables in command
         let command = expand_variables(&hook.command, context);

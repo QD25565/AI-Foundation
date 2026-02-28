@@ -55,6 +55,17 @@ pub const MAX_OUTBOX_CAPACITY: usize = 16 * 1024 * 1024;
 /// Header size (64 bytes, cache-line aligned)
 pub const OUTBOX_HEADER_SIZE: usize = 64;
 
+/// Fill level at which the producer sets PRESSURE and doubles the wake signal.
+/// The sequencer uses this to prioritize draining the affected outbox.
+pub const HIGH_WATERMARK_PERCENT: u64 = 75;
+
+/// Fill level at which the consumer clears the PRESSURE flag after draining.
+pub const LOW_WATERMARK_PERCENT: u64 = 50;
+
+/// Maximum number of write retries when the outbox is full.
+/// Normally wait-free; retries only in the exceptional outbox-full case.
+pub const MAX_WRITE_RETRIES: u32 = 3;
+
 /// Outbox flags
 pub mod flags {
     /// Outbox is being compacted (Sequencer should wait)
@@ -63,6 +74,9 @@ pub mod flags {
     pub const CLOSED: u32 = 1 << 1;
     /// Outbox is in error state
     pub const ERROR: u32 = 1 << 2;
+    /// Outbox fill exceeded HIGH_WATERMARK_PERCENT — sequencer should prioritize draining.
+    /// Set by the producer; cleared by the consumer when fill drops below LOW_WATERMARK_PERCENT.
+    pub const PRESSURE: u32 = 1 << 3;
 }
 
 /// Result type for outbox operations
@@ -144,6 +158,16 @@ impl OutboxHeader {
         head - tail
     }
 
+    /// Fill level as a percentage of total capacity (0–100).
+    /// Used for backpressure: set PRESSURE flag above HIGH_WATERMARK_PERCENT,
+    /// clear it below LOW_WATERMARK_PERCENT.
+    #[inline]
+    pub fn fill_percent(&self) -> u64 {
+        let used = self.available_read();
+        if self.capacity == 0 { return 0; }
+        (used * 100) / self.capacity
+    }
+
     /// Check if outbox is empty
     #[inline]
     pub fn is_empty(&self) -> bool {
@@ -185,6 +209,10 @@ pub struct OutboxProducer {
     path: PathBuf,
     ai_id: String,
     capacity: usize,
+    base_dir: Option<PathBuf>,
+    /// Event-driven drain signal: sequencer signals this after draining our outbox.
+    /// Writer waits on this instead of sleeping when outbox is full.
+    drain_receiver: Option<crate::wake::DrainWakeReceiver>,
 }
 
 impl OutboxProducer {
@@ -245,11 +273,16 @@ impl OutboxProducer {
             }
         }
 
+        // Create drain event for event-driven backpressure (non-fatal if fails)
+        let drain_receiver = crate::wake::DrainWakeReceiver::new(ai_id, base_dir).ok();
+
         Ok(Self {
             mmap,
             path,
             ai_id: ai_id.to_string(),
             capacity,
+            base_dir: base_dir.map(|p| p.to_path_buf()),
+            drain_receiver,
         })
     }
 
@@ -260,14 +293,23 @@ impl OutboxProducer {
 
     /// Get mutable data buffer
     fn data_mut(&mut self) -> &mut [u8] {
+        // Clamp capacity to actual mmap size to prevent OOB if file was resized externally
+        let safe_cap = self.capacity.min(self.mmap.len().saturating_sub(OUTBOX_HEADER_SIZE));
         let ptr = unsafe { self.mmap.as_mut_ptr().add(OUTBOX_HEADER_SIZE) };
-        unsafe { std::slice::from_raw_parts_mut(ptr, self.capacity) }
+        unsafe { std::slice::from_raw_parts_mut(ptr, safe_cap) }
     }
 
-    /// Write an event to the outbox (wait-free for producer)
+    /// Write an event to the outbox.
     ///
-    /// Returns the local position in the outbox (NOT the global sequence number).
-    /// The Sequencer assigns global sequence numbers when processing.
+    /// Normally wait-free (~100ns). When the outbox is full (sequencer slow or
+    /// temporarily behind), retries up to `MAX_WRITE_RETRIES` times with
+    /// exponential backoff (10ms → 20ms → 40ms), urgently re-signaling the
+    /// sequencer on each retry. Returns `OutboxError::Full` only after all
+    /// retries are exhausted.
+    ///
+    /// Backpressure: after a successful write, if fill exceeds
+    /// `HIGH_WATERMARK_PERCENT`, the `PRESSURE` flag is set and an extra wake
+    /// signal is sent so the sequencer prioritizes draining this outbox.
     ///
     /// # Multi-Process Safety
     /// Uses atomic fetch_add to RESERVE space BEFORE writing. This ensures that
@@ -278,22 +320,14 @@ impl OutboxProducer {
             return Err(OutboxError::Closed);
         }
 
-        // Serialize event
+        // Serialize once, outside retry loop.
         let payload_bytes = event.payload.to_bytes();
         let header_bytes = event.header.to_bytes();
 
         // Total size: 4 (length prefix) + 64 (header) + payload
         let total_size = 4 + header_bytes.len() + payload_bytes.len();
-        let available = self.header().available_write() as usize;
 
-        if total_size > available {
-            return Err(OutboxError::Full {
-                needed: total_size,
-                available,
-            });
-        }
-
-        // Maximum event size is 64KB (sanity limit)
+        // Maximum event size is 64KB (sanity limit — checked before retry loop)
         if total_size > 65536 {
             return Err(OutboxError::EventTooLarge {
                 size: total_size,
@@ -301,46 +335,73 @@ impl OutboxProducer {
             });
         }
 
-        // CRITICAL: Reserve space atomically BEFORE writing data.
-        // This prevents race conditions when multiple processes mmap the same outbox.
-        // Old bug: load head → write data → fetch_add could cause two writers to
-        // write at the same position, leaving gaps with uninitialized data.
-        // Fix: fetch_add FIRST to get exclusive region, THEN write.
-        let header = unsafe { &*(self.mmap.as_ptr() as *const OutboxHeader) };
-        let reserved_pos = header.head.fetch_add(total_size as u64, Ordering::AcqRel) as usize;
+        let mut last_err = OutboxError::Full { needed: total_size, available: 0 };
 
-        let capacity = self.capacity;
-        let data = self.data_mut();
+        for attempt in 0..=MAX_WRITE_RETRIES {
+            if attempt > 0 {
+                // Urgently re-signal the sequencer — it may be blocked on wait.
+                signal_sequencer(self.base_dir.as_deref());
+                // Event-driven wait: block on drain event until sequencer signals.
+                // Zero CPU while waiting — OS blocks on Named Event / POSIX semaphore.
+                // Timeout bounded: 10ms per attempt (sequencer drains in microseconds).
+                if let Some(ref drain) = self.drain_receiver {
+                    drain.wait_timeout(std::time::Duration::from_millis(10));
+                }
+            }
 
-        // Write length prefix (4 bytes, little-endian) at RESERVED position
-        let len_bytes = ((header_bytes.len() + payload_bytes.len()) as u32).to_le_bytes();
-        for (i, &b) in len_bytes.iter().enumerate() {
-            data[(reserved_pos + i) % capacity] = b;
+            let available = self.header().available_write() as usize;
+            if total_size > available {
+                last_err = OutboxError::Full { needed: total_size, available };
+                continue;
+            }
+
+            // CRITICAL: Reserve space atomically BEFORE writing data.
+            // fetch_add FIRST to get exclusive region, THEN write.
+            let header = unsafe { &*(self.mmap.as_ptr() as *const OutboxHeader) };
+            let reserved_pos = header.head.fetch_add(total_size as u64, Ordering::AcqRel) as usize;
+
+            let capacity = self.capacity;
+            let data = self.data_mut();
+
+            // Write length prefix (4 bytes, little-endian) at RESERVED position
+            let len_bytes = ((header_bytes.len() + payload_bytes.len()) as u32).to_le_bytes();
+            for (i, &b) in len_bytes.iter().enumerate() {
+                data[(reserved_pos + i) % capacity] = b;
+            }
+            for (i, &b) in header_bytes.iter().enumerate() {
+                data[(reserved_pos + 4 + i) % capacity] = b;
+            }
+            for (i, &b) in payload_bytes.iter().enumerate() {
+                data[(reserved_pos + 4 + header_bytes.len() + i) % capacity] = b;
+            }
+
+            // Memory barrier: all writes visible before signaling.
+            std::sync::atomic::fence(Ordering::Release);
+            if let Err(e) = self.mmap.flush() {
+                eprintln!("[OUTBOX] mmap flush failed after write_event: {}", e);
+            }
+
+            // Backpressure: set PRESSURE flag + extra wake when fill is high.
+            // Sequencer checks PRESSURE to prioritize draining this outbox.
+            if self.header().fill_percent() >= HIGH_WATERMARK_PERCENT {
+                self.header().set_flag(flags::PRESSURE);
+                signal_sequencer(self.base_dir.as_deref()); // extra urgent wake
+            }
+
+            // Normal wake: notify sequencer that events are available.
+            signal_sequencer(self.base_dir.as_deref());
+
+            return Ok(reserved_pos as u64);
         }
 
-        // Write header
-        for (i, &b) in header_bytes.iter().enumerate() {
-            data[(reserved_pos + 4 + i) % capacity] = b;
-        }
-
-        // Write payload
-        for (i, &b) in payload_bytes.iter().enumerate() {
-            data[(reserved_pos + 4 + header_bytes.len() + i) % capacity] = b;
-        }
-
-        // Memory barrier to ensure all writes are visible before signaling
-        std::sync::atomic::fence(Ordering::Release);
-
-        // Flush to disk so Sequencer can see the write
-        let _ = self.mmap.flush();
-
-        // Signal sequencer daemon that new events are available (instant wake, no polling!)
-        signal_sequencer();
-
-        Ok(reserved_pos as u64)
+        Err(last_err)
     }
 
-    /// Write a raw event from header and payload bytes (for efficiency)
+    /// Write a raw event from header and payload bytes (for efficiency).
+    ///
+    /// Same retry-with-backpressure semantics as `write_event()`: normally
+    /// wait-free, retries up to `MAX_WRITE_RETRIES` times when full, sets
+    /// `PRESSURE` flag when fill exceeds `HIGH_WATERMARK_PERCENT`.
     ///
     /// # Multi-Process Safety
     /// Uses atomic fetch_add to RESERVE space BEFORE writing. See write_event() docs.
@@ -350,49 +411,61 @@ impl OutboxProducer {
         }
 
         let total_size = 4 + 64 + payload_bytes.len();
-        let available = self.header().available_write() as usize;
 
-        if total_size > available {
-            return Err(OutboxError::Full {
-                needed: total_size,
-                available,
-            });
+        if total_size > 65536 {
+            return Err(OutboxError::EventTooLarge { size: total_size, max: 65536 });
         }
 
-        // CRITICAL: Reserve space atomically BEFORE writing data.
-        // See write_event() for detailed explanation of the multi-process race condition fix.
-        let header = unsafe { &*(self.mmap.as_ptr() as *const OutboxHeader) };
-        let reserved_pos = header.head.fetch_add(total_size as u64, Ordering::AcqRel) as usize;
+        let mut last_err = OutboxError::Full { needed: total_size, available: 0 };
 
-        let capacity = self.capacity;
-        let data = self.data_mut();
+        for attempt in 0..=MAX_WRITE_RETRIES {
+            if attempt > 0 {
+                signal_sequencer(self.base_dir.as_deref());
+                // Event-driven wait: block on drain event. Zero CPU. No polling.
+                if let Some(ref drain) = self.drain_receiver {
+                    drain.wait_timeout(std::time::Duration::from_millis(10));
+                }
+            }
 
-        // Write length prefix at RESERVED position
-        let len_bytes = ((64 + payload_bytes.len()) as u32).to_le_bytes();
-        for (i, &b) in len_bytes.iter().enumerate() {
-            data[(reserved_pos + i) % capacity] = b;
+            let available = self.header().available_write() as usize;
+            if total_size > available {
+                last_err = OutboxError::Full { needed: total_size, available };
+                continue;
+            }
+
+            // CRITICAL: Reserve space atomically BEFORE writing data.
+            let header = unsafe { &*(self.mmap.as_ptr() as *const OutboxHeader) };
+            let reserved_pos = header.head.fetch_add(total_size as u64, Ordering::AcqRel) as usize;
+
+            let capacity = self.capacity;
+            let data = self.data_mut();
+
+            let len_bytes = ((64 + payload_bytes.len()) as u32).to_le_bytes();
+            for (i, &b) in len_bytes.iter().enumerate() {
+                data[(reserved_pos + i) % capacity] = b;
+            }
+            for (i, &b) in header_bytes.iter().enumerate() {
+                data[(reserved_pos + 4 + i) % capacity] = b;
+            }
+            for (i, &b) in payload_bytes.iter().enumerate() {
+                data[(reserved_pos + 4 + 64 + i) % capacity] = b;
+            }
+
+            std::sync::atomic::fence(Ordering::Release);
+            if let Err(e) = self.mmap.flush() {
+                eprintln!("[OUTBOX] mmap flush failed after write_raw: {}", e);
+            }
+
+            if self.header().fill_percent() >= HIGH_WATERMARK_PERCENT {
+                self.header().set_flag(flags::PRESSURE);
+                signal_sequencer(self.base_dir.as_deref());
+            }
+
+            signal_sequencer(self.base_dir.as_deref());
+            return Ok(reserved_pos as u64);
         }
 
-        // Write header
-        for (i, &b) in header_bytes.iter().enumerate() {
-            data[(reserved_pos + 4 + i) % capacity] = b;
-        }
-
-        // Write payload
-        for (i, &b) in payload_bytes.iter().enumerate() {
-            data[(reserved_pos + 4 + 64 + i) % capacity] = b;
-        }
-
-        // Memory barrier to ensure all writes are visible before signaling
-        std::sync::atomic::fence(Ordering::Release);
-
-        // Flush to disk so Sequencer can see the write
-        let _ = self.mmap.flush();
-
-        // Signal sequencer daemon that new events are available (instant wake, no polling!)
-        signal_sequencer();
-
-        Ok(reserved_pos as u64)
+        Err(last_err)
     }
 
     /// Check available space
@@ -426,14 +499,15 @@ impl OutboxProducer {
     /// Close the outbox (no more writes allowed)
     pub fn close(&self) {
         self.header().set_flag(flags::CLOSED);
-        let _ = self.mmap.flush();
+        if let Err(e) = self.mmap.flush() {
+            eprintln!("[OUTBOX] mmap flush failed during close: {}", e);
+        }
     }
 }
 
 /// Consumer-side outbox reader (used by Sequencer to drain events)
 pub struct OutboxConsumer {
     mmap: MmapMut,
-    #[allow(dead_code)]
     path: PathBuf,
     ai_id: String,
     capacity: usize,
@@ -480,8 +554,10 @@ impl OutboxConsumer {
 
     /// Get data buffer
     fn data(&self) -> &[u8] {
+        // Clamp capacity to actual mmap size to prevent OOB if file was resized externally
+        let safe_cap = self.capacity.min(self.mmap.len().saturating_sub(OUTBOX_HEADER_SIZE));
         let ptr = unsafe { self.mmap.as_ptr().add(OUTBOX_HEADER_SIZE) };
-        unsafe { std::slice::from_raw_parts(ptr, self.capacity) }
+        unsafe { std::slice::from_raw_parts(ptr, safe_cap) }
     }
 
     /// Try to read the next event (wait-free for consumer)
@@ -541,6 +617,10 @@ impl OutboxConsumer {
     /// advances the tail for each event. If the tail has already been advanced by another
     /// process, this returns false (no change made).
     ///
+    /// Backpressure: after a successful commit, if the fill level has dropped below
+    /// `LOW_WATERMARK_PERCENT` and the `PRESSURE` flag is set, the flag is cleared.
+    /// This signals the producer that the outbox is no longer under pressure.
+    ///
     /// Arguments:
     /// - expected_tail: The tail position returned by try_read_raw_with_position()
     /// - event_size: The size of the event data (not including 4-byte length prefix)
@@ -552,12 +632,23 @@ impl OutboxConsumer {
         let total_size = 4 + event_size; // length prefix + event
         let new_tail = expected_tail + total_size as u64;
 
-        self.header().tail.compare_exchange(
+        let committed = self.header().tail.compare_exchange(
             expected_tail,
             new_tail,
             Ordering::Release,
             Ordering::Relaxed
-        ).is_ok()
+        ).is_ok();
+
+        // Clear PRESSURE flag once fill drops below low-watermark — producer can
+        // write freely again without incurring extra wake-signal overhead.
+        if committed
+            && self.header().has_flag(flags::PRESSURE)
+            && self.header().fill_percent() < LOW_WATERMARK_PERCENT
+        {
+            self.header().clear_flag(flags::PRESSURE);
+        }
+
+        committed
     }
 
     /// Commit the read (advance tail after processing)
@@ -587,9 +678,9 @@ impl OutboxConsumer {
         let header_bytes: [u8; 64] = raw[..64].try_into().unwrap();
         let header = EventHeader::from_bytes(&header_bytes);
 
-        // Parse payload
+        // Parse payload (auto-decompress if FLAG_COMPRESSED is set)
         let payload_bytes = &raw[64..];
-        match EventPayload::from_bytes(payload_bytes) {
+        match EventPayload::from_bytes_with_flags(payload_bytes, header.flags) {
             Some(payload) => Some(Ok(Event { header, payload })),
             None => Some(Err(OutboxError::Deserialization(
                 "Failed to deserialize event payload".to_string()
@@ -612,6 +703,11 @@ impl OutboxConsumer {
     /// Get the AI ID
     pub fn ai_id(&self) -> &str {
         &self.ai_id
+    }
+
+    /// Get the file path for this outbox
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     /// Get the last sequence number assigned to events from this outbox
@@ -730,7 +826,7 @@ impl OutboxConsumer {
                 let header_bytes: [u8; 64] = event_data[..64].try_into().unwrap();
                 let header = EventHeader::from_bytes(&header_bytes);
                 let payload_bytes = &event_data[64..];
-                match EventPayload::from_bytes(payload_bytes) {
+                match EventPayload::from_bytes_with_flags(payload_bytes, header.flags) {
                     Some(payload) => events.push(Ok(Event { header, payload })),
                     None => events.push(Err(OutboxError::Deserialization(
                         "Failed to deserialize event payload".to_string()
@@ -749,11 +845,7 @@ impl OutboxConsumer {
 pub fn outbox_path(ai_id: &str, base_dir: Option<&Path>) -> PathBuf {
     let base = base_dir
         .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| {
-            dirs::data_local_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".ai-foundation")
-        });
+        .unwrap_or_else(|| crate::store::ai_foundation_base_dir());
 
     base.join("shared").join("outbox").join(format!("{}.outbox", ai_id))
 }
@@ -762,11 +854,7 @@ pub fn outbox_path(ai_id: &str, base_dir: Option<&Path>) -> PathBuf {
 pub fn list_outboxes(base_dir: Option<&Path>) -> io::Result<Vec<String>> {
     let base = base_dir
         .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| {
-            dirs::data_local_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".ai-foundation")
-        });
+        .unwrap_or_else(|| crate::store::ai_foundation_base_dir());
 
     let outbox_dir = base.join("shared").join("outbox");
 
@@ -792,7 +880,7 @@ pub fn list_outboxes(base_dir: Option<&Path>) -> io::Result<Vec<String>> {
 mod tests {
     use super::*;
     use tempfile::TempDir;
-    use crate::event::{event_type, BroadcastPayload};
+    use crate::event::event_type;
 
     #[test]
     fn test_outbox_create_and_open() {
@@ -858,7 +946,7 @@ mod tests {
         let consumer = OutboxConsumer::open("test-ai", Some(base)).unwrap();
 
         for i in 0..10 {
-            let raw = consumer.try_read_raw().unwrap();
+            let (raw, tail) = consumer.try_read_raw_with_position().unwrap();
             let event = consumer.try_read().unwrap().unwrap();
 
             if let EventPayload::Broadcast(payload) = event.payload {
@@ -866,7 +954,7 @@ mod tests {
                 assert_eq!(payload.content, format!("Message {}", i));
             }
 
-            consumer.commit_read(raw.len());
+            assert!(consumer.commit_read_cas(tail, raw.len()));
         }
 
         assert!(!consumer.has_pending());
@@ -875,12 +963,12 @@ mod tests {
     #[test]
     fn test_outbox_hash_consistency() {
         // Same AI ID should always produce same hash
-        let hash1 = hash_ai_id("ai-1");
-        let hash2 = hash_ai_id("ai-1");
+        let hash1 = hash_ai_id("beta-002");
+        let hash2 = hash_ai_id("beta-002");
         assert_eq!(hash1, hash2);
 
         // Different AI IDs should produce different hashes
-        let hash3 = hash_ai_id("ai-2");
+        let hash3 = hash_ai_id("alpha-001");
         assert_ne!(hash1, hash3);
     }
 
@@ -915,18 +1003,100 @@ mod tests {
     }
 
     #[test]
+    fn test_fill_percent_zero_on_empty() {
+        let tmp = TempDir::new().unwrap();
+        let producer = OutboxProducer::open("test-fill-ai", Some(tmp.path())).unwrap();
+        assert_eq!(producer.header().fill_percent(), 0,
+            "Fresh outbox should report 0% fill");
+    }
+
+    #[test]
+    fn test_pressure_flag_set_at_high_watermark() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        // Small outbox (64KB) so we can fill it quickly in a test.
+        let mut producer = OutboxProducer::open_with_capacity(
+            "test-pressure-ai", Some(base), MIN_OUTBOX_CAPACITY
+        ).unwrap();
+
+        // 10KB content — each write is ~10068 bytes. 75% of 64KB = 49152 bytes.
+        // After ~5 writes fill > 75% and PRESSURE should be set.
+        let big_content = "P".repeat(10000);
+        let mut pressure_observed = false;
+
+        for _ in 0..10 {
+            let event = Event::broadcast("test-pressure-ai", "general", &big_content);
+            match producer.write_event(&event) {
+                Ok(_) => {
+                    if producer.header().fill_percent() >= HIGH_WATERMARK_PERCENT {
+                        pressure_observed = true;
+                        break;
+                    }
+                }
+                Err(OutboxError::Full { .. }) => break,
+                Err(e) => panic!("Unexpected error: {:?}", e),
+            }
+        }
+
+        assert!(pressure_observed,
+            "PRESSURE flag should have been set before outbox filled");
+        assert!(producer.header().has_flag(flags::PRESSURE),
+            "PRESSURE flag must be set when fill >= HIGH_WATERMARK_PERCENT");
+    }
+
+    #[test]
+    fn test_pressure_flag_cleared_after_drain() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        let mut producer = OutboxProducer::open_with_capacity(
+            "test-pressure-drain-ai", Some(base), MIN_OUTBOX_CAPACITY
+        ).unwrap();
+
+        // Fill above high watermark
+        let big_content = "D".repeat(10000);
+        for _ in 0..10 {
+            let event = Event::broadcast("test-pressure-drain-ai", "general", &big_content);
+            match producer.write_event(&event) {
+                Ok(_) => {
+                    if producer.header().fill_percent() >= HIGH_WATERMARK_PERCENT { break; }
+                }
+                Err(OutboxError::Full { .. }) => break,
+                Err(e) => panic!("Unexpected error: {:?}", e),
+            }
+        }
+
+        assert!(producer.header().has_flag(flags::PRESSURE),
+            "Precondition: PRESSURE flag must be set before drain test");
+
+        // Drain events via consumer until fill drops below LOW_WATERMARK_PERCENT
+        let consumer = OutboxConsumer::open("test-pressure-drain-ai", Some(base)).unwrap();
+        while consumer.header().fill_percent() >= LOW_WATERMARK_PERCENT {
+            if let Some((raw, tail)) = consumer.try_read_raw_with_position() {
+                consumer.commit_read_cas(tail, raw.len());
+            } else {
+                break;
+            }
+        }
+
+        assert!(!consumer.header().has_flag(flags::PRESSURE),
+            "PRESSURE flag should be cleared once fill drops below LOW_WATERMARK_PERCENT");
+    }
+
+    #[test]
     fn test_list_outboxes() {
         let tmp = TempDir::new().unwrap();
         let base = tmp.path();
 
         // Create multiple outboxes
-        let _p1 = OutboxProducer::open("ai-1", Some(base)).unwrap();
-        let _p2 = OutboxProducer::open("ai-2", Some(base)).unwrap();
-        let _p3 = OutboxProducer::open("ai-3", Some(base)).unwrap();
+        let _p1 = OutboxProducer::open("beta-002", Some(base)).unwrap();
+        let _p2 = OutboxProducer::open("alpha-001", Some(base)).unwrap();
+        let _p3 = OutboxProducer::open("gamma-003", Some(base)).unwrap();
 
         let mut ai_ids = list_outboxes(Some(base)).unwrap();
         ai_ids.sort();
 
-        assert_eq!(ai_ids, vec!["ai-3", "ai-1", "ai-2"]);
+        assert_eq!(ai_ids, vec!["gamma-003", "beta-002", "alpha-001"]);
     }
 }

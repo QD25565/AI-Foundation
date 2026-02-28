@@ -1,0 +1,79 @@
+[package]
+name = "federation"
+version = "0.1.0"
+edition = "2021"
+description = "Decentralized federation protocol for AI-Foundation Teambooks"
+authors = ["AI-Foundation Team"]
+
+[lib]
+name = "federation"
+path = "src/lib.rs"
+
+[[bin]]
+name = "federation-node"
+path = "src/bin/node.rs"
+
+[dependencies]
+# Cryptography (from AFP)
+ed25519-dalek = { version = "2.1", features = ["serde", "rand_core"] }
+sha2 = "0.10"
+rand = "0.8"
+aes-gcm = "0.10"  # AES-256-GCM for passkey payload encryption (discovery/passkey.rs)
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+ciborium = "0.2"  # CBOR encoding (like AFP)
+
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+async-trait = "0.1"
+
+# P2P networking — iroh provides QUIC + NAT traversal + relay + hole-punching
+# Ed25519 identity (same keys as TeambookIdentity), multiplexed streams
+iroh = "0.96"
+
+# Discovery
+mdns-sd = "0.17"  # mDNS/DNS-SD for LAN discovery
+btleplug = { version = "0.11", optional = true }  # Bluetooth LE (gated behind bluetooth feature)
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Hex encoding
+hex = "0.4"
+
+# Home directory resolution (for identity key path)
+dirs = "5"
+
+# TeamEngram event log integration (for serving pull requests + outbound event watching)
+teamengram = { path = "../teamengram-rs" }
+
+# TOML serialization (permission manifest + consent records)
+toml = "0.8"
+
+[dev-dependencies]
+tokio-test = "0.4"
+tempfile = "3"
+
+[features]
+default = ["mdns"]
+mdns = []
+bluetooth = ["dep:btleplug"]
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"

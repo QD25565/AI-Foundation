@@ -117,10 +117,10 @@ pub struct TeamStatus {
 /// Parse `teambook status` output into a team status summary.
 ///
 /// Expected lines:
-///   AI: resonance-768
+///   AI: delta-004
 ///   Team: 6 online
-///   sage-724 (online) - "activity here"
-///   cascade-230 (offline - 4h ago)
+///   alpha-001 (online) - "activity here"
+///   gamma-003 (offline - 4h ago)
 ///   qd (human, online)
 pub fn parse_team_status(text: &str) -> TeamStatus {
     let mut members = Vec::new();
@@ -256,7 +256,7 @@ pub fn parse_dms(text: &str, recipient_h_id: &str) -> Vec<Dm> {
                 let sender_part = &remainder[..colon_pos];
                 let content = remainder[colon_pos + 1..].trim();
 
-                // sender_part may be "sage-724" or "sage-724 (2h ago)"
+                // sender_part may be "alpha-001" or "alpha-001 (2h ago)"
                 if let Some(paren) = sender_part.find('(') {
                     current_from = sender_part[..paren].trim().to_string();
                     current_timestamp = sender_part[paren + 1..].trim_end_matches(')').to_string();
@@ -647,23 +647,23 @@ mod tests {
 
     #[test]
     fn test_parse_broadcasts_basic() {
-        let text = "sage-724 (1min ago): Sage — hello team\ncontinued message\n\nlyra-584 (now): Lyra — quick update\n";
+        let text = "alpha-001 (1min ago): Sage — hello team\ncontinued message\n\nbeta-002 (now): Lyra — quick update\n";
         let bcs = parse_broadcasts(text);
         assert_eq!(bcs.len(), 2);
-        assert_eq!(bcs[0].from, "sage-724");
+        assert_eq!(bcs[0].from, "alpha-001");
         assert_eq!(bcs[0].timestamp, "1min ago");
         assert!(bcs[0].content.contains("Sage — hello team"));
-        assert_eq!(bcs[1].from, "lyra-584");
+        assert_eq!(bcs[1].from, "beta-002");
     }
 
     #[test]
     fn test_parse_dms_basic() {
-        let text = "#100 sage-724: hello resonance\ncontinued\n\n#101 lyra-584: hi there\n";
-        let dms = parse_dms(text, "resonance-768");
+        let text = "#100 alpha-001: hello resonance\ncontinued\n\n#101 beta-002: hi there\n";
+        let dms = parse_dms(text, "delta-004");
         assert_eq!(dms.len(), 2);
         assert_eq!(dms[0].id, 100);
-        assert_eq!(dms[0].from, "sage-724");
-        assert_eq!(dms[0].to, "resonance-768");
+        assert_eq!(dms[0].from, "alpha-001");
+        assert_eq!(dms[0].to, "delta-004");
     }
 
     #[test]
@@ -677,7 +677,7 @@ mod tests {
 
     #[test]
     fn test_parse_team_status_basic() {
-        let text = "AI: resonance-768\nTeam: 3 online\nsage-724 (online) - \"Working on messages.rs\"\nlyra-584 (online)\ncascade-230 (offline - 4h ago)\n";
+        let text = "AI: delta-004\nTeam: 3 online\nalpha-001 (online) - \"Working on messages.rs\"\nbeta-002 (online)\ngamma-003 (offline - 4h ago)\n";
         let status = parse_team_status(text);
         assert_eq!(status.online_count, 3);
         assert_eq!(status.members.len(), 3);
@@ -689,7 +689,7 @@ mod tests {
 
     #[test]
     fn test_parse_team_status_with_human() {
-        let text = "AI: resonance-768\nTeam: 2 online\nsage-724 (online)\nqd (human, online)\n";
+        let text = "AI: delta-004\nTeam: 2 online\nalpha-001 (online)\nqd (human, online)\n";
         let status = parse_team_status(text);
         assert_eq!(status.members.len(), 2);
         assert_eq!(status.members[0].member_type, "ai");
@@ -701,7 +701,7 @@ mod tests {
     #[test]
     fn test_parse_team_status_derived_online_count() {
         // If "Team: N online" line absent, count is derived from online members
-        let text = "sage-724 (online)\nlyra-584 (offline - 2h ago)\ncascade-230 (online)\n";
+        let text = "alpha-001 (online)\nbeta-002 (offline - 2h ago)\ngamma-003 (online)\n";
         let status = parse_team_status(text);
         assert_eq!(status.online_count, 2);
         assert_eq!(status.members.len(), 3);
@@ -709,19 +709,19 @@ mod tests {
 
     #[test]
     fn test_parse_dms_with_timestamp_in_sender() {
-        let text = "#200 sage-724 (5min ago): hello there\n\n#201 lyra-584: quick note\n";
-        let dms = parse_dms(text, "resonance-768");
+        let text = "#200 alpha-001 (5min ago): hello there\n\n#201 beta-002: quick note\n";
+        let dms = parse_dms(text, "delta-004");
         assert_eq!(dms.len(), 2);
         assert_eq!(dms[0].id, 200);
-        assert_eq!(dms[0].from, "sage-724");
+        assert_eq!(dms[0].from, "alpha-001");
         assert_eq!(dms[0].timestamp, "5min ago");
         assert_eq!(dms[1].id, 201);
-        assert_eq!(dms[1].from, "lyra-584");
+        assert_eq!(dms[1].from, "beta-002");
     }
 
     #[test]
     fn test_parse_dms_multiline_content() {
-        let text = "#10 sage-724: line one\nline two\nline three\n\n";
+        let text = "#10 alpha-001: line one\nline two\nline three\n\n";
         let dms = parse_dms(text, "qd");
         assert_eq!(dms.len(), 1);
         assert!(dms[0].content.contains("line one"));
@@ -730,13 +730,13 @@ mod tests {
 
     #[test]
     fn test_parse_dialogues_basic() {
-        let text = "[42] sage-724 ↔ lyra-584 \"API design review\" (open, 5 msgs, 2h ago)\n[7] resonance-768 ↔ cascade-230 \"Bug triage\" (closed, 3 msgs)\n";
+        let text = "[42] alpha-001 ↔ beta-002 \"API design review\" (open, 5 msgs, 2h ago)\n[7] delta-004 ↔ gamma-003 \"Bug triage\" (closed, 3 msgs)\n";
         let dialogues = parse_dialogues(text);
         assert_eq!(dialogues.len(), 2);
 
         assert_eq!(dialogues[0].id, 42);
-        assert_eq!(dialogues[0].initiator, "sage-724");
-        assert_eq!(dialogues[0].responder, "lyra-584");
+        assert_eq!(dialogues[0].initiator, "alpha-001");
+        assert_eq!(dialogues[0].responder, "beta-002");
         assert_eq!(dialogues[0].topic, "API design review");
         assert_eq!(dialogues[0].status, "open");
         assert_eq!(dialogues[0].message_count, 5);
@@ -808,10 +808,10 @@ mod tests {
 
     #[test]
     fn test_parse_tasks_with_owner() {
-        let text = "#5 [in_progress] owner: sage-724 Integrate BM25 IDF\n#6 [pending] Update docs\n";
+        let text = "#5 [in_progress] owner: alpha-001 Integrate BM25 IDF\n#6 [pending] Update docs\n";
         let tasks = parse_tasks(text);
         assert_eq!(tasks.len(), 2);
-        assert_eq!(tasks[0].owner, Some("sage-724".to_string()));
+        assert_eq!(tasks[0].owner, Some("alpha-001".to_string()));
         assert!(tasks[0].description.contains("Integrate BM25 IDF"));
         assert_eq!(tasks[1].owner, None);
     }

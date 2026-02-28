@@ -431,8 +431,6 @@ const fn bulletin_size() -> usize {
 /// The bulletin board - shared memory for awareness data
 pub struct BulletinBoard {
     mmap: MmapMut,
-    #[allow(dead_code)]
-    path: PathBuf,
 }
 
 impl BulletinBoard {
@@ -494,7 +492,7 @@ impl BulletinBoard {
             mmap.flush().context("Failed to flush bulletin")?;
         }
 
-        Ok(Self { mmap, path })
+        Ok(Self { mmap })
     }
 
     /// Get the header (read-only)
@@ -943,8 +941,8 @@ mod tests {
         {
             let mut board = BulletinBoard::open(Some(path.clone())).unwrap();
             board.set_dms(&[
-                (1, 0, "ai-1", "ai-2", "Hello Sage!"),
-                (2, 0, "ai-3", "ai-1", "Test message"),
+                (1, 0, "beta-002", "alpha-001", "Hello Sage!"),
+                (2, 0, "gamma-003", "beta-002", "Test message"),
             ]);
             board.set_votes(&[
                 (1, "Should we use Rust?", 3, 4),
@@ -957,7 +955,7 @@ mod tests {
             let board = BulletinBoard::open(Some(path)).unwrap();
             let dms = board.dms();
             assert_eq!(dms.len(), 2);
-            assert_eq!(dms[0].from_ai_str(), "ai-1");
+            assert_eq!(dms[0].from_ai_str(), "beta-002");
             assert_eq!(dms[0].content_str(), "Hello Sage!");
 
             let votes = board.votes();
@@ -972,13 +970,13 @@ mod tests {
         let path = dir.path().join("test_bulletin.shm");
 
         let mut board = BulletinBoard::open(Some(path)).unwrap();
-        board.set_dms(&[(1, 0, "ai-1", "ai-2", "URGENT: Need help!")]);
+        board.set_dms(&[(1, 0, "beta-002", "alpha-001", "URGENT: Need help!")]);
         board.set_votes(&[(1, "Approve PR?", 2, 4)]);
         board.commit().unwrap();
 
         let output = board.to_hook_output();
         assert!(output.contains("|DMs|"));
-        assert!(output.contains("ai-1"));
+        assert!(output.contains("beta-002"));
         assert!(output.contains("|VOTES|"));
     }
 }

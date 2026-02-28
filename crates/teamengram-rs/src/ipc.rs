@@ -260,9 +260,22 @@ impl ShmNotifyCallback {
                 Ok(())
             }
             Err(1) => {
-                // Wait for initialization (spin with hint - brief wait, no sleep)
-                while header.init_state.load(Ordering::Acquire) == 1 {
-                    std::hint::spin_loop(); // CPU hint, no syscall
+                // Another process claimed init — wait with bounded timeout.
+                // Initialization takes microseconds (few mmap writes + flush).
+                // If the initializer crashes, state stays at 1 forever — bail
+                // instead of burning CPU indefinitely.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+                loop {
+                    if header.init_state.load(Ordering::Acquire) != 1 {
+                        break;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        anyhow::bail!(
+                            "IPC initialization timed out — another process claimed init \
+                             but did not complete within 100ms (possible crash during init)"
+                        );
+                    }
+                    std::thread::yield_now(); // Yield CPU time slice, not spin
                 }
                 Ok(())
             }
@@ -556,15 +569,15 @@ mod tests {
         // Publish via NotifyCallback trait
         callback.notify(
             NotifyType::Broadcast,
-            "ai-2",
+            "alpha-001",
             "",
             "Hello team!"
         );
 
         callback.notify(
             NotifyType::DirectMessage,
-            "ai-2",
-            "ai-1",
+            "alpha-001",
+            "beta-002",
             "Hey Lyra!"
         );
 
@@ -580,7 +593,7 @@ mod tests {
     #[test]
     fn test_hash_consistency() {
         // Verify hash matches Lyra's implementation
-        assert_eq!(hash_ai_id("ai-2"), hash_ai_id("ai-2"));
-        assert_ne!(hash_ai_id("ai-2"), hash_ai_id("ai-1"));
+        assert_eq!(hash_ai_id("alpha-001"), hash_ai_id("alpha-001"));
+        assert_ne!(hash_ai_id("alpha-001"), hash_ai_id("beta-002"));
     }
 }

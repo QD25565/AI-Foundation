@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ci-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Check compilation
+        run: cargo check --all-targets
+
+      - name: Clippy lints
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --lib
+
+  python-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Verify installer modules import
+        run: |
+          cd ${{ github.workspace }}
+          python -c "from installer import manifest; print('manifest OK')"
+          python -c "from installer import remote; print('remote OK')"
+          python -c "from installer import binaries; print('binaries OK')"
+          python -c "from installer import preflight; print('preflight OK')"
+          python -c "from installer import platform; print('platform OK')"
+          python -c "from installer import verify; print('verify OK')"
+          python -c "from installer import ui; print('ui OK')"
+
+      - name: Verify scripts compile
+        run: |
+          python -m py_compile install.py
+          python -m py_compile update.py
+          python -m py_compile sign.py
+          python -m py_compile packaging/release.py
+          echo "All scripts compile OK"
+
+      - name: Syntax check install.sh
+        run: bash -n install.sh
+
+      - name: Verify sign.py help
+        run: python sign.py --help
+
+      - name: Verify update.py help
+        run: python update.py --help
+
+  rust-build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ci-windows-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build (Windows)
+        run: cargo build --release
+
+      - name: Run tests
+        run: cargo test --lib

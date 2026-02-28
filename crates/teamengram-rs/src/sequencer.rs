@@ -47,10 +47,13 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 // std::time::{Duration, Instant} used in tests only (test modules import their own)
 
+use crate::crypto::TeamEngramCrypto;
 use crate::event::EventHeader;
+#[cfg(test)]
+use crate::event::Event;
 use crate::event_log::EventLogWriter;
 use crate::outbox::{OutboxConsumer, list_outboxes};
-use crate::wake::{WakeCoordinator, WakeReason, SequencerWakeReceiver};
+use crate::wake::{WakeCoordinator, WakeReason, SequencerWakeReceiver, signal_sequencer, signal_federation};
 
 /// Sequencer configuration
 #[derive(Debug, Clone)]
@@ -63,6 +66,8 @@ pub struct SequencerConfig {
     pub sync_interval: u64,
     /// Enable wake signaling
     pub enable_wake: bool,
+    /// Encryption context for event log payloads (None = plaintext)
+    pub crypto: Option<Arc<TeamEngramCrypto>>,
     // REMOVED: outbox_refresh_secs - NO POLLING, pure event-driven
 }
 
@@ -73,6 +78,7 @@ impl Default for SequencerConfig {
             max_batch_size: 1000,
             sync_interval: 100,
             enable_wake: true,
+            crypto: None,
             // REMOVED: outbox_refresh_secs - NO POLLING
         }
     }
@@ -115,12 +121,21 @@ pub struct SequencerHandle {
     thread_handle: Option<JoinHandle<SequencerResult<()>>>,
     /// Statistics
     stats: Arc<SequencerStats>,
+    /// Base directory — needed to signal the wake event on shutdown
+    base_dir: Option<std::path::PathBuf>,
 }
 
 impl SequencerHandle {
-    /// Stop the sequencer gracefully
+    /// Stop the sequencer gracefully.
+    ///
+    /// Sets the stop flag then signals the wake event so the sequencer thread
+    /// wakes from its `WaitForSingleObject`/`sem_wait` and sees the flag.
+    /// Without the signal the thread would block forever in the wait and
+    /// `join()` would deadlock.
     pub fn stop(mut self) -> SequencerResult<()> {
         self.stop_signal.store(true, Ordering::Release);
+        // Wake the sequencer thread so it can observe the stop flag.
+        signal_sequencer(self.base_dir.as_deref());
         if let Some(handle) = self.thread_handle.take() {
             handle.join().map_err(|_| SequencerError::ThreadPanic)??;
         }
@@ -137,9 +152,11 @@ impl SequencerHandle {
         &self.stats
     }
 
-    /// Request stop without waiting
+    /// Request stop without waiting (fire-and-forget).
     pub fn request_stop(&self) {
         self.stop_signal.store(true, Ordering::Release);
+        // Wake the thread so it observes the flag without further writes.
+        signal_sequencer(self.base_dir.as_deref());
     }
 }
 
@@ -181,15 +198,21 @@ pub struct Sequencer {
     next_sequence: u64,
     events_since_sync: u64,
     /// Lightweight dialogue participant map for wake signaling on responses.
-    /// Maps dialogue_id → (initiator, responder) so DialogueRespond can wake the other party.
-    dialogue_participants: HashMap<u64, (String, String)>,
+    /// Maps dialogue_id → (ordered participants, current turn_index).
+    /// DialogueRespond increments turn_index and wakes participants[new_index % len].
+    dialogue_participants: HashMap<u64, (Vec<String>, usize)>,
 }
 
 impl Sequencer {
     /// Create a new sequencer
     pub fn new(config: SequencerConfig) -> SequencerResult<Self> {
-        let event_log = EventLogWriter::open(config.base_dir.as_deref())?;
+        let mut event_log = EventLogWriter::open(config.base_dir.as_deref())?;
         let next_sequence = event_log.current_sequence() + 1;
+
+        // Enable encryption if crypto context is provided
+        if let Some(ref crypto) = config.crypto {
+            event_log.set_crypto(Arc::clone(crypto));
+        }
 
         let wake_coordinator = if config.enable_wake {
             WakeCoordinator::new("sequencer").ok()
@@ -214,6 +237,10 @@ impl Sequencer {
         let stop_signal = Arc::new(AtomicBool::new(false));
         let stop_clone = Arc::clone(&stop_signal);
 
+        // Capture base_dir before config is moved into Sequencer::new().
+        // Needed by SequencerHandle::stop() to signal the wake event.
+        let base_dir = config.base_dir.clone();
+
         let mut sequencer = Self::new(config)?;
         let stats = Arc::clone(&sequencer.stats);
 
@@ -227,6 +254,7 @@ impl Sequencer {
             stop_signal,
             thread_handle: Some(handle),
             stats,
+            base_dir,
         })
     }
 
@@ -262,7 +290,7 @@ impl Sequencer {
     ) -> SequencerResult<()> {
         // Create the cross-process wake receiver - FAIL LOUDLY if this doesn't work
         eprintln!("[SEQUENCER] Creating SequencerWakeReceiver...");
-        let wake_receiver = SequencerWakeReceiver::new()
+        let wake_receiver = SequencerWakeReceiver::new(self.config.base_dir.as_deref())
             .map_err(|e| SequencerError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("CRITICAL: Failed to create SequencerWakeReceiver: {}. Event-driven wake is REQUIRED - no fallbacks!", e)
@@ -368,6 +396,13 @@ impl Sequencer {
             }
 
             let events_from_outbox = self.drain_outbox(&ai_id)?;
+
+            // Signal the outbox drain event so any waiting writer wakes immediately.
+            // Zero-cost if no writer is waiting (event doesn't exist or no waiter).
+            if events_from_outbox > 0 {
+                crate::wake::signal_outbox_drained(&ai_id, self.config.base_dir.as_deref());
+            }
+
             total_processed += events_from_outbox;
         }
 
@@ -452,7 +487,10 @@ impl Sequencer {
             // Signal wake for affected AIs
             // Pass fields explicitly to avoid borrow conflict with self.outboxes
             let wake_enabled = self.wake_coordinator.is_some();
-            Self::signal_wake_if_needed(wake_enabled, &mut self.dialogue_participants, &header, payload_bytes);
+            Self::signal_wake_if_needed(wake_enabled, &mut self.dialogue_participants, &header, payload_bytes, self.config.base_dir.as_deref());
+
+            // Signal federation node (if running) — zero-cost if no federation node is listening.
+            signal_federation(self.config.base_dir.as_deref());
 
             processed += 1;
             self.events_since_sync += 1;
@@ -475,9 +513,10 @@ impl Sequencer {
     /// Signal wake events for affected AIs
     fn signal_wake_if_needed(
         wake_enabled: bool,
-        dialogue_participants: &mut HashMap<u64, (String, String)>,
+        dialogue_participants: &mut HashMap<u64, (Vec<String>, usize)>,
         header: &EventHeader,
         payload_bytes: &[u8],
+        base_dir: Option<&std::path::Path>,
     ) {
         if !wake_enabled {
             return;
@@ -485,7 +524,7 @@ impl Sequencer {
 
         let source_ai = header.source_ai_str();
 
-        let payload = match crate::event::EventPayload::from_bytes(payload_bytes) {
+        let payload = match crate::event::EventPayload::from_bytes_with_flags(payload_bytes, header.flags) {
             Some(p) => p,
             None => return,
         };
@@ -505,23 +544,22 @@ impl Sequencer {
                 }
             }
             crate::event::EventPayload::DialogueStart(ds) => {
-                // Track participants so DialogueRespond can wake the other party
+                // Track all participants for round-robin wake routing.
+                // turn_index starts at 1: first non-initiator goes first.
                 let dialogue_id = header.sequence;
-                dialogue_participants.insert(
-                    dialogue_id,
-                    (source_ai.to_string(), ds.responder.clone()),
-                );
-                Self::signal_ai(&ds.responder, WakeReason::DialogueTurn, source_ai, &ds.topic);
+                let turn_index = if ds.participants.len() > 1 { 1usize } else { 0 };
+                dialogue_participants.insert(dialogue_id, (ds.participants.clone(), turn_index));
+                // Wake all non-initiator participants so they see the invite
+                for p in ds.participants.iter().skip(1) {
+                    Self::signal_ai(p, WakeReason::DialogueTurn, source_ai, &ds.topic);
+                }
             }
             crate::event::EventPayload::DialogueRespond(dr) => {
-                // Look up participants and wake the OTHER party
-                if let Some((initiator, responder)) = dialogue_participants.get(&dr.dialogue_id) {
-                    let target = if source_ai == initiator {
-                        responder.clone()
-                    } else {
-                        initiator.clone()
-                    };
-                    Self::signal_ai(&target, WakeReason::DialogueTurn, source_ai, &dr.content);
+                // Advance turn_index and wake the next participant in the rotation.
+                if let Some((participants, turn_index)) = dialogue_participants.get_mut(&dr.dialogue_id) {
+                    *turn_index += 1;
+                    let next = &participants[*turn_index % participants.len()];
+                    Self::signal_ai(next, WakeReason::DialogueTurn, source_ai, &dr.content);
                 }
             }
             crate::event::EventPayload::DialogueEnd(de) => {
@@ -532,7 +570,18 @@ impl Sequencer {
                 let _ = vc;
             }
             crate::event::EventPayload::RoomMessage(rm) => {
-                let _ = rm;
+                // Wake all room members except sender (scoped delivery)
+                for p in rm.participants.iter().filter(|p| p.as_str() != source_ai) {
+                    Self::signal_ai(p, WakeReason::Broadcast, source_ai, &rm.content);
+                }
+            }
+            crate::event::EventPayload::FileRelease(fr) => {
+                // Wake all known AIs except the releaser so they see the file is available
+                if let Ok(ai_ids) = list_outboxes(base_dir) {
+                    for ai_id in ai_ids.iter().filter(|id| id.as_str() != source_ai) {
+                        Self::signal_ai(ai_id, WakeReason::FileReleased, source_ai, &fr.path);
+                    }
+                }
             }
             _ => {}
         }
@@ -541,7 +590,7 @@ impl Sequencer {
     /// Signal a specific AI to wake up
     fn signal_ai(ai_id: &str, reason: WakeReason, from_ai: &str, content: &str) {
         // Open the target AI's wake event and signal it
-        // NO TRUNCATION - full content always (architecture decision: context starvation is the enemy)
+        // NO TRUNCATION - full content always (QD directive: context starvation is the enemy)
         if let Ok(wake) = WakeCoordinator::new(ai_id) {
             wake.wake(reason, from_ai, content);
         }
@@ -656,7 +705,7 @@ mod tests {
         let base = tmp.path();
 
         // Create multiple outboxes
-        for ai_id in &["ai-1", "ai-2", "ai-3"] {
+        for ai_id in &["beta-002", "alpha-001", "gamma-003"] {
             let mut producer = OutboxProducer::open(ai_id, Some(base)).unwrap();
             for i in 0..3 {
                 let event = Event::broadcast(ai_id, "general", &format!("{} message {}", ai_id, i));

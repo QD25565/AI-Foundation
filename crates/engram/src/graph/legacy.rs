@@ -92,6 +92,17 @@ impl GraphIndex {
             .push(from);
     }
 
+    /// Invalidate (soft-delete) an edge, removing it from graph scoring
+    ///
+    /// For the legacy GraphIndex layer, invalidation is equivalent to removal.
+    /// Callers should follow up with `compute_pagerank()` and `persist_indexes()`
+    /// to propagate the structural change.
+    ///
+    /// The CsrGraph layer (KG 2.0) uses proper t_invalid timestamps instead.
+    pub fn invalidate_edge(&mut self, from: u64, to: u64) -> bool {
+        self.remove_edge(from, to)
+    }
+
     /// Remove an edge between notes
     pub fn remove_edge(&mut self, from: u64, to: u64) -> bool {
         let mut removed = false;

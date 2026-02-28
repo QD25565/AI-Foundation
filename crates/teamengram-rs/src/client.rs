@@ -12,6 +12,7 @@
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::path::PathBuf;
 // Only need tokio BufReader for Unix
@@ -109,8 +110,9 @@ impl TeamEngramClient {
             anyhow::bail!("AI_ID cannot be empty or 'unknown' - set a valid AI identity");
         }
 
-        // SWMR: All AIs connect to single shared daemon
-        let pipe_name = Self::DEFAULT_PIPE.to_string();
+        // SWMR: All AIs connect to single shared daemon.
+        // AI_FOUNDATION_DATA_DIR + PIPE_NAME can both be overridden for test isolation.
+        let pipe_name = std::env::var("PIPE_NAME").unwrap_or_else(|_| Self::DEFAULT_PIPE.to_string());
         Self::connect_to(&pipe_name).await
     }
 
@@ -206,15 +208,16 @@ impl TeamEngramClient {
                 .spawn();
 
             if spawn_result.is_ok() {
-                // Wait for daemon to start with exponential backoff (one-time startup, not polling)
-                // Backoff: 100ms, 200ms, 400ms, 800ms = 1.5s total max wait
-                let mut delay_ms = 100u64;
-                for _ in 0..4 {
-                    tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
-                    if let Ok(client) = Self::connect().await {
-                        return Ok(client);
-                    }
-                    delay_ms *= 2; // Exponential backoff
+                // Event-driven wait: daemon signals ready event after creating pipe.
+                // Zero CPU while waiting — blocked on Named Event / POSIX semaphore.
+                let ai_id = std::env::var("AI_ID").unwrap_or_default();
+                let _ready = tokio::task::spawn_blocking(move || {
+                    crate::wake::wait_daemon_ready(&ai_id, std::time::Duration::from_secs(2))
+                }).await.unwrap_or(false);
+
+                // Try to connect now that daemon signaled ready
+                if let Ok(client) = Self::connect().await {
+                    return Ok(client);
                 }
             }
         }
@@ -662,11 +665,12 @@ impl TeamEngramClient {
     // DIALOGUES
     // =========================================================================
 
-    /// Start a dialogue
+    /// Start a dialogue with one or more AIs.
+    /// `responder` may be a single AI ID or comma-separated list for n-party dialogues.
     pub async fn dialogue_start(&mut self, responder: &str, topic: &str) -> Result<u64> {
         let result = self.call("start_dialogue", json!({
             "initiator": self.ai_id,
-            "responder": responder,
+            "responder": responder,  // comma-separated for n-party
             "topic": topic
         })).await?;
 
@@ -1093,16 +1097,21 @@ pub struct RoomInfo {
     pub topic: String,
     pub participants: Vec<String>,
     pub is_open: bool,
+    pub mutes: HashMap<String, u64>,
+    pub conclusion: Option<String>,
+    pub pinned_messages: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DialogueInfo {
     pub id: u64,
     pub initiator: String,
-    pub responder: String,
+    pub participants: Vec<String>,
     pub topic: String,
     pub status: String,
-    pub turn: u8,
+    pub current_turn: String,
+    pub turn_index: usize,
+    pub message_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1111,7 +1120,8 @@ pub struct DialogueTurnInfo {
     pub current_turn: String,
     pub is_my_turn: bool,
     pub initiator: String,
-    pub responder: String,
+    pub participants: Vec<String>,
+    pub turn_index: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

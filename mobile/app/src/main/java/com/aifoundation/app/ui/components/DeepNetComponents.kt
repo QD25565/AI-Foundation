@@ -27,8 +27,8 @@ import androidx.compose.ui.unit.sp
 import com.aifoundation.app.ui.theme.DeepNetColors
 
 /**
- * Deep Net themed UI components
- * Network-inspired visual design for the federation UI
+ * Themed UI components
+ * Network-inspired visual design for the AI-Foundation mobile app
  */
 
 /**
@@ -45,7 +45,7 @@ enum class DeepNetCardVariant {
 }
 
 /**
- * Deep Net styled card with cut corners and optional effects
+ * Styled card with cut corners and optional effects
  */
 @Composable
 fun DeepNetCard(
@@ -127,7 +127,7 @@ fun DeepNetCard(
 }
 
 /**
- * Deep Net styled button with cut corners
+ * Styled button with cut corners
  */
 @Composable
 fun DeepNetButton(
@@ -216,7 +216,7 @@ enum class DeepNetButtonVariant {
 }
 
 /**
- * Deep Net status indicator with animated glow
+ * Status indicator with animated glow
  */
 @Composable
 fun DeepNetStatusIndicator(
@@ -292,7 +292,7 @@ enum class DeepNetStatus {
 }
 
 /**
- * Deep Net section header with stylized design
+ * Section header with stylized design
  */
 @Composable
 fun DeepNetSectionHeader(
@@ -351,7 +351,7 @@ fun DeepNetSectionHeader(
 }
 
 /**
- * Deep Net data display row
+ * Data display row
  */
 @Composable
 fun DeepNetDataRow(
@@ -381,7 +381,7 @@ fun DeepNetDataRow(
 }
 
 /**
- * Deep Net divider with gradient fade
+ * Divider with gradient fade
  */
 @Composable
 fun DeepNetDivider(
@@ -406,7 +406,7 @@ fun DeepNetDivider(
 }
 
 /**
- * Deep Net loading indicator
+ * Loading indicator
  */
 @Composable
 fun DeepNetLoadingIndicator(

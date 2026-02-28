@@ -4,13 +4,15 @@ import subprocess
 from pathlib import Path
 
 from .platform import Platform, binary_ext
-from .ui import ok, error, step, info
+from . import manifest as mf
+from .ui import ok, warn, error, step, info
 
 
-def run_checks(bin_dir: Path, platform: Platform) -> bool:
+def run_checks(bin_dir: Path, platform: Platform, skip_manifest: bool = False) -> bool:
     """
     Run basic health checks after installation.
     Returns True if all critical checks pass.
+    Set skip_manifest=True if manifest was already verified separately.
     """
     step("Verifying installation")
     ext = binary_ext(platform)
@@ -57,6 +59,21 @@ def run_checks(bin_dir: Path, platform: Platform) -> bool:
             ok("Forge available")
         else:
             info("  Forge --help failed (non-critical)")
+
+    # Check manifest integrity (non-critical but informative)
+    if not skip_manifest:
+        manifest = mf.load(bin_dir)
+        if manifest:
+            integrity_ok, messages = mf.verify_all(bin_dir, manifest)
+            if integrity_ok:
+                ok(f"Manifest integrity verified ({len(messages)} binaries)")
+            else:
+                warn("Manifest integrity check found issues:")
+                for msg in messages:
+                    if "MISSING" in msg or "mismatch" in msg:
+                        warn(f"  {msg}")
+        else:
+            info("No manifest found (run sign.py to generate)")
 
     return all_ok
 

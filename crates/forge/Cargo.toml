@@ -3,9 +3,9 @@ name = "forge"
 version = "0.1.0"
 edition = "2021"
 authors = ["AI-Foundation Team"]
-description = "AI-Foundation CLI - Empowering AIs everywhere with tools and memory"
+description = "AI-Foundation CLI — model-agnostic AI assistant with tool support"
 license = "MIT"
-repository = "https://github.com/QD25565/ai-foundation"
+repository = "https://github.com/QD25565/mcp-ai-foundation"
 keywords = ["ai", "cli", "llm", "tools", "memory"]
 categories = ["command-line-utilities", "development-tools"]
 
@@ -53,23 +53,29 @@ futures = "0.3"
 tokio-stream = "0.1"
 async-trait = "0.1"
 
-# Local notebook integration (direct Rust calls, ~50x faster than CLI subprocess)
+# Local notebook integration (direct Rust calls)
 notebook_core = { package = "notebook-rs", path = "../notebook-rs", optional = true }
 
-# Local LLM inference via llama.cpp (optional, requires cmake + C++17)
-# Pin to 0.1.127 to match our patched llama-cpp-sys-2 (see workspace [patch.crates-io])
+# Local LLM inference via llama.cpp (optional)
+# Pin to 0.1.127 to match our patched llama-cpp-sys-2
 llama-cpp-2 = { version = "=0.1.127", optional = true }
 
 [features]
 default = []
-# notebook feature requires notebook-rs to have a [lib] target (Engram rewrite is binary-only).
-# Without it, notebook tools fall back to CLI subprocess (see tools/mod.rs #[cfg(not(feature="notebook"))]).
 notebook = ["notebook_core"]
 local-llm = ["llama-cpp-2"]
-# Note: pre-built forge.exe in bin/windows/ includes full notebook + teambook integration.
-# Building from source uses notebook-cli subprocess fallback. local-llm requires cmake + C++17.
+
+# Patch for Windows GNU target compatibility
+[patch.crates-io]
+llama-cpp-sys-2 = { path = "patches/llama-cpp-sys-2" }
 
 [[bin]]
 name = "forge"
 path = "src/main.rs"
 
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

@@ -23,6 +23,10 @@ Thumbs.db
 *.engram
 *.wal
 
+# Python
+__pycache__/
+*.pyc
+
 # Environment
 .env
 .env.local

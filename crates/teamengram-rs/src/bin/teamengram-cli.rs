@@ -197,7 +197,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-// NO TRUNCATION - architecture decision: "context starvation is the ABSOLUTE ENEMY OF AIs"
+// NO TRUNCATION - QD directive: "context starvation is the ABSOLUTE ENEMY OF AIs"
 // This function preserved for API compatibility but returns full content
 fn truncate(s: &str, _max: usize) -> String {
     s.to_string()

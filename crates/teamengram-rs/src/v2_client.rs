@@ -8,13 +8,15 @@
 //!
 //! Usage:
 //! ```ignore
-//! let client = V2Client::open("ai-1", None)?;
+//! let client = V2Client::open("beta-002", None)?;
 //! client.broadcast("general", "Hello team!")?;
 //! let messages = client.recent_broadcasts(10)?;
 //! ```
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use crate::crypto::TeamEngramCrypto;
 use crate::event::{Event, EventPayload, event_type};
 use crate::outbox::{OutboxProducer, OutboxConsumer};
 use crate::event_log::{EventLogReader, EventLogWriter};
@@ -60,15 +62,15 @@ pub struct V2Client {
 }
 
 impl V2Client {
-    /// Open or create a V2 client for an AI
-    pub fn open(ai_id: &str, base_dir: Option<&Path>) -> V2Result<Self> {
+    /// Open or create a V2 client for an AI.
+    ///
+    /// If `crypto` is provided, the event log reader will decrypt encrypted payloads.
+    /// Pass `None` to read only plaintext events (encrypted events return errors).
+    pub fn open(ai_id: &str, base_dir: Option<&Path>, crypto: Option<Arc<TeamEngramCrypto>>) -> V2Result<Self> {
         let base = base_dir
             .map(PathBuf::from)
             .unwrap_or_else(|| {
-                dirs::data_local_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join(".ai-foundation")
-                    .join("v2")
+                crate::store::ai_foundation_base_dir().join("v2")
             });
 
         std::fs::create_dir_all(&base).map_err(|e| V2Error::EventLog(e.to_string()))?;
@@ -88,6 +90,11 @@ impl V2Client {
 
         let mut reader = EventLogReader::open(Some(&base))
             .map_err(|e| V2Error::EventLog(e.to_string()))?;
+
+        // Set decryption key before warm_cache reads events
+        if let Some(ref c) = crypto {
+            reader.set_crypto(Arc::clone(c));
+        }
 
         // WARM CACHE on startup - populate content caches from event log
         // This enables O(1) queries instead of O(n) log scans
@@ -222,13 +229,16 @@ impl V2Client {
         loop {
         
             let event = match temp_reader.try_read() {
-        
+
                 Ok(Some(e)) => e,
-        
+
                 Ok(None) => break,
-        
-                Err(_) => continue, // Skip events that fail to deserialize
-        
+
+                Err(e) => {
+                    eprintln!("[V2] Corrupted event in get_pending_dm_senders, stopping scan: {}", e);
+                    break;
+                }
+
             };
             if event.header.event_type == event_type::DIRECT_MESSAGE {
                 if let EventPayload::DirectMessage(payload) = &event.payload {
@@ -282,13 +292,23 @@ impl V2Client {
 
     // ========== DIALOGUES ==========
 
-    /// Start a dialogue with another AI
-    pub fn start_dialogue(&mut self, responder: &str, topic: &str) -> V2Result<u64> {
-        let event = Event::dialogue_start(&self.ai_id, responder, topic);
+    /// Start a dialogue with one or more AIs.
+    /// `other_participants` are the non-initiator AIs in turn order.
+    /// For a 2-party dialogue, pass a single element slice.
+    pub fn start_dialogue(&mut self, other_participants: &[&str], topic: &str) -> V2Result<u64> {
+        // Build full participant list: initiator first, then the rest
+        let mut all_participants: Vec<String> = vec![self.ai_id.clone()];
+        all_participants.extend(other_participants.iter().map(|s| s.to_string()));
+        let event = Event::dialogue_start(&self.ai_id, &all_participants, topic, true);
         let timestamp = event.header.timestamp; // Use as dialogue ID
         self.outbox.write_event(&event)
             .map_err(|e| V2Error::Outbox(e.to_string()))?;
         Ok(timestamp)
+    }
+
+    /// Convenience: start a dialogue with a single other AI (common case)
+    pub fn start_dialogue_one(&mut self, responder: &str, topic: &str) -> V2Result<u64> {
+        self.start_dialogue(&[responder], topic)
     }
 
     /// Respond to a dialogue
@@ -357,13 +377,13 @@ impl V2Client {
         Ok(timestamp)
     }
 
-    // Locks removed — deprecated (Feb 2026, architecture decision)
+    // Locks removed — deprecated (Feb 2026, QD directive)
 
     // ========== FILE CLAIMS ==========
 
     /// Claim a file for exclusive work
-    pub fn claim_file(&mut self, path: &str, duration_secs: u32) -> V2Result<u64> {
-        let event = Event::file_claim(&self.ai_id, path, duration_secs);
+    pub fn claim_file(&mut self, path: &str, duration_secs: u32, working_on: &str) -> V2Result<u64> {
+        let event = Event::file_claim(&self.ai_id, path, duration_secs, working_on);
         let timestamp = event.header.timestamp; // Use as claim ID
         self.outbox.write_event(&event)
             .map_err(|e| V2Error::Outbox(e.to_string()))?;
@@ -380,23 +400,23 @@ impl V2Client {
     }
 
     /// Get active file claims from ViewEngine cache (O(k) instead of O(n))
-    pub fn get_claims(&mut self) -> V2Result<Vec<(String, String, u64, u32)>> {
+    pub fn get_claims(&mut self) -> V2Result<Vec<(String, String, u64, u32, String)>> {
         self.sync()?;
 
         // Use ViewEngine cache for O(k) access (already filters expired)
         let cached = self.view.get_active_claims();
 
         Ok(cached.into_iter()
-            .map(|c| (c.path.clone(), c.holder.clone(), c.claimed_at, c.duration_seconds))
+            .map(|c| (c.path.clone(), c.holder.clone(), c.claimed_at, c.duration_seconds, c.working_on.clone()))
             .collect())
     }
 
     /// Check if a specific file is claimed
-    pub fn check_claim(&mut self, path: &str) -> V2Result<Option<(String, u64, u32)>> {
+    pub fn check_claim(&mut self, path: &str) -> V2Result<Option<(String, u64, u32, String)>> {
         let claims = self.get_claims()?;
         Ok(claims.into_iter()
-            .find(|(p, _, _, _)| p == path)
-            .map(|(_, ai, ts, duration)| (ai, ts, duration)))
+            .find(|(p, _, _, _, _)| p == path)
+            .map(|(_, ai, ts, duration, working_on)| (ai, ts, duration, working_on)))
     }
 
     // ========== TASKS ==========
@@ -589,9 +609,35 @@ impl V2Client {
         Ok(timestamp)
     }
 
-    /// Send a message to a room
-    pub fn send_room_message(&mut self, room_id: &str, content: &str) -> V2Result<u64> {
-        let event = Event::room_message(&self.ai_id, room_id, content);
+    /// Send a message to a room. `participants` = all room members (for wake routing).
+    /// Filters out muted AIs so the sequencer doesn't wake them.
+    pub fn send_room_message(&mut self, room_id: &str, content: &str, participants: Vec<String>) -> V2Result<u64> {
+        // Sync view to get current mute state
+        self.sync()?;
+
+        // Filter out muted participants before writing the event
+        let filtered = if let Ok(room_id_u64) = room_id.parse::<u64>() {
+            if let Some(room) = self.view.get_room(room_id_u64) {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                participants.into_iter()
+                    .filter(|p| {
+                        match room.mutes.get(p.as_str()) {
+                            Some(&expires_at) => expires_at <= now, // expired = not muted
+                            None => true, // no mute entry = not muted
+                        }
+                    })
+                    .collect()
+            } else {
+                participants
+            }
+        } else {
+            participants
+        };
+
+        let event = Event::room_message(&self.ai_id, room_id, content, filtered);
         let timestamp = event.header.timestamp;
         self.outbox.write_event(&event)
             .map_err(|e| V2Error::Outbox(e.to_string()))?;
@@ -608,7 +654,7 @@ impl V2Client {
             .map_err(|e| V2Error::Outbox(e.to_string()))?;
         Ok(timestamp)
     }
-    // deposit_pheromone() removed — stigmergy deprecated (Feb 2026, architecture decision)
+    // deposit_pheromone() removed — stigmergy deprecated (Feb 2026, QD directive)
 
     // ========== STATS ==========
 
@@ -667,7 +713,7 @@ impl V2Client {
         self.view.pending_vote_count()
     }
 
-    // my_lock_count() removed — locks deprecated (Feb 2026, architecture decision)
+    // my_lock_count() removed — locks deprecated (Feb 2026, QD directive)
 
     /// Get my task count
     pub fn my_task_count(&self) -> u64 {
@@ -744,13 +790,16 @@ impl V2Client {
                         && event.header.timestamp == dialogue_id
                     {
                         if let EventPayload::DialogueStart(payload) = &event.payload {
+                            // participants[0] = initiator, participants[1] = first responder
+                            let first_responder = payload.participants.get(1)
+                                .cloned().unwrap_or_default();
                             return Ok(Some((
                                 dialogue_id,
                                 self.ai_id.clone(),
-                                payload.responder.clone(),
+                                first_responder.clone(),
                                 payload.topic.clone(),
                                 "active".to_string(),
-                                payload.responder.clone(),
+                                first_responder,
                             )));
                         }
                     }
@@ -761,14 +810,16 @@ impl V2Client {
         Ok(None)
     }
 
-    /// Get dialogue invites (dialogues where I am the responder and it's my turn - new invites)
+    /// Get dialogue invites — active dialogues where it's currently my turn.
+    ///
+    /// For n-party round-robin: any participant position is valid, any message depth.
     /// Returns Vec of (dialogue_id, initiator, responder, topic, status, current_turn)
     pub fn get_dialogue_invites(&mut self) -> V2Result<Vec<(u64, String, String, String, String, String)>> {
         let dialogues = self.get_dialogues()?;
         Ok(dialogues
             .into_iter()
-            .filter(|(_, _, responder, _, status, turn)| {
-                responder == &self.ai_id && status == "active" && turn == &self.ai_id
+            .filter(|(_, _, _, _, status, turn)| {
+                status == "active" && turn == &self.ai_id
             })
             .collect())
     }
@@ -924,11 +975,15 @@ impl V2Client {
                                 }
                             }
                         }
-                        Err(_) => {}
+                        Err(e) => {
+                            eprintln!("[V2] Skipping corrupted outbox event in task scan: {}", e);
+                        }
                     }
                 }
             }
-            Err(_) => {}
+            Err(e) => {
+                eprintln!("[V2] Failed to open outbox for task scan: {}", e);
+            }
         }
 
         Ok(tasks)
@@ -962,15 +1017,16 @@ impl V2Client {
     }
 
     /// Get all rooms from ViewEngine cache (O(k) instead of O(n))
-    /// Returns Vec of (room_id, name, topic, members)
-    pub fn get_rooms(&mut self) -> V2Result<Vec<(u64, String, String, Vec<String>)>> {
+    /// Returns Vec of (room_id, name, topic, members, is_closed)
+    /// Includes concluded/closed rooms so callers can show their status.
+    pub fn get_rooms(&mut self) -> V2Result<Vec<(u64, String, String, Vec<String>, bool)>> {
         self.sync()?;
 
-        // Use ViewEngine cache for O(k) access - only return open rooms
-        let cached = self.view.get_open_rooms();
+        // Use ViewEngine cache for O(k) access - include closed rooms so they appear as "concluded"
+        let cached = self.view.get_all_rooms();
 
-        Ok(cached.into_iter()
-            .map(|r| (r.id, r.name.clone(), r.topic.clone(), r.members.clone()))
+        Ok(cached.values()
+            .map(|r| (r.id, r.name.clone(), r.topic.clone(), r.members.clone(), r.is_closed))
             .collect())
     }
 
@@ -997,6 +1053,35 @@ impl V2Client {
         Ok(self.view.get_room_messages(room_id_u64, limit))
     }
 
+    /// Mute a room for the given number of minutes (timed only — no permanent mutes).
+    /// The caller mutes themselves in the room (source_ai == target_ai).
+    pub fn room_mute(&mut self, room_id: &str, ai_id: &str, minutes: u32) -> V2Result<u64> {
+        let event = Event::room_mute(ai_id, room_id, ai_id, minutes);
+        self.outbox.write_event(&event)
+            .map_err(|e| V2Error::Outbox(e.to_string()))
+    }
+
+    /// Conclude (close) a room with an optional summary
+    pub fn room_conclude(&mut self, room_id: &str, ai_id: &str, conclusion: Option<&str>) -> V2Result<u64> {
+        let event = Event::room_conclude(ai_id, room_id, conclusion.map(|s| s.to_string()));
+        self.outbox.write_event(&event)
+            .map_err(|e| V2Error::Outbox(e.to_string()))
+    }
+
+    /// Pin a room message by seq ID (room-native, no cross-namespace refs).
+    pub fn room_pin_message(&mut self, room_id: &str, ai_id: &str, msg_seq_id: u64) -> V2Result<u64> {
+        let event = Event::room_pin_message(ai_id, room_id, msg_seq_id);
+        self.outbox.write_event(&event)
+            .map_err(|e| V2Error::Outbox(e.to_string()))
+    }
+
+    /// Unpin a room message by seq ID.
+    pub fn room_unpin_message(&mut self, room_id: &str, ai_id: &str, msg_seq_id: u64) -> V2Result<u64> {
+        let event = Event::room_unpin_message(ai_id, room_id, msg_seq_id);
+        self.outbox.write_event(&event)
+            .map_err(|e| V2Error::Outbox(e.to_string()))
+    }
+
     /// Get recent file actions from ViewEngine cache (O(k) instead of O(n))
     /// Returns Vec of (ai_id, action, path, timestamp_micros)
     pub fn get_file_actions(&mut self, limit: usize) -> V2Result<Vec<(String, String, String, u64)>> {
@@ -1009,8 +1094,8 @@ impl V2Client {
             .map(|a| (a.ai_id.clone(), a.action.clone(), a.path.clone(), a.timestamp))
             .collect())
     }
-    // get_pheromones() removed — stigmergy deprecated (Feb 2026, architecture decision)
-    // check_lock() removed — locks deprecated (Feb 2026, architecture decision)
+    // get_pheromones() removed — stigmergy deprecated (Feb 2026, QD directive)
+    // check_lock() removed — locks deprecated (Feb 2026, QD directive)
 
     // ===== Project Methods =====
 
@@ -1050,29 +1135,65 @@ impl V2Client {
         Ok(timestamp)
     }
 
-    /// List all projects (scans event log, applies create/delete/restore events)
-    ///
-    /// CANONICAL ID = timestamp (set at event creation, returned by create_project).
-    /// Builds a sequence→timestamp backward compat map so old events that reference
-    /// projects by sequence number still resolve correctly.
-    /// Also scans the outbox for pending events (read-your-own-writes).
+    /// List all projects using ViewEngine cache (O(k) instead of O(n) log scan).
+    /// Also scans outbox for pending creates (read-your-own-writes).
     pub fn list_projects(&mut self) -> V2Result<Vec<(u64, String, String, String, String, bool)>> {
         // Returns: (project_id, name, goal, root_directory, status, is_deleted)
         self.sync()?;
-        let result = self.view.get_all_projects()
-            .values()
-            .filter(|p| !p.is_deleted)
-            .map(|p| (p.id, p.name.clone(), p.goal.clone(), p.root_directory.clone(), p.status.clone(), p.is_deleted))
+
+        // Use ViewEngine cache
+        let mut result: Vec<(u64, String, String, String, String, bool)> = self.view.get_all_projects()
+            .into_iter()
+            .map(|(_, p)| (p.id, p.name.clone(), p.goal.clone(), p.root_directory.clone(), p.status.clone(), p.is_deleted))
             .collect();
-        Ok(result)
+
+        // Read-your-own-writes: scan outbox for pending PROJECT_CREATE events
+        if let Ok(consumer) = OutboxConsumer::open(&self.ai_id, Some(&self.base_dir)) {
+            for event_result in consumer.peek_all_pending() {
+                if let Ok(event) = event_result {
+                    if event.header.event_type == event_type::PROJECT_CREATE {
+                        if let EventPayload::ProjectCreate(payload) = &event.payload {
+                            let id = event.header.timestamp;
+                            if !result.iter().any(|(eid, ..)| *eid == id) {
+                                result.push((id, payload.name.clone(), payload.goal.clone(),
+                                    payload.root_directory.clone(), "active".to_string(), false));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Return only non-deleted projects
+        Ok(result.into_iter().filter(|(.., deleted)| !*deleted).collect())
     }
 
-    /// Get a specific project by ID
+    /// Get a specific project by ID (timestamp = canonical ID).
     pub fn get_project(&mut self, project_id: u64) -> V2Result<Option<(u64, String, String, String, String, bool)>> {
         self.sync()?;
-        Ok(self.view.get_project(project_id)
-            .filter(|p| !p.is_deleted)
-            .map(|p| (p.id, p.name.clone(), p.goal.clone(), p.root_directory.clone(), p.status.clone(), p.is_deleted)))
+
+        // Use ViewEngine cache
+        if let Some(p) = self.view.get_project(project_id) {
+            return Ok(Some((p.id, p.name.clone(), p.goal.clone(), p.root_directory.clone(), p.status.clone(), p.is_deleted)));
+        }
+
+        // Read-your-own-writes: outbox fallback
+        if let Ok(consumer) = OutboxConsumer::open(&self.ai_id, Some(&self.base_dir)) {
+            for event_result in consumer.peek_all_pending() {
+                if let Ok(event) = event_result {
+                    if event.header.event_type == event_type::PROJECT_CREATE
+                        && event.header.timestamp == project_id
+                    {
+                        if let EventPayload::ProjectCreate(payload) = &event.payload {
+                            return Ok(Some((project_id, payload.name.clone(), payload.goal.clone(),
+                                payload.root_directory.clone(), "active".to_string(), false)));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(None)
     }
 
     // ===== Feature Methods =====
@@ -1113,25 +1234,71 @@ impl V2Client {
         Ok(timestamp)
     }
 
-    /// List features for a project
+    /// List features for a project using ViewEngine cache (O(k) instead of O(n) log scan).
+    /// Also scans outbox for pending creates (read-your-own-writes).
     pub fn list_features(&mut self, project_id: u64) -> V2Result<Vec<(u64, u64, String, String, Option<String>, bool)>> {
         // Returns: (feature_id, project_id, name, overview, directory, is_deleted)
         self.sync()?;
-        let result = self.view.get_features_for_project(project_id)
+
+        // Use ViewEngine cache
+        let mut result: Vec<(u64, u64, String, String, Option<String>, bool)> = self.view.get_features_for_project(project_id)
             .into_iter()
-            .filter(|f| !f.is_deleted)
             .map(|f| (f.id, f.project_id, f.name.clone(), f.overview.clone(), f.directory.clone(), f.is_deleted))
             .collect();
-        Ok(result)
+
+        // Read-your-own-writes: scan outbox for pending FEATURE_CREATE events
+        if let Ok(consumer) = OutboxConsumer::open(&self.ai_id, Some(&self.base_dir)) {
+            for event_result in consumer.peek_all_pending() {
+                if let Ok(event) = event_result {
+                    if event.header.event_type == event_type::FEATURE_CREATE {
+                        if let EventPayload::FeatureCreate(payload) = &event.payload {
+                            if payload.project_id == project_id {
+                                let id = event.header.timestamp;
+                                if !result.iter().any(|(eid, ..)| *eid == id) {
+                                    result.push((id, project_id, payload.name.clone(),
+                                        payload.overview.clone(), payload.directory.clone(), false));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Return only non-deleted features
+        Ok(result.into_iter().filter(|(.., deleted)| !*deleted).collect())
     }
 
-    /// Get a specific feature by ID
+
+    /// Get a specific feature by ID (timestamp = canonical ID).
     pub fn get_feature(&mut self, feature_id: u64) -> V2Result<Option<(u64, u64, String, String, Option<String>, bool)>> {
         self.sync()?;
-        Ok(self.view.get_feature(feature_id)
-            .filter(|f| !f.is_deleted)
-            .map(|f| (f.id, f.project_id, f.name.clone(), f.overview.clone(), f.directory.clone(), f.is_deleted)))
+
+        // Use ViewEngine cache
+        if let Some(f) = self.view.get_feature(feature_id) {
+            if f.is_deleted { return Ok(None); }
+            return Ok(Some((f.id, f.project_id, f.name.clone(), f.overview.clone(), f.directory.clone(), f.is_deleted)));
+        }
+
+        // Read-your-own-writes: outbox fallback
+        if let Ok(consumer) = OutboxConsumer::open(&self.ai_id, Some(&self.base_dir)) {
+            for event_result in consumer.peek_all_pending() {
+                if let Ok(event) = event_result {
+                    if event.header.event_type == event_type::FEATURE_CREATE
+                        && event.header.timestamp == feature_id
+                    {
+                        if let EventPayload::FeatureCreate(payload) = &event.payload {
+                            return Ok(Some((feature_id, payload.project_id, payload.name.clone(),
+                                payload.overview.clone(), payload.directory.clone(), false)));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(None)
     }
+
 
     // ===== Project Resolution =====
 
@@ -1244,7 +1411,10 @@ impl V2Client {
         // Open event log reader - returns empty if no log exists
         let mut temp_reader = match EventLogReader::open(Some(&self.base_dir)) {
             Ok(r) => r,
-            Err(_) => return Ok(Vec::new()),
+            Err(e) => {
+                eprintln!("[V2] Event log reader open failed in get_ai_learnings: {}", e);
+                return Ok(Vec::new());
+            }
         };
         // HashMap: learning_id -> (ai_id, content, tags, importance, deleted)
         let mut learnings: std::collections::HashMap<u64, (String, String, String, u8, bool)> = std::collections::HashMap::new();
@@ -1256,7 +1426,9 @@ impl V2Client {
                         event_type::LEARNING_CREATE => {
                             if let EventPayload::LearningCreate(payload) = &event.payload {
                                 if event.header.source_ai_str() == target_ai {
-                                    let id = event.header.sequence;
+                                    // Use timestamp as key — matches the ID returned by create_learning()
+                                    // (consistent with tasks/votes/rooms/projects which all key by timestamp)
+                                    let id = event.header.timestamp;
                                     learnings.insert(id, (
                                         event.header.source_ai_str().to_string(),
                                         payload.content.clone(),
@@ -1287,7 +1459,10 @@ impl V2Client {
                     }
                 }
                 Ok(None) => break,
-                Err(_) => continue,
+                Err(e) => {
+                    eprintln!("[V2] Corrupted event in get_ai_learnings, stopping scan: {}", e);
+                    break;
+                }
             }
         }
 
@@ -1311,7 +1486,10 @@ impl V2Client {
         // Open event log reader - returns empty if no log exists
         let mut temp_reader = match EventLogReader::open(Some(&self.base_dir)) {
             Ok(r) => r,
-            Err(_) => return Ok(Vec::new()),
+            Err(e) => {
+                eprintln!("[V2] Event log reader open failed in get_team_playbook: {}", e);
+                return Ok(Vec::new());
+            }
         };
         // HashMap: learning_id -> (ai_id, content, tags, importance, deleted)
         let mut learnings: std::collections::HashMap<u64, (String, String, String, u8, bool)> = std::collections::HashMap::new();
@@ -1322,7 +1500,8 @@ impl V2Client {
                     match event.header.event_type {
                         event_type::LEARNING_CREATE => {
                             if let EventPayload::LearningCreate(payload) = &event.payload {
-                                let id = event.header.sequence;
+                                // Use timestamp as key — matches create_learning() return value
+                                let id = event.header.timestamp;
                                 learnings.insert(id, (
                                     event.header.source_ai_str().to_string(),
                                     payload.content.clone(),
@@ -1352,7 +1531,10 @@ impl V2Client {
                     }
                 }
                 Ok(None) => break,
-                Err(_) => continue,
+                Err(e) => {
+                    eprintln!("[V2] Corrupted event in get_team_playbook, stopping scan: {}", e);
+                    break;
+                }
             }
         }
 
@@ -1384,7 +1566,9 @@ impl V2Client {
     /// weight: 1-10 significance (default 1)
     pub fn record_trust(&mut self, target_ai: &str, is_success: bool, context: &str, weight: u8) -> Result<u64, V2Error> {
         let event = Event::trust_record(&self.ai_id, target_ai, is_success, context, weight);
-        self.outbox.write_event(&event).map_err(|e| V2Error::Outbox(e.to_string()))
+        let timestamp = event.header.timestamp;
+        self.outbox.write_event(&event).map_err(|e| V2Error::Outbox(e.to_string()))?;
+        Ok(timestamp)
     }
 
     /// Get all trust records from the event log
@@ -1392,7 +1576,10 @@ impl V2Client {
     pub fn get_trust_records(&mut self) -> Result<Vec<(String, String, bool, String, u8, u64)>, V2Error> {
         let mut temp_reader = match EventLogReader::open(Some(&self.base_dir)) {
             Ok(r) => r,
-            Err(_) => return Ok(Vec::new()),
+            Err(e) => {
+                eprintln!("[V2] Event log reader open failed in get_trust_records: {}", e);
+                return Ok(Vec::new());
+            }
         };
 
         let mut records = Vec::new();
@@ -1401,7 +1588,10 @@ impl V2Client {
             let event = match temp_reader.try_read() {
                 Ok(Some(e)) => e,
                 Ok(None) => break,
-                Err(_) => continue, // Skip events that fail to deserialize
+                Err(e) => {
+                    eprintln!("[V2] Corrupted event in get_trust_records, stopping scan: {}", e);
+                    break;
+                }
             };
 
             if event.header.event_type == event_type::TRUST_RECORD {
@@ -1582,14 +1772,14 @@ mod tests {
     #[test]
     fn test_client_open() {
         let dir = tempdir().unwrap();
-        let client = V2Client::open("test-ai", Some(dir.path())).unwrap();
+        let client = V2Client::open("test-ai", Some(dir.path()), None).unwrap();
         assert_eq!(client.ai_id(), "test-ai");
     }
 
     #[test]
     fn test_client_broadcast() {
         let dir = tempdir().unwrap();
-        let mut client = V2Client::open("test-ai", Some(dir.path())).unwrap();
+        let mut client = V2Client::open("test-ai", Some(dir.path()), None).unwrap();
         // write_event returns local outbox position (can be 0)
         // Global sequence assigned by sequencer later
         let _seq = client.broadcast("general", "Hello world!").unwrap();
@@ -1598,7 +1788,7 @@ mod tests {
     #[test]
     fn test_client_dm() {
         let dir = tempdir().unwrap();
-        let mut client = V2Client::open("test-ai", Some(dir.path())).unwrap();
+        let mut client = V2Client::open("test-ai", Some(dir.path()), None).unwrap();
         // write_event returns local outbox position (can be 0)
         let _seq = client.direct_message("other-ai", "Hello!").unwrap();
     }

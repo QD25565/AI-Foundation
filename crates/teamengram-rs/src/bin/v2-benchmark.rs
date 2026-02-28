@@ -51,14 +51,14 @@ fn benchmark_event_log_append(data_dir: &PathBuf) {
 
     // Warmup
     for _ in 0..WARMUP_ITERATIONS {
-        let event = Event::broadcast("ai-1", "warmup", "test");
+        let event = Event::broadcast("beta-002", "warmup", "test");
         let _ = writer.append(&event);
     }
 
     // Benchmark
     let start = Instant::now();
     for i in 0..BENCHMARK_ITERATIONS {
-        let event = Event::broadcast("ai-1", "general", &format!("msg{}", i));
+        let event = Event::broadcast("beta-002", "general", &format!("msg{}", i));
         writer.append(&event).unwrap();
     }
     let elapsed = start.elapsed();
@@ -81,7 +81,7 @@ fn benchmark_event_log_read(data_dir: &PathBuf) {
     {
         let mut writer = EventLogWriter::open(Some(&log_dir)).unwrap();
         for i in 0..(WARMUP_ITERATIONS + BENCHMARK_ITERATIONS) {
-            let event = Event::broadcast("ai-1", "general", &format!("msg{}", i));
+            let event = Event::broadcast("beta-002", "general", &format!("msg{}", i));
             writer.append(&event).unwrap();
         }
     }
@@ -126,18 +126,18 @@ fn benchmark_view_sync(data_dir: &PathBuf) {
         let mut writer = EventLogWriter::open(Some(&log_dir)).unwrap();
         for i in 0..BENCHMARK_ITERATIONS {
             let event = match i % 5 {
-                0 => Event::broadcast("ai-2", "general", &format!("msg{}", i)),
-                1 => Event::direct_message("ai-2", "ai-1", &format!("dm{}", i)),
-                2 => Event::dialogue_start("ai-2", "ai-1", "review"),
-                3 => Event::file_action("ai-1", "file.rs", "read"),
-                _ => Event::broadcast("ai-3", "general", &format!("msg{}", i)),
+                0 => Event::broadcast("alpha-001", "general", &format!("msg{}", i)),
+                1 => Event::direct_message("alpha-001", "beta-002", &format!("dm{}", i)),
+                2 => Event::dialogue_start("alpha-001", &[String::from("alpha-001"), String::from("beta-002")], "review", true),
+                3 => Event::file_action("beta-002", "file.rs", "read"),
+                _ => Event::broadcast("gamma-003", "general", &format!("msg{}", i)),
             };
             writer.append(&event).unwrap();
         }
     }
 
     // Create view engine
-    let mut view = ViewEngine::open("ai-1", &view_dir).unwrap();
+    let mut view = ViewEngine::open("beta-002", &view_dir).unwrap();
     let mut reader = EventLogReader::open(Some(&log_dir)).unwrap();
 
     // Benchmark view sync

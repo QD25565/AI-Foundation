@@ -19,13 +19,13 @@ import kotlin.math.PI
 import kotlin.math.sin
 
 /**
- * Deep Net themed modifiers for animated effects
- * Creates network-inspired visual effects for the federation UI
+ * Themed modifiers for animated effects
+ * Creates network-inspired visual effects for the AI-Foundation mobile UI
  */
 
 /**
  * Animated energy pulse effect around the border
- * Creates a pulsing glow effect using the Deep Net brand colors
+ * Creates a pulsing glow effect using the brand colors
  */
 fun Modifier.deepNetEnergyPulse(
     enabled: Boolean = true,

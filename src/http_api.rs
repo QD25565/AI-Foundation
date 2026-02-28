@@ -204,18 +204,6 @@ struct PreferencesRequest {
 }
 
 #[derive(Deserialize)]
-struct VisionAttachRequest {
-    note_id: u64,
-    image_path: String,
-    context: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct VisionGetQuery {
-    output: Option<String>,
-}
-
-#[derive(Deserialize)]
 struct FederationSendRequest {
     /// Sender AI ID
     from_ai: String,
@@ -284,12 +272,6 @@ pub fn api_routes() -> Router<ApiState> {
         .route("/api/profiles/me/status", put(profile_set_status))
         .route("/api/profiles/me/preferences", get(profile_get_preferences))
         .route("/api/profiles/me/preferences", put(profile_set_preferences))
-        // Vision (auth required)
-        .route("/api/vision/attach", post(vision_attach))
-        .route("/api/vision/list", get(vision_list))
-        .route("/api/vision/{id}", get(vision_get))
-        .route("/api/vision/note/{note_id}", get(vision_note))
-        .route("/api/vision/stats", get(vision_stats))
         // Federation (peer-authenticated, no Bearer token)
         .route("/api/federation/register", post(federation_register))
         .route("/api/federation/peers", get(federation_peers))
@@ -776,84 +758,6 @@ async fn profile_set_preferences(
         )),
         Err(e) => Ok(cli_response(format!("Error: {}", e))),
     }
-}
-
-// ============== Vision Handlers ==============
-
-/// Attach an image to a notebook note (auth required).
-async fn vision_attach(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Json(body): Json<VisionAttachRequest>,
-) -> ApiResult {
-    let h_id = resolve_auth(&state.pairing, &headers).await?;
-    let note_id = body.note_id.to_string();
-    let mut args = vec!["attach", &note_id, &body.image_path];
-    let context_owned;
-    if let Some(ref c) = body.context {
-        context_owned = c.clone();
-        args.push("--context");
-        args.push(&context_owned);
-    }
-    Ok(cli_response(
-        cli_wrapper::visionbook_as(&args, &h_id).await,
-    ))
-}
-
-/// List recent visual memories (auth required).
-async fn vision_list(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Query(q): Query<LimitQuery>,
-) -> ApiResult {
-    let h_id = resolve_auth(&state.pairing, &headers).await?;
-    let limit = q.limit.unwrap_or(10).to_string();
-    Ok(cli_response(
-        cli_wrapper::visionbook_as(&["visual-list", "--limit", &limit], &h_id).await,
-    ))
-}
-
-/// Get a specific visual memory (auth required).
-async fn vision_get(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(id): Path<String>,
-    Query(q): Query<VisionGetQuery>,
-) -> ApiResult {
-    let h_id = resolve_auth(&state.pairing, &headers).await?;
-    let mut args = vec!["visual-get", &id];
-    let output_owned;
-    if let Some(ref o) = q.output {
-        output_owned = o.clone();
-        args.push("--output");
-        args.push(&output_owned);
-    }
-    Ok(cli_response(
-        cli_wrapper::visionbook_as(&args, &h_id).await,
-    ))
-}
-
-/// Get visuals attached to a notebook note (auth required).
-async fn vision_note(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-    Path(note_id): Path<String>,
-) -> ApiResult {
-    let h_id = resolve_auth(&state.pairing, &headers).await?;
-    Ok(cli_response(
-        cli_wrapper::visionbook_as(&["note-visuals", &note_id], &h_id).await,
-    ))
-}
-
-/// Visual memory statistics (auth required).
-async fn vision_stats(
-    State(state): State<ApiState>,
-    headers: HeaderMap,
-) -> ApiResult {
-    let h_id = resolve_auth(&state.pairing, &headers).await?;
-    Ok(cli_response(
-        cli_wrapper::visionbook_as(&["visual-stats"], &h_id).await,
-    ))
 }
 
 // ============== Federation Handlers ==============

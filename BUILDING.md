@@ -24,6 +24,7 @@ ai-foundation/
     ├── notebook-rs/        ← notebook-cli + session-start binaries
     ├── shm-rs/             ← shared memory IPC layer
     ├── forge/              ← Forge CLI (multi-provider AI assistant)
+    ├── federation/         ← federation protocol (experimental — P2P, QUIC, mDNS)
     └── llama-cpp-sys-2/    ← patched llama-cpp bindings (Windows GNU compatibility)
 ```
 
@@ -43,6 +44,7 @@ cargo build --release -p notebook-rs        # builds notebook-cli + session-star
 cargo build --release -p teamengram         # builds teambook + v2-daemon
 cargo build --release -p ai-foundation-mcp  # builds the MCP server
 cargo build --release -p forge              # builds Forge CLI (notebook integration, no local LLM)
+cargo build --release -p federation         # builds federation node (experimental)
 ```
 
 ---
@@ -94,7 +96,7 @@ source ~/.bashrc
 
 ## Embedding Support (llama-cpp)
 
-`engram` and `notebook-rs` depend on `llama-cpp-2` for local AI embeddings (768-dimensional vectors for semantic search). This builds the llama.cpp C library during compilation.
+`engram` and `notebook-rs` depend on `llama-cpp-2` for local AI embeddings (512-dimensional vectors for semantic search). This builds the llama.cpp C library during compilation.
 
 **Requirements:**
 - cmake ≥ 3.14

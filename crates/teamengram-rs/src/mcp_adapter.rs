@@ -4,8 +4,7 @@
 //! daemon for all operations. It connects via Named Pipe and uses JSON-RPC
 //! for communication.
 //!
-//! Types are now defined in compat_types.rs - NO PostgreSQL dependencies.
-//! Philosophy: We build our own AI-optimized infrastructure. Sovereign.
+//! Types are now defined in compat_types.rs - no external database dependencies.
 //!
 //! V2 EVENT SOURCING (TEAMENGRAM_V2=1 environment variable):
 //! - Each AI writes to local outbox (~100ns, wait-free)
@@ -15,7 +14,6 @@
 
 use anyhow::{Result, Context};
 use std::sync::Arc;
-use tokio::sync::Mutex;
 use crate::client::TeamEngramClient;
 use crate::v2_client::V2Client;
 use shm_rs::bulletin::BulletinBoard;
@@ -27,15 +25,19 @@ pub use crate::compat_types::{Message, Presence, Note, Task, Vote, VoteStatus, V
 /// TeamEngram storage adapter - implements PostgresStorage-compatible interface
 /// All method signatures match teambook_rs::PostgresStorage exactly
 pub struct TeamEngramStorage {
-    #[allow(dead_code)]
-    client: Arc<Mutex<Option<TeamEngramClient>>>,
     ai_id: String,
 }
 
 impl TeamEngramStorage {
     /// Connect to TeamEngram daemon - REQUIRES AI_ID
+    ///
+    /// Performs a startup health-check connection (fail fast if daemon not running),
+    /// then stores only the AI identity. All subsequent operations use fresh connections
+    /// via get_client() to avoid stale pipe issues.
     pub async fn connect() -> Result<Self> {
-        let client = TeamEngramClient::connect_or_spawn().await
+        // Fail fast: verify daemon is reachable before accepting any operations.
+        // The connection itself is not stored — get_client() creates fresh ones.
+        let _ = TeamEngramClient::connect_or_spawn().await
             .context("Failed to connect to TeamEngram daemon")?;
 
         // AI_ID is REQUIRED - fail loudly, no fallback to "unknown"
@@ -46,28 +48,11 @@ impl TeamEngramStorage {
             anyhow::bail!("AI_ID cannot be empty or 'unknown' - set a valid AI identity");
         }
 
-        Ok(Self {
-            client: Arc::new(Mutex::new(Some(client))),
-            ai_id,
-        })
+        Ok(Self { ai_id })
     }
 
-    /// Ensure we have a valid connection, reconnecting if necessary
-    #[allow(dead_code)]
-    async fn ensure_connected(&self) -> Result<()> {
-        let mut guard = self.client.lock().await;
-        if guard.is_none() {
-            let client = TeamEngramClient::connect_or_spawn().await
-                .context("Failed to reconnect to TeamEngram daemon")?;
-            *guard = Some(client);
-        }
-        Ok(())
-    }
-
-    /// Get a fresh client connection (reconnects if current connection is dead)
+    /// Get a fresh client connection (always fresh to avoid stale pipe issues)
     async fn get_client(&self) -> Result<TeamEngramClient> {
-        // Always create a fresh connection to avoid stale pipe issues
-        // Use with_ai_id to ensure the client has the correct AI identity
         let client = TeamEngramClient::connect_or_spawn().await
             .context("Failed to connect to TeamEngram daemon")?;
         Ok(client.with_ai_id(self.ai_id.clone()))
@@ -201,9 +186,9 @@ impl TeamEngramStorage {
     // =========================================================================
 
     /// Claim a file
-    pub async fn claim_file(&self, path: &str, _ai_id: &str, duration: i32) -> Result<bool> {
+    pub async fn claim_file(&self, path: &str, _ai_id: &str, duration: i32, working_on: Option<&str>) -> Result<bool> {
         let mut client = self.get_client().await?;
-        match client.claim_file(path, "editing", duration as u32).await {
+        match client.claim_file(path, working_on.unwrap_or("editing"), duration as u32).await {
             Ok(_) => Ok(true),
             Err(_) => Ok(false),
         }
@@ -273,14 +258,20 @@ impl TeamEngramStorage {
     pub async fn update_task_status(&self, task_id: i32, status: &str) -> Result<()> {
         let mut client = self.get_client().await?;
         match status {
-            "in_progress" | "InProgress" => {
+            "started" | "in_progress" | "InProgress" => {
                 client.start_task(task_id as u64).await?;
             }
-            "completed" | "Completed" => {
+            "done" | "completed" | "Completed" => {
                 client.complete_task(task_id as u64, "").await?;
             }
-            _ => {
-                // Other status updates not yet implemented
+            "claimed" | "Claimed" => {
+                client.claim_task(Some(task_id as u64)).await?;
+            }
+            "blocked" | "Blocked" | "unblocked" | "Unblocked" => {
+                anyhow::bail!("Task block/unblock not supported in V1. Use V2 backend.");
+            }
+            other => {
+                anyhow::bail!("Unknown task status: '{}'. Valid: done, claimed, started, blocked, unblocked", other);
             }
         }
         Ok(())
@@ -819,11 +810,11 @@ impl TeamEngramStorage {
         let my_turn_dialogues = client.dialogue_my_turn(5).await?;
         if let Some(dialogue) = my_turn_dialogues.first() {
             let timestamp = chrono::Utc::now().to_rfc3339();
-            let from = if dialogue.initiator == ai_id {
-                dialogue.responder.clone()
-            } else {
-                dialogue.initiator.clone()
-            };
+            // Use first non-self participant as "from" attribution
+            let from = dialogue.participants.iter()
+                .find(|p| p.as_str() != ai_id)
+                .cloned()
+                .unwrap_or_else(|| dialogue.initiator.clone());
             return Ok(Some(("dialogue_turn".to_string(), from, dialogue.topic.clone(), timestamp)));
         }
 
@@ -987,7 +978,14 @@ impl V2Storage {
             anyhow::bail!("AI_ID cannot be empty or 'unknown' - set a valid AI identity");
         }
 
-        let v2 = V2Client::open(&ai_id, None)
+        // Load encryption key from default V2 data directory (None = plaintext)
+        let v2_dir = crate::store::ai_foundation_base_dir().join("v2");
+        let crypto = crate::crypto::load_encryption_key(&v2_dir)
+            .ok()
+            .flatten()
+            .map(std::sync::Arc::new);
+
+        let v2 = V2Client::open(&ai_id, None, crypto)
             .map_err(|e| anyhow::anyhow!("V2 client error: {}", e))?;
 
         Ok(Self {
@@ -1130,14 +1128,20 @@ impl V2Storage {
 
     // ===== DIALOGUES =====
 
-    /// Start a dialogue
+    /// Start a dialogue with one or more AIs.
+    /// `responder` may be a single AI ID or a comma-separated list for n-party dialogues.
     pub async fn dialogue_start(&self, responder: &str, topic: &str) -> Result<u64> {
         let result = {
             let mut v2 = self.v2.lock().await;
-            v2.start_dialogue(responder, topic)
+            // Parse comma-separated list into slice of &str
+            let participants: Vec<&str> = responder.split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
+            v2.start_dialogue(&participants, topic)
                 .map_err(|e| anyhow::anyhow!("V2 dialogue start error: {}", e))
         };
-        // Refresh bulletin so responder sees the invite
+        // Refresh bulletin so all participants see the invite
         self.refresh_bulletin().await;
         result
     }
@@ -1205,7 +1209,7 @@ impl V2Storage {
             .map_err(|e| anyhow::anyhow!("V2 task complete error: {}", e))
     }
 
-    // ===== LOCKS (removed — deprecated Feb 2026, architecture decision) =====
+    // ===== LOCKS (removed — deprecated Feb 2026, QD directive) =====
 
     // ===== ROOMS =====
 

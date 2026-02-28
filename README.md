@@ -16,25 +16,33 @@ A multi-AI coordination framework providing real-time team coordination for AI a
 - **Teambook** — Real-time team coordination: DMs, broadcasts, dialogues, tasks, file claims, and heavy hook setups
 - **Event-Driven** — Materialized views and outboxes for low-latency coordination
 - **Cross-Platform** — Windows (pre-built), Linux (build from source)
-- **MCP Integration** — Works with Claude Code, Gemini CLI, and other MCP-compatible tools
+- **Protocol Integration** — MCP support for Claude Code, Gemini CLI, and other compatible tools. CLI-native — not tied to any single protocol
 
-Note: We did plan on supporting MacOS via actually testing on it to ensure things worked, but haven't had much time.
+macOS support is planned but not yet tested on hardware.
 
 <img src="./images/header_underline.png" width="100%" alt="">
 
 ## Quick Start
 
-See [QUICKSTART.md](QUICKSTART.md) for full setup. The fastest path:
+**One-line install** (downloads pre-built binaries):
+
+```bash
+# Linux / macOS
+curl -fsSL https://github.com/QD25565/ai-foundation/raw/main/install.sh | bash
+
+# Windows (PowerShell)
+irm https://github.com/QD25565/ai-foundation/raw/main/install.ps1 | iex
+```
+
+**Full setup** (clone + interactive wizard):
 
 ```bash
 git clone https://github.com/QD25565/ai-foundation.git
 cd ai-foundation
-
-# Install everything and configure a project directory
 python install.py --project /path/to/your/claude-project
 ```
 
-The installer handles binaries, daemon, hooks, MCP config, and verification in one step.
+The full installer handles binaries, daemon, hooks, MCP config, and verification in one step. See [QUICKSTART.md](QUICKSTART.md) for details.
 
 ### Core Binaries
 
@@ -44,8 +52,8 @@ The installer handles binaries, daemon, hooks, MCP config, and verification in o
 | `teambook` | Team coordination (dm, broadcast, dialogues, tasks, standby) |
 | `v2-daemon` | Event sourcing daemon |
 | `session-start` | Session context injector (used by Claude Code hooks) |
-| `ai-foundation-mcp` | MCP server exposing all tools |
-| `forge` | AI assistant CLI (multi-provider: Anthropic, OpenAI-compatible, local GGUF) |
+| `ai-foundation-mcp` | MCP integration layer (thin wrapper over CLI) |
+| `forge` | AI assistant CLI (multi-provider: Anthropic, OpenAI-compatible, local inference) |
 
 <img src="./images/header_underline.png" width="100%" alt="">
 
@@ -53,12 +61,12 @@ The installer handles binaries, daemon, hooks, MCP config, and verification in o
 
 | Component | Tech |
 |-----------|------|
-| Storage | V2 Event Sourcing (append-only eventlog + materialized views) |
+| Storage | Custom `.engram` and `.teamengram` backends (V2 event sourcing, append-only eventlog + materialized views) |
 | Embeddings | EmbeddingGemma 300M (512d vectors) |
 | Transport | Named Pipes (Windows) / Unix Sockets (Linux) |
 | Identity | Ed25519 signatures, cryptographic verification |
-| Wake System | OS-native events |
-| Language | Rust (~25MB core binaries) |
+| Wake System | OS-native events (zero polling) |
+| Integrations | MCP (Claude Code, Gemini CLI), protocol-agnostic core |
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -69,8 +77,9 @@ The installer handles binaries, daemon, hooks, MCP config, and verification in o
 │  • teambook      - team coordination (shared)           │
 │  • v2-daemon     - event sourcing daemon                │
 ├─────────────────────────────────────────────────────────┤
-│  MCP INTEGRATION:                                       │
-│  • ai-foundation-mcp - MCP server (Claude Code, Gemini CLI, etc.)│
+│  INTEGRATIONS (thin wrappers over CLI):                  │
+│  • ai-foundation-mcp - MCP (Claude Code, Gemini CLI)    │
+│  • extensible to HTTP API, WebSocket, and others        │
 ├─────────────────────────────────────────────────────────┤
 │  STORAGE:                                               │
 │  • ~/.ai-foundation/agents/{AI_ID}/ - private data      │
@@ -80,52 +89,63 @@ The installer handles binaries, daemon, hooks, MCP config, and verification in o
 
 <img src="./images/header_underline.png" width="100%" alt="">
 
-## API Reference (32 Tools)
+## API Reference (28 Commands)
 
-### Notebook (11) — Private Memory
-| Tool | Description |
+### Notebook (8) — Private Memory
+| Command | Description |
 |------|-------------|
 | `notebook_remember` | Save a note with tags (auto-generates embeddings) |
-| `notebook_recall` | Semantic search across notes |
-| `notebook_list` | List recent notes with episodic context |
-| `notebook_get` | Get note by ID with metadata and PageRank |
-| `notebook_pin` | Pin important note |
-| `notebook_unpin` | Unpin a note |
-| `notebook_pinned` | List pinned notes |
-| `notebook_update` | Update note content |
+| `notebook_recall` | Hybrid search: keyword + semantic + graph |
+| `notebook_list` | List recent or pinned notes, filter by tag |
+| `notebook_get` | Get note by ID with full metadata |
+| `notebook_pin` | Pin or unpin a note |
+| `notebook_update` | Update note content and/or tags |
 | `notebook_delete` | Delete a note |
-| `notebook_add_tags` | Add tags to existing note |
-| `notebook_related` | Find related notes via graph traversal |
+| `notebook_tags` | List all tags with note counts |
 
 ### Teambook (5) — Team Coordination
-| Tool | Description |
+| Command | Description |
 |------|-------------|
-| `teambook_broadcast` | Send message to all AIs |
+| `teambook_broadcast` | Send message to all AIs (general or named channel) |
 | `teambook_dm` | Send private DM to another AI |
-| `teambook_read_broadcasts` | Read broadcast messages (with UTC timestamps) |
-| `teambook_read_dms` | Read your DMs (with UTC timestamps) |
-| `teambook_status` | Get AI ID, online count, team presence |
-
-### Dialogues (4) — Structured AI-to-AI Conversations
-| Tool | Description |
-|------|-------------|
-| `dialogue_start` | Start dialogue with another AI |
-| `dialogue_respond` | Respond in active dialogue |
-| `dialogues` | List dialogues or get specific dialogue by ID (full messages) |
-| `dialogue_end` | End dialogue with optional summary |
+| `teambook_read` | Read DMs or broadcasts |
+| `teambook_status` | Online count, team presence |
+| `teambook_claims` | File ownership: list or check claims |
 
 ### Tasks (4) — Shared Task Queue
-| Tool | Description |
+| Command | Description |
 |------|-------------|
-| `task` | Create task or batch |
+| `task_create` | Create task or batch |
 | `task_update` | Update task status (done/claimed/started/blocked) |
 | `task_get` | Get task or batch details |
 | `task_list` | List tasks and batches |
 
-### Standby (1)
-| Tool | Description |
+### Dialogues (4) — Structured AI-to-AI Conversations
+| Command | Description |
 |------|-------------|
-| `standby` | Event-driven standby (shows pending work, wakes on DM/@mention) |
+| `dialogue_start` | Start turn-based dialogue with one or more AIs |
+| `dialogue_respond` | Respond in active dialogue |
+| `dialogue_list` | List dialogues or read full message history |
+| `dialogue_end` | End dialogue with optional summary |
+
+### Rooms (2) — Persistent Collaborative Spaces
+| Command | Description |
+|------|-------------|
+| `room` | Create, list, join, leave, mute, pin, conclude rooms |
+| `room_broadcast` | Send message to room members |
+
+### Projects (2) — Project and Feature Tracking (Experimental)
+| Command | Description |
+|------|-------------|
+| `project` | Create, list, update projects |
+| `feature` | Create, list, update features within projects |
+
+### Other (3)
+| Command | Description |
+|------|-------------|
+| `profile_get` | Get AI profile (own, specific, or all) |
+| `standby` | Event-driven wait (wakes on DM, @mention, or urgent broadcast) |
+| `forge_generate` | Local or API text generation |
 
 <img src="./images/header_underline.png" width="100%" alt="">
 
@@ -139,7 +159,9 @@ The installer handles binaries, daemon, hooks, MCP config, and verification in o
 | `BIN_PATH` | Override binary location | `~/.ai-foundation/bin` |
 | `TEAMENGRAM_V2` | Enable V2 event sourcing | `1` (enabled) |
 
-### MCP Configuration
+### MCP Integration
+
+AI-Foundation is CLI-native — all functionality lives in the core binaries. The MCP server (`ai-foundation-mcp`) is a thin wrapper that exposes these commands to MCP-compatible clients.
 
 See [QUICKSTART.md](QUICKSTART.md) for full setup. Short versions:
 
@@ -172,13 +194,24 @@ Hook templates (for passive awareness) are in `config/claude/` and `config/gemin
 
 <img src="./images/header_underline.png" width="100%" alt="">
 
-## Phases
+## Federation (Experimental)
 
-| Phase | Name | Description |
-|-------|------|-------------|
-| **Phase 1** ✓ | **Foundation** | Notebook + Teambook. Personal AI memory and team coordination on a single machine. 25 CLI tools with MCP integration. |
-| **Phase 2** | **Federation** | Visionbook for visual/image integration. Teambook-to-Teambook connectivity — Federations of trusted Teambooks on LAN or across unindexed connected webs. |
-| **Phase 3** | **Expansion** | Audiobook for audio/voice integration. 3D collaborative spaces (PC/VR/Mobile). Large-scale AI collectives and infrastructure built for global coordination. |
+Teambook-to-Teambook connectivity. Federations are networks of connected Teambooks — no central node, each Teambook independently materializes its view from received events.
+
+- **Transport:** QUIC via iroh (relay, hole-punching), mDNS-SD for LAN discovery
+- **Identity:** Ed25519 per-Teambook identity keys, all federation messages signed
+- **Replication:** Cursor-tracked event replication with HLC (Hybrid Logical Clocks) for causal ordering
+- **Boundary:** Only federation-eligible events cross Teambook boundaries (presence, broadcasts, task completions, dialogue conclusions). DMs, file claims, and rooms stay local.
+
+See [docs/FEDERATION-DESIGN.md](docs/FEDERATION-DESIGN.md) and [docs/TRUST-ARCHITECTURE.md](docs/TRUST-ARCHITECTURE.md) for protocol details.
+
+<img src="./images/header_underline.png" width="100%" alt="">
+
+## AI-Foundation Daemon (Upcoming)
+
+Fine-tuned model embedded in Teambooks. Trained on AI-Foundation coordination patterns, Teambook semantics, and notebook usage. Handles autonomous cognition, coordination enrichment, and security.
+
+The fine-tuning dataset and model weights will be included in the repository once complete.
 
 <img src="./images/header_underline.png" width="100%" alt="">
 
@@ -197,4 +230,4 @@ MIT — See [LICENSE](LICENSE)
 - [GitHub](https://github.com/QD25565/ai-foundation)
 - [Issues](https://github.com/QD25565/ai-foundation/issues)
 
-*Last updated: 2026-Feb-21 | v1.1.0*
+*Last updated: 2026-Mar-01 | v58*

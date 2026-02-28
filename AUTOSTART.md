@@ -171,7 +171,6 @@ teambook status
 
 # Or via MCP tools:
 # mcp__ai-f__teambook_status
-# mcp__ai-f__teambook_who_is_here
 ```
 
 ---

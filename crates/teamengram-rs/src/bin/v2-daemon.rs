@@ -7,7 +7,7 @@
 //!
 //! Usage:
 //!   v2-daemon                    # Run daemon
-//!   v2-daemon --register ai-1  # Register an AI's outbox
+//!   v2-daemon --register beta-002  # Register an AI's outbox
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -17,7 +17,9 @@ use clap::{Parser, Subcommand};
 
 use teamengram::sequencer::{Sequencer, SequencerConfig};
 use teamengram::outbox::OutboxProducer;
+use teamengram::event_log::{compact_event_log, CompactionPolicy};
 use teamengram::wake::signal_sequencer;
+use teamengram::crypto::load_encryption_key;
 
 #[derive(Parser)]
 #[command(name = "v2-daemon")]
@@ -41,6 +43,13 @@ enum Commands {
 
     /// Show daemon status
     Status,
+
+    /// Compact the event log (remove expired ephemeral events)
+    Compact {
+        /// Presence retention in hours (default: 24)
+        #[arg(long, default_value = "24")]
+        presence_hours: u64,
+    },
 }
 
 fn main() {
@@ -61,6 +70,9 @@ fn main() {
         }
         Some(Commands::Status) => {
             show_status(&data_dir);
+        }
+        Some(Commands::Compact { presence_hours }) => {
+            run_compact(&data_dir, presence_hours);
         }
         None => {
             run_daemon(&data_dir);
@@ -114,6 +126,35 @@ fn show_status(data_dir: &PathBuf) {
     }
 }
 
+fn run_compact(data_dir: &PathBuf, presence_hours: u64) {
+    let policy = CompactionPolicy {
+        presence_hours,
+        ..Default::default()
+    };
+
+    println!("|COMPACTING|");
+    println!("DataDir:{}", data_dir.display());
+    println!("PresenceRetention:{}h", presence_hours);
+
+    match compact_event_log(data_dir, &policy) {
+        Ok(stats) => {
+            println!("|COMPACTION COMPLETE|");
+            println!("EventsKept:{}", stats.events_kept);
+            println!("EventsRemoved:{}", stats.events_removed);
+            println!("Before:{}KB", stats.bytes_before / 1024);
+            println!("After:{}KB", stats.bytes_after / 1024);
+            if stats.bytes_before > 0 {
+                let saved = stats.bytes_before.saturating_sub(stats.bytes_after);
+                println!("Saved:{}KB", saved / 1024);
+            }
+        }
+        Err(e) => {
+            eprintln!("Error: Compaction failed: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
 /// Singleton guard — prevents multiple daemon instances.
 /// Dropping this releases the lock (process exit also releases automatically).
 struct SingletonGuard {
@@ -124,15 +165,23 @@ struct SingletonGuard {
 }
 
 #[cfg(windows)]
-fn acquire_singleton(_data_dir: &PathBuf) -> SingletonGuard {
+fn acquire_singleton(data_dir: &PathBuf) -> SingletonGuard {
     use windows_sys::Win32::System::Threading::CreateMutexW;
     use windows_sys::Win32::Foundation::{GetLastError, ERROR_ALREADY_EXISTS};
 
-    // Named Mutex is a kernel object — survives file deletion, not tied to filesystem.
-    // Name is global to the Windows session (Local\ namespace).
-    let name: Vec<u16> = "Local\\TeamEngram_V2_Daemon_Singleton\0"
-        .encode_utf16()
-        .collect();
+    // Per-data-dir mutex name using FNV-1a hash of the canonical path.
+    // This allows multiple v2-daemon instances with DIFFERENT data dirs to run
+    // concurrently (critical for parallel integration tests — each test gets its
+    // own TempDir, so each gets its own daemon without conflict).
+    let canonical = data_dir.canonicalize().unwrap_or_else(|_| data_dir.clone());
+    let path_str = canonical.to_string_lossy();
+    let mut hash: u64 = 0xcbf29ce484222325; // FNV-1a offset basis
+    for byte in path_str.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x00000100000001b3); // FNV-1a prime
+    }
+    let name_str = format!("Local\\TeamEngram_V2_{:016x}\0", hash);
+    let name: Vec<u16> = name_str.encode_utf16().collect();
 
     let handle = unsafe { CreateMutexW(std::ptr::null(), 1, name.as_ptr()) };
     if handle == 0 {
@@ -218,22 +267,59 @@ fn run_daemon(data_dir: &PathBuf) {
     }
     eprintln!("Outboxes:{}", outbox_count);
 
+    // Compact event log at startup (safe — sequencer not running yet)
+    match compact_event_log(data_dir, &CompactionPolicy::default()) {
+        Ok(stats) if stats.events_removed > 0 => {
+            eprintln!(
+                "|COMPACTED| Removed:{} Kept:{} Before:{}KB After:{}KB",
+                stats.events_removed,
+                stats.events_kept,
+                stats.bytes_before / 1024,
+                stats.bytes_after / 1024,
+            );
+        }
+        Ok(_) => {
+            eprintln!("Compaction: nothing to remove");
+        }
+        Err(e) => {
+            eprintln!("Warning: Compaction failed (non-fatal): {}", e);
+        }
+    }
+
     // Set up Ctrl+C handler.
     // MUST signal the sequencer wake semaphore after setting stop flag —
     // the sequencer blocks on sem_wait() with no timeout, so without this
     // signal it would never wake up to check stop_signal.
     let stop_signal = Arc::new(AtomicBool::new(false));
     let stop_clone = stop_signal.clone();
+    let wake_dir = data_dir.clone();
     ctrlc::set_handler(move || {
         eprintln!("\n|SHUTDOWN REQUESTED|");
         stop_clone.store(true, Ordering::SeqCst);
-        signal_sequencer(); // Wake the sequencer so it sees stop_signal
+        signal_sequencer(Some(&wake_dir)); // Wake the sequencer so it sees stop_signal
     }).expect("Error setting Ctrl-C handler");
+
+    // Load encryption key if available (None = plaintext mode, backward compatible)
+    let crypto = match load_encryption_key(data_dir) {
+        Ok(Some(c)) => {
+            eprintln!("|ENCRYPTION| Enabled (AES-256-GCM)");
+            Some(Arc::new(c))
+        }
+        Ok(None) => {
+            eprintln!("|ENCRYPTION| Disabled (no encryption.key)");
+            None
+        }
+        Err(e) => {
+            eprintln!("CRITICAL: Failed to load encryption key: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     // Configure sequencer
     let config = SequencerConfig {
         base_dir: Some(data_dir.clone()),
         enable_wake: true,
+        crypto,
         ..Default::default()
     };
 

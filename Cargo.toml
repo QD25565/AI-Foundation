@@ -6,6 +6,7 @@ members = [
     "crates/notebook-rs",
     "crates/shm-rs",
     "crates/forge",
+    "crates/federation",
     "mobile-api",
 ]
 resolver = "2"
@@ -43,12 +44,28 @@ rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", features = ["
 axum = "0.7"
 tower-http = { version = "0.5", features = ["cors"] }
 
-# Federation cryptography
+# Federation protocol — P2P core (QUIC, mDNS, cursor-tracked replication, 161 tests)
+# Named federation_core to avoid conflict with src/federation.rs (HTTP-layer module)
+federation_core = { package = "federation", path = "crates/federation" }
+
+# Federation cryptography (still used by HTTP-layer federation modules)
 ed25519-dalek = { version = "2", features = ["rand_core", "serde"] }
 sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
 hostname = "0.4"
+
+# In-process dispatch: call teamengram directly instead of subprocess spawning.
+# Eliminates 15-50ms per tool call (process creation overhead on Windows).
+# Enable with: cargo build --features in-process
+teamengram = { path = "crates/teamengram-rs", optional = true }
+chrono = { version = "0.4", optional = true }
+
+[features]
+default = []
+# Link teamengram crate directly into MCP server for zero-subprocess teambook calls.
+# Notebook operations stay as subprocess (engram depends on llama-cpp, too heavy).
+in-process = ["dep:teamengram", "dep:chrono"]
 
 [[bin]]
 name = "ai-foundation-mcp"

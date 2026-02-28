@@ -11,8 +11,8 @@ import androidx.compose.ui.unit.dp
 import kotlin.math.min
 
 /**
- * Deep Net themed shape with stylized cut corners
- * Creates the signature angular, network-inspired look for Deep Net federation UI
+ * Themed shape with stylized cut corners
+ * Creates the signature angular, network-inspired look for the federation UI
  */
 class DeepNetEdgeShape(
     private val cutDepth: Dp = 8.dp,
@@ -166,7 +166,7 @@ class DeepNetEdgeShape(
 }
 
 /**
- * Convenience object for common Deep Net shapes
+ * Convenience object for common themed shapes
  */
 object DeepNetShapes {
     val Standard = DeepNetEdgeShape(8.dp, DeepNetEdgeShape.DeepNetStyle.STANDARD)

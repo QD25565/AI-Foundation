@@ -3,8 +3,7 @@
 //! These types were originally in teambook-rs but are now independent.
 //! This removes the transitive PostgreSQL dependency from teamengram-rs.
 //!
-//! Philosophy: We build our own AI-optimized infrastructure.
-//! No external database dependencies. Pure Rust. Sovereign.
+//! No external database dependencies. Pure Rust.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};

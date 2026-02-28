@@ -12,6 +12,7 @@ use crate::shadow::ShadowAllocator;
 use crate::{NotifyCallback, NotifyType, NoOpNotify};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -35,6 +36,7 @@ pub enum RecordType {
     Project = 12,         // Project management
     Feature = 13,         // Feature within a project
     VaultEntry = 14,      // Shared key-value storage
+    RoomMessage = 15,     // Scoped room broadcast (members only)
 }
 
 impl RecordType {
@@ -54,6 +56,7 @@ impl RecordType {
             RecordType::Project => b"pj:",
             RecordType::Feature => b"ft:",
             RecordType::VaultEntry => b"vl:",
+            RecordType::RoomMessage => b"rm:msg:",
         }
     }
 }
@@ -125,6 +128,7 @@ pub enum RecordData {
     Project(Project),
     Feature(Feature),
     VaultEntry(VaultEntry),
+    RoomMessage(RoomMessage),
 }
 
 /// Direct message
@@ -181,13 +185,19 @@ pub struct Vote {
 /// Dialogue record
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Dialogue {
-    pub initiator: String,
-    pub responder: String,
+    /// Ordered participant list — defines round-robin turn order.
+    /// participants[0] is the initiator; turn rotates through all.
+    pub participants: Vec<String>,
     pub topic: String,
     pub status: DialogueStatus,
-    pub turn: u8,  // 0 = initiator's turn, 1 = responder's turn
+    /// Index into participants; current turn = participants[turn_index % participants.len()]
+    pub turn_index: usize,
     pub message_count: u32,
     pub turn_timeout_secs: u32,
+    /// Auto-merge with existing dialogue if same participants + similar topic (default: true)
+    pub auto_merge: bool,
+    /// Written when the dialogue concludes
+    pub concluded: Option<String>,
     pub updated_at: u64,
 }
 
@@ -208,6 +218,22 @@ pub struct Room {
     pub participants: Vec<String>,
     pub topic: String,
     pub is_open: bool,
+    /// ai_id → expires_at_millis. Timed mute only — checked lazily on read.
+    pub mutes: HashMap<String, u64>,
+    /// Seq IDs of important room messages pinned within this room (room-native, no cross-namespace refs).
+    pub pinned_messages: Vec<u64>,
+    /// Written when the room concludes.
+    pub conclusion: Option<String>,
+    pub updated_at: u64,
+}
+
+/// A message broadcast inside a room (scoped — not visible in general team feed).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomMessage {
+    pub room_id: u64,
+    pub sender: String,
+    pub content: String,
+    pub created_at: u64,
 }
 
 /// Result of attempting to join a room
@@ -289,6 +315,23 @@ pub struct TeamEngram {
     next_id: u64,
     /// IPC notification callback (fires after writes)
     notify: Arc<dyn NotifyCallback>,
+}
+
+/// Get the AI-Foundation base directory.
+///
+/// Reads `AI_FOUNDATION_DATA_DIR` env var first, then falls back to the standard platform
+/// path (`%LOCALAPPDATA%\.ai-foundation` on Windows, `~/.ai-foundation` elsewhere).
+///
+/// Set `AI_FOUNDATION_DATA_DIR` in tests or alternative deployments for full storage
+/// isolation — no other code changes required.
+pub fn ai_foundation_base_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("AI_FOUNDATION_DATA_DIR") {
+        return PathBuf::from(dir);
+    }
+    dirs::data_local_dir()
+        .or_else(dirs::home_dir)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".ai-foundation")
 }
 
 impl TeamEngram {
@@ -390,22 +433,16 @@ impl TeamEngram {
 
     /// Get the default store path
     pub fn default_path() -> PathBuf {
-        let base = dirs::data_local_dir()
-            .or_else(dirs::home_dir)
-            .unwrap_or_else(|| PathBuf::from("."));
-        base.join(".ai-foundation").join("teamengram.engram")
+        ai_foundation_base_dir().join("teamengram.engram")
     }
 
     /// Get per-AI store path - PREFERRED for multi-AI setups
     /// Each AI gets isolated storage: teamengram_{ai_id}.engram
     /// This eliminates cross-AI concurrency issues entirely
     pub fn path_for_ai(ai_id: &str) -> PathBuf {
-        let base = dirs::data_local_dir()
-            .or_else(dirs::home_dir)
-            .unwrap_or_else(|| PathBuf::from("."));
         let safe_id = ai_id.chars().map(|c| if c == '/' || c == '\\' || c == ':' { '_' } else { c }).collect::<String>();
         let filename = format!("teamengram_{}.engram", safe_id);
-        base.join(".ai-foundation").join(filename)
+        ai_foundation_base_dir().join(filename)
     }
 
     /// Insert a direct message
@@ -649,54 +686,134 @@ impl TeamEngram {
     // DIALOGUE OPERATIONS
     // ========================================================================
 
-    /// Start a new dialogue
-    pub fn start_dialogue(&mut self, initiator: &str, responder: &str, topic: &str) -> Result<u64> {
+    /// Compute word-based Jaccard similarity between two topic strings.
+    /// Returns [0.0, 1.0]; 1.0 = identical word sets, 0.0 = no shared words.
+    fn topic_similarity(a: &str, b: &str) -> f32 {
+        use std::collections::HashSet;
+        let a_words: HashSet<&str> = a.split_whitespace().collect();
+        let b_words: HashSet<&str> = b.split_whitespace().collect();
+        if a_words.is_empty() && b_words.is_empty() {
+            return 1.0;
+        }
+        let intersection = a_words.intersection(&b_words).count();
+        let union = a_words.len() + b_words.len() - intersection;
+        if union == 0 { 1.0 } else { intersection as f32 / union as f32 }
+    }
+
+    /// Find an existing active dialogue with identical participants (order-independent)
+    /// and similar topic (Jaccard >= 0.6). Returns `Some(id)` if a merge candidate exists.
+    fn find_mergeable_dialogue(&mut self, all_participants: &[String], topic: &str) -> Option<u64> {
+        let mut target_sorted = all_participants.to_vec();
+        target_sorted.sort();
+        let initiator = &all_participants[0];
+        let prefix = format!("dg:ai:{}:", initiator);
+        let Ok(records) = self.query_by_prefix(&prefix, 50) else {
+            return None;
+        };
+        for record in records {
+            if let RecordData::Dialogue(d) = record.data {
+                if d.status == DialogueStatus::Active && d.auto_merge {
+                    let mut existing_sorted = d.participants.clone();
+                    existing_sorted.sort();
+                    if existing_sorted == target_sorted
+                        && Self::topic_similarity(&d.topic, topic) >= 0.6
+                    {
+                        return Some(record.id);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Start a new dialogue with one or more participants.
+    ///
+    /// `all_participants` must include the initiator as participants[0].
+    /// Turn starts at index 1 (first non-initiator goes first).
+    /// When `auto_merge` is true (default), automatically merges into an existing
+    /// active dialogue if same participants + similar topic are found.
+    pub fn start_dialogue(&mut self, all_participants: &[String], topic: &str, auto_merge: bool) -> Result<u64> {
+        assert!(!all_participants.is_empty(), "dialogue requires at least one participant");
+
+        // Auto-merge: return existing dialogue ID if same participants + similar topic found.
+        if auto_merge && all_participants.len() >= 2 {
+            if let Some(existing_id) = self.find_mergeable_dialogue(all_participants, topic) {
+                return Ok(existing_id);
+            }
+        }
+
+        let initiator = &all_participants[0];
+
         let id = self.next_id;
         self.next_id += 1;
 
         let now = now_millis();
+        // turn_index=1: first non-initiator goes first (wraps to 0 for single-participant edge case)
+        let turn_index = if all_participants.len() > 1 { 1 } else { 0 };
+
+        let dialogue = Dialogue {
+            participants: all_participants.to_vec(),
+            topic: topic.to_string(),
+            status: DialogueStatus::Active,
+            turn_index,
+            message_count: 1,
+            turn_timeout_secs: 180,
+            auto_merge,
+            concluded: None,
+            updated_at: now,
+        };
+
         let record = Record {
             id,
             record_type: RecordType::Dialogue,
             created_at: now,
-            data: RecordData::Dialogue(Dialogue {
-                initiator: initiator.to_string(),
-                responder: responder.to_string(),
-                topic: topic.to_string(),
-                status: DialogueStatus::Active,
-                turn: 1,  // Responder's turn first (initiator sent first message)
-                message_count: 1,
-                turn_timeout_secs: 180,  // 3 minutes default
-                updated_at: now,
-            }),
+            data: RecordData::Dialogue(dialogue),
         };
 
         let value = bincode::serialize(&record)?;
 
-        // Create all keys for the dialogue
+        // Create id key + one key per participant (all in a single batch transaction)
         let dg_id_key = format!("dg:id:{:016x}", id);
-        let init_key = format!("dg:ai:{}:{:016x}", initiator, id);
-        let resp_key = format!("dg:ai:{}:{:016x}", responder, id);
-
-        // CRITICAL: Use batch_insert to insert all 3 keys in a single transaction
-        // This fixes the bug where separate transactions caused 2nd/3rd keys to be lost
-        let entries: Vec<(&[u8], &[u8])> = vec![
-            (dg_id_key.as_bytes(), &value),
-            (init_key.as_bytes(), &value),
-            (resp_key.as_bytes(), &value),
-        ];
+        let mut keys: Vec<String> = vec![dg_id_key];
+        for p in all_participants.iter() {
+            keys.push(format!("dg:ai:{}:{:016x}", p, id));
+        }
+        let entries: Vec<(&[u8], &[u8])> = keys.iter().map(|k| (k.as_bytes(), value.as_slice())).collect();
         let mut tree = BTree::new(&mut self.allocator);
         tree.batch_insert(&entries)?;
 
-        // Fire IPC notification
-        self.notify.notify(
-            NotifyType::Dialogue,
-            initiator,
-            responder,
-            Self::content_preview(topic),
-        );
+        // Notify all non-initiator participants
+        for p in all_participants.iter().skip(1) {
+            self.notify.notify(
+                NotifyType::Dialogue,
+                initiator,
+                p,
+                Self::content_preview(topic),
+            );
+        }
 
         Ok(id)
+    }
+
+    /// Write updated dialogue state to id key + all participant keys atomically.
+    fn update_dialogue_all_keys(&mut self, id: u64, dialogue: &Dialogue) -> Result<()> {
+        let record = Record {
+            id,
+            record_type: RecordType::Dialogue,
+            created_at: dialogue.updated_at,
+            data: RecordData::Dialogue(dialogue.clone()),
+        };
+        let value = bincode::serialize(&record)?;
+
+        let dg_id_key = format!("dg:id:{:016x}", id);
+        let mut keys: Vec<String> = vec![dg_id_key];
+        for p in dialogue.participants.iter() {
+            keys.push(format!("dg:ai:{}:{:016x}", p, id));
+        }
+        let entries: Vec<(&[u8], &[u8])> = keys.iter().map(|k| (k.as_bytes(), value.as_slice())).collect();
+        let mut tree = BTree::new(&mut self.allocator);
+        tree.batch_insert(&entries)?;
+        Ok(())
     }
 
     /// Get dialogue by ID
@@ -727,40 +844,31 @@ impl TeamEngram {
         }).collect())
     }
 
-    /// Respond to a dialogue (updates turn)
+    /// Respond to a dialogue — advances turn_index to next participant.
     pub fn respond_to_dialogue(&mut self, id: u64) -> Result<bool> {
         if let Some(mut dialogue) = self.get_dialogue(id)? {
-            dialogue.turn = if dialogue.turn == 0 { 1 } else { 0 };
+            dialogue.turn_index += 1;
             dialogue.message_count += 1;
             dialogue.updated_at = now_millis();
-
-            // Re-store the updated dialogue
-            let record = Record {
-                id,
-                record_type: RecordType::Dialogue,
-                created_at: dialogue.updated_at,
-                data: RecordData::Dialogue(dialogue),
-            };
-            self.insert_record(&record)?;
+            self.update_dialogue_all_keys(id, &dialogue)?;
             Ok(true)
         } else {
             Ok(false)
         }
     }
 
-    /// End a dialogue
+    /// End a dialogue with optional conclusion text.
     pub fn end_dialogue(&mut self, id: u64, status: DialogueStatus) -> Result<bool> {
+        self.end_dialogue_with_conclusion(id, status, None)
+    }
+
+    /// End a dialogue with optional conclusion text.
+    pub fn end_dialogue_with_conclusion(&mut self, id: u64, status: DialogueStatus, conclusion: Option<String>) -> Result<bool> {
         if let Some(mut dialogue) = self.get_dialogue(id)? {
             dialogue.status = status;
+            dialogue.concluded = conclusion;
             dialogue.updated_at = now_millis();
-
-            let record = Record {
-                id,
-                record_type: RecordType::Dialogue,
-                created_at: dialogue.updated_at,
-                data: RecordData::Dialogue(dialogue),
-            };
-            self.insert_record(&record)?;
+            self.update_dialogue_all_keys(id, &dialogue)?;
             Ok(true)
         } else {
             Ok(false)
@@ -773,23 +881,18 @@ impl TeamEngram {
         let hex_id = format!("{:016x}", id);
         let mut deleted_count = 0u32;
 
-        // First, try to find the dialogue via prefix scan to get initiator/responder
+        // First, try to find the dialogue via prefix scan to get all participants
         let all_dialogues = self.query_by_prefix("dg:ai:", 1000)?;
         for record in all_dialogues {
             if record.id == id {
                 if let RecordData::Dialogue(d) = &record.data {
-                    // Delete initiator index key
-                    let init_key = format!("dg:ai:{}:{}", d.initiator, hex_id);
-                    let mut tree = BTree::new(&mut self.allocator);
-                    if tree.delete(init_key.as_bytes()).unwrap_or(false) {
-                        deleted_count += 1;
-                    }
-
-                    // Delete responder index key
-                    let resp_key = format!("dg:ai:{}:{}", d.responder, hex_id);
-                    let mut tree = BTree::new(&mut self.allocator);
-                    if tree.delete(resp_key.as_bytes()).unwrap_or(false) {
-                        deleted_count += 1;
+                    // Delete index key for every participant
+                    for p in &d.participants {
+                        let p_key = format!("dg:ai:{}:{}", p, hex_id);
+                        let mut tree = BTree::new(&mut self.allocator);
+                        if tree.delete(p_key.as_bytes()).unwrap_or(false) {
+                            deleted_count += 1;
+                        }
                     }
                 }
                 break;
@@ -984,6 +1087,10 @@ impl TeamEngram {
                 participants: vec![creator.to_string()],
                 topic: topic.to_string(),
                 is_open: true,
+                mutes: HashMap::new(),
+                pinned_messages: Vec::new(),
+                conclusion: None,
+                updated_at: now_millis(),
             }),
         };
 
@@ -1383,21 +1490,18 @@ impl TeamEngram {
         self.persist_next_id()
     }
 
-    /// Query records by key prefix
+    /// Query records by key prefix.
+    /// Uses B+Tree prefix seek for O(log n + k) instead of O(n) full scan.
     fn query_by_prefix(&mut self, prefix: &str, limit: usize) -> Result<Vec<Record>> {
         let tree = BTree::new(&mut self.allocator);
         let mut results = Vec::new();
 
-        // For now, scan all and filter
-        // TODO: Implement proper prefix iteration
-        let mut iter = tree.iter()?;
-        while let Some((key, value)) = iter.next()? {
-            if key.starts_with(prefix.as_bytes()) {
-                if let Ok(record) = bincode::deserialize::<Record>(&value) {
-                    results.push(record);
-                    if results.len() >= limit {
-                        break;
-                    }
+        let mut iter = tree.prefix_iter(prefix.as_bytes())?;
+        while let Some((_key, value)) = iter.next()? {
+            if let Ok(record) = bincode::deserialize::<Record>(&value) {
+                results.push(record);
+                if results.len() >= limit {
+                    break;
                 }
             }
         }
@@ -1425,17 +1529,21 @@ impl TeamEngram {
     // ADDITIONAL METHODS FOR 100% PARITY
     // ========================================================================
 
-    /// Get dialogue invites (dialogues where ai_id is responder and it's their turn)
+    /// Get dialogue invites — dialogues where ai_id is a non-initiator participant,
+    /// it's their turn, and no one has responded yet (message_count == 1).
     pub fn get_dialogue_invites(&mut self, ai_id: &str, limit: usize) -> Result<Vec<(u64, Dialogue)>> {
         let records = self.query_by_prefix("dg:id:", limit * 2)?;
         let now = now_millis();
         Ok(records.into_iter().filter_map(|r| {
             if let RecordData::Dialogue(d) = r.data {
-                // Invite = responder hasn't responded yet (turn 0, status active)
-                if d.responder == ai_id && d.turn == 0 && d.status == DialogueStatus::Active {
-                    // Check not expired (24 hour default)
-                    if r.created_at + 86400000 > now {
-                        return Some((r.id, d));
+                if d.status == DialogueStatus::Active && d.message_count == 1 {
+                    // It's an invite if ai_id is a non-initiator AND it's currently their turn
+                    let current = &d.participants[d.turn_index % d.participants.len()];
+                    let is_non_initiator = d.participants.get(0).map(|i| i != ai_id).unwrap_or(false);
+                    if current == ai_id && is_non_initiator {
+                        if r.created_at + 86400000 > now {
+                            return Some((r.id, d));
+                        }
                     }
                 }
             }
@@ -1449,10 +1557,8 @@ impl TeamEngram {
         Ok(records.into_iter().filter_map(|r| {
             if let RecordData::Dialogue(d) = r.data {
                 if d.status == DialogueStatus::Active {
-                    // Even turns = initiator's turn, odd turns = responder's turn
-                    let is_my_turn = (d.turn % 2 == 0 && d.initiator == ai_id) ||
-                                     (d.turn % 2 == 1 && d.responder == ai_id);
-                    if is_my_turn {
+                    let current = &d.participants[d.turn_index % d.participants.len()];
+                    if current == ai_id {
                         return Some((r.id, d));
                     }
                 }
@@ -1520,8 +1626,13 @@ impl TeamEngram {
         Ok(false)
     }
 
-    /// Close a room (creator only)
+    /// Close a room (creator only). Use `room_conclude` to close with a summary.
     pub fn close_room(&mut self, room_id: u64, ai_id: &str) -> Result<bool> {
+        self.room_conclude(room_id, ai_id, None)
+    }
+
+    /// Conclude a room: write optional summary and close it (creator only).
+    pub fn room_conclude(&mut self, room_id: u64, ai_id: &str, conclusion: Option<String>) -> Result<bool> {
         let key = format!("rm:id:{:016x}", room_id);
         let tree = BTree::new(&mut self.allocator);
 
@@ -1532,6 +1643,164 @@ impl TeamEngram {
                     return Ok(false);
                 }
                 room.is_open = false;
+                room.conclusion = conclusion;
+                room.updated_at = now_millis();
+                let new_value = bincode::serialize(&record)?;
+                let mut tree = BTree::new(&mut self.allocator);
+                tree.insert(key.as_bytes(), &new_value)?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Broadcast a scoped message inside a room (only members receive it).
+    /// Returns the message sequence ID or error if room not found / sender not a member.
+    pub fn room_broadcast(&mut self, room_id: u64, sender: &str, content: &str) -> Result<u64> {
+        // Verify room exists and sender is a member
+        let room = self.get_room(room_id)?.ok_or_else(|| anyhow::anyhow!("Room not found"))?;
+        if !room.is_open {
+            anyhow::bail!("Room is closed");
+        }
+        if !room.participants.contains(&sender.to_string()) {
+            anyhow::bail!("Not a room member");
+        }
+
+        let msg_id = self.next_id;
+        self.next_id += 1;
+        let now = now_millis();
+
+        let record = Record {
+            id: msg_id,
+            record_type: RecordType::RoomMessage,
+            created_at: now,
+            data: RecordData::RoomMessage(RoomMessage {
+                room_id,
+                sender: sender.to_string(),
+                content: content.to_string(),
+                created_at: now,
+            }),
+        };
+
+        // Store with key: rm:msg:{room_id:016x}:{msg_id:016x}
+        let key = format!("rm:msg:{:016x}:{:016x}", room_id, msg_id);
+        let value = bincode::serialize(&record)?;
+        let mut tree = BTree::new(&mut self.allocator);
+        tree.insert(key.as_bytes(), &value)?;
+
+        // Notify all room members except sender (skip muted)
+        for p in room.participants.iter().filter(|p| p.as_str() != sender) {
+            if !self.is_room_muted(room_id, p).unwrap_or(false) {
+                self.notify.notify(NotifyType::Broadcast, sender, p, Self::content_preview(content));
+            }
+        }
+
+        Ok(msg_id)
+    }
+
+    /// Get messages for a room (newest first, up to limit).
+    pub fn room_get_messages(&mut self, room_id: u64, limit: usize) -> Result<Vec<(u64, RoomMessage)>> {
+        let prefix = format!("rm:msg:{:016x}:", room_id);
+        let records = self.query_by_prefix(&prefix, limit)?;
+        Ok(records.into_iter().filter_map(|r| {
+            if let RecordData::RoomMessage(msg) = r.data {
+                Some((r.id, msg))
+            } else {
+                None
+            }
+        }).collect())
+    }
+
+    /// Set a timed mute for an AI in a room. `minutes` must be > 0.
+    /// Mute expires automatically — checked lazily when delivering messages.
+    pub fn room_mute(&mut self, room_id: u64, ai_id: &str, minutes: u32) -> Result<bool> {
+        if minutes == 0 {
+            anyhow::bail!("Mute duration must be > 0 minutes");
+        }
+        let key = format!("rm:id:{:016x}", room_id);
+        let tree = BTree::new(&mut self.allocator);
+
+        if let Some(value) = tree.get(key.as_bytes())? {
+            let mut record: Record = bincode::deserialize(&value)?;
+            if let RecordData::Room(ref mut room) = record.data {
+                if !room.participants.contains(&ai_id.to_string()) {
+                    return Ok(false);
+                }
+                let expires_at = now_millis() + (minutes as u64) * 60_000;
+                room.mutes.insert(ai_id.to_string(), expires_at);
+                room.updated_at = now_millis();
+                let new_value = bincode::serialize(&record)?;
+                let mut tree = BTree::new(&mut self.allocator);
+                tree.insert(key.as_bytes(), &new_value)?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Check if an AI is currently muted in a room. Lazily cleans expired mutes.
+    pub fn is_room_muted(&mut self, room_id: u64, ai_id: &str) -> Result<bool> {
+        let key = format!("rm:id:{:016x}", room_id);
+        let tree = BTree::new(&mut self.allocator);
+
+        if let Some(value) = tree.get(key.as_bytes())? {
+            let mut record: Record = bincode::deserialize(&value)?;
+            if let RecordData::Room(ref mut room) = record.data {
+                let now = now_millis();
+                if let Some(&expires_at) = room.mutes.get(ai_id) {
+                    if expires_at > now {
+                        return Ok(true); // Still muted
+                    }
+                    // Expired — lazy cleanup
+                    room.mutes.remove(ai_id);
+                    room.updated_at = now;
+                    let new_value = bincode::serialize(&record)?;
+                    let mut tree = BTree::new(&mut self.allocator);
+                    tree.insert(key.as_bytes(), &new_value)?;
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    /// Pin a room message by its seq ID. Only room members can pin.
+    pub fn room_pin_message(&mut self, room_id: u64, ai_id: &str, msg_seq_id: u64) -> Result<bool> {
+        let key = format!("rm:id:{:016x}", room_id);
+        let tree = BTree::new(&mut self.allocator);
+
+        if let Some(value) = tree.get(key.as_bytes())? {
+            let mut record: Record = bincode::deserialize(&value)?;
+            if let RecordData::Room(ref mut room) = record.data {
+                if !room.participants.contains(&ai_id.to_string()) {
+                    return Ok(false);
+                }
+                if room.pinned_messages.contains(&msg_seq_id) {
+                    return Ok(true); // Already pinned
+                }
+                room.pinned_messages.push(msg_seq_id);
+                room.updated_at = now_millis();
+                let new_value = bincode::serialize(&record)?;
+                let mut tree = BTree::new(&mut self.allocator);
+                tree.insert(key.as_bytes(), &new_value)?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Unpin a room message. Only room members can unpin.
+    pub fn room_unpin_message(&mut self, room_id: u64, ai_id: &str, msg_seq_id: u64) -> Result<bool> {
+        let key = format!("rm:id:{:016x}", room_id);
+        let tree = BTree::new(&mut self.allocator);
+
+        if let Some(value) = tree.get(key.as_bytes())? {
+            let mut record: Record = bincode::deserialize(&value)?;
+            if let RecordData::Room(ref mut room) = record.data {
+                if !room.participants.contains(&ai_id.to_string()) {
+                    return Ok(false);
+                }
+                room.pinned_messages.retain(|&id| id != msg_seq_id);
+                room.updated_at = now_millis();
                 let new_value = bincode::serialize(&record)?;
                 let mut tree = BTree::new(&mut self.allocator);
                 tree.insert(key.as_bytes(), &new_value)?;
@@ -2022,15 +2291,15 @@ mod tests {
 
         let mut store = TeamEngram::open(&path).unwrap();
 
-        let id = store.insert_dm("ai-1", "ai-2", "Hello Sage!").unwrap();
+        let id = store.insert_dm("beta-002", "alpha-001", "Hello Sage!").unwrap();
         assert_eq!(id, 1);
 
-        let dms = store.get_dms("ai-2", 10).unwrap();
+        let dms = store.get_dms("alpha-001", 10).unwrap();
         assert_eq!(dms.len(), 1);
 
         if let RecordData::DirectMessage(dm) = &dms[0].data {
-            assert_eq!(dm.from_ai, "ai-1");
-            assert_eq!(dm.to_ai, "ai-2");
+            assert_eq!(dm.from_ai, "beta-002");
+            assert_eq!(dm.to_ai, "alpha-001");
             assert_eq!(dm.content, "Hello Sage!");
         } else {
             panic!("Expected DirectMessage");
@@ -2044,7 +2313,7 @@ mod tests {
 
         let mut store = TeamEngram::open(&path).unwrap();
 
-        store.insert_broadcast("ai-3", "general", "Team update!").unwrap();
+        store.insert_broadcast("gamma-003", "general", "Team update!").unwrap();
 
         let broadcasts = store.get_broadcasts("general", 10).unwrap();
         assert_eq!(broadcasts.len(), 1);
@@ -2057,10 +2326,10 @@ mod tests {
 
         let mut store = TeamEngram::open(&path).unwrap();
 
-        store.update_presence("ai-2", "active", "Working on TeamEngram").unwrap();
+        store.update_presence("alpha-001", "active", "Working on TeamEngram").unwrap();
 
-        let presence = store.get_presence("ai-2").unwrap().unwrap();
-        assert_eq!(presence.ai_id, "ai-2");
+        let presence = store.get_presence("alpha-001").unwrap().unwrap();
+        assert_eq!(presence.ai_id, "alpha-001");
         assert_eq!(presence.status, "active");
     }
 
@@ -2072,7 +2341,7 @@ mod tests {
         let mut store = TeamEngram::open(&path).unwrap();
 
         // Queue a task
-        let task_id = store.queue_task("ai-2", "Review the code", TaskPriority::Normal, "review").unwrap();
+        let task_id = store.queue_task("alpha-001", "Review the code", TaskPriority::Normal, "review").unwrap();
         assert_eq!(task_id, 1);
 
         // Verify task exists by listing
@@ -2081,11 +2350,11 @@ mod tests {
         assert_eq!(tasks[0].0, task_id);
 
         // Claim the task
-        let claimed = store.claim_task(task_id, "ai-1").unwrap();
+        let claimed = store.claim_task(task_id, "beta-002").unwrap();
         assert!(claimed, "Task should be claimable");
 
         // Complete the task
-        let completed = store.complete_task(task_id, "ai-1", "Looks good!").unwrap();
+        let completed = store.complete_task(task_id, "beta-002", "Looks good!").unwrap();
         assert!(completed, "Task should be completable");
 
         // Verify final state

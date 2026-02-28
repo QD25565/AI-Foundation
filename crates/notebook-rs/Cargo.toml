@@ -44,5 +44,11 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage
 [features]
 default = []
 
-# llama-cpp-sys-2 patch is defined at the workspace root Cargo.toml
+# Patch for Windows GNU target compatibility (same as forge)
+[patch.crates-io]
+llama-cpp-sys-2 = { path = "../forge/patches/llama-cpp-sys-2" }
 
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

@@ -17,10 +17,10 @@ use super::widgets::{Logo, Spinner};
 
 /// Message role in conversation
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum Role {
     User,
     Assistant,
-    #[allow(dead_code)]
     System,
     Tool,
 }
@@ -127,22 +127,6 @@ pub struct App {
 
     /// Pending tool approval
     pub pending_tool: Option<PendingTool>,
-
-    // TODO: Replace is_generating + streaming_tokens.is_empty() + pending_tool.is_some() with an
-    // explicit AppState enum for cleaner state machine + richer visual feedback:
-    //
-    //   enum AppState {
-    //       Idle,                    // waiting for user input — status bar dim/neutral
-    //       Thinking,                // request sent, no tokens yet — spinner, amber/yellow tint
-    //       Streaming,               // tokens flowing — green pulse, token count
-    //       ToolExecuting(String),   // running a tool (tool name) — cyan tint
-    //       ToolPendingApproval,     // waiting for Y/N — orange/warning tint
-    //   }
-    //
-    // With this, render_status_bar and render_title_bar can shift border/label colors
-    // based on state — giving an at-a-glance "what is the AI doing right now" feel.
-    // Also useful for Teambook integration: broadcast current AppState as AI presence
-    // (idle / thinking / executing) so other AIs and humans can see activity in team roster.
 
     /// Animation frame counter
     pub frame: usize,
@@ -434,7 +418,7 @@ impl App {
     }
 
     /// Process think blocks during streaming (handles incomplete blocks)
-    #[allow(unused_assignments)] // in_think/think_line_count are reset inside loop branches
+    #[allow(unused_assignments)]
     fn process_streaming_think(content: &str) -> String {
         // During streaming, we might have:
         // 1. Complete <think>...</think> blocks - collapse them

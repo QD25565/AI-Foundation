@@ -136,7 +136,7 @@ mod tests {
     #[test]
     fn test_encrypt_decrypt_roundtrip() {
         let cipher = EngramCipher::new("test-ai-123");
-        let plaintext = b"Encryption roundtrip test: verify encrypt-decrypt produces original bytes.";
+        let plaintext = b"Test plaintext for encrypt-decrypt roundtrip verification.";
 
         let encrypted = cipher.encrypt(plaintext).unwrap();
         assert!(encrypted.len() > plaintext.len()); // Has overhead
@@ -147,8 +147,8 @@ mod tests {
 
     #[test]
     fn test_different_ai_different_key() {
-        let cipher1 = EngramCipher::new("ai-1");
-        let cipher2 = EngramCipher::new("ai-2");
+        let cipher1 = EngramCipher::new("alpha-001");
+        let cipher2 = EngramCipher::new("beta-002");
         let plaintext = b"Secret memory";
 
         let encrypted = cipher1.encrypt(plaintext).unwrap();

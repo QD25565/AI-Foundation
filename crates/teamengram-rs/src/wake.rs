@@ -36,6 +36,8 @@ pub enum WakeReason {
     DialogueTurn = 7,
     /// Vote requires attention
     VoteRequest = 8,
+    /// File claim released by another AI
+    FileReleased = 9,
 }
 
 impl From<u8> for WakeReason {
@@ -49,6 +51,7 @@ impl From<u8> for WakeReason {
             6 => Self::Broadcast,
             7 => Self::DialogueTurn,
             8 => Self::VoteRequest,
+            9 => Self::FileReleased,
             _ => Self::None,
         }
     }
@@ -105,6 +108,7 @@ pub mod windows {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
     use std::ptr;
+    use std::sync::atomic::{AtomicU8, Ordering};
 
     // Windows API constants
     const WAIT_OBJECT_0: u32 = 0;
@@ -115,8 +119,13 @@ pub mod windows {
 
     // NOTE: File-based metadata was REMOVED. It caused stale wake bugs where the
     // AI would repeatedly wake on old data because the file wasn't cleared properly.
-    // The Named Event is now a pure signal - after waking, the CLI queries the
+    // The Named Event is a pure signal - after waking, the CLI queries the
     // VIEW (the source of truth) to find out what actually arrived.
+    //
+    // The AtomicU8 reason field stores wake reason in-process only. For same-process
+    // signaling (standby command, tests) the reason propagates correctly. For
+    // cross-process named events, the reason is process-local and is not visible
+    // to the waiter — it returns WakeReason::None, and the AI queries the view.
 
     #[link(name = "kernel32")]
     extern "system" {
@@ -138,9 +147,12 @@ pub mod windows {
         fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
     }
 
-    /// Windows Named Event implementation - pure signal, no file metadata
+    /// Windows Named Event implementation - pure signal with in-process reason storage
     pub struct WindowsWakeEvent {
         handle: *mut std::ffi::c_void,
+        /// In-process wake reason. Propagates correctly for same-process signaling.
+        /// Cross-process callers get WakeReason::None and query the view instead.
+        reason: AtomicU8,
     }
 
     // SAFETY: Windows handles are thread-safe when used correctly
@@ -192,7 +204,7 @@ pub mod windows {
                 handle
             };
 
-            Ok(Self { handle })
+            Ok(Self { handle, reason: AtomicU8::new(0) })
         }
 
         /// Create anonymous event (same-process only)
@@ -210,7 +222,7 @@ pub mod windows {
                 return Err(std::io::Error::last_os_error());
             }
 
-            Ok(Self { handle })
+            Ok(Self { handle, reason: AtomicU8::new(0) })
         }
     }
 
@@ -227,8 +239,8 @@ pub mod windows {
             unsafe {
                 WaitForSingleObject(self.handle, INFINITE);
             }
-            // No file metadata - AI queries the view after waking
-            WakeResult::new(WakeReason::Manual, None, None)
+            let reason = WakeReason::from(self.reason.swap(0, Ordering::AcqRel));
+            WakeResult::new(reason, None, None)
         }
 
         fn wait_timeout(&self, timeout: Duration) -> Option<WakeResult> {
@@ -237,16 +249,18 @@ pub mod windows {
 
             match result {
                 WAIT_OBJECT_0 => {
-                    // No file metadata - AI queries the view after waking
-                    Some(WakeResult::new(WakeReason::Manual, None, None))
+                    let reason = WakeReason::from(self.reason.swap(0, Ordering::AcqRel));
+                    Some(WakeResult::new(reason, None, None))
                 }
                 WAIT_TIMEOUT => None,
                 _ => None,
             }
         }
 
-        fn signal(&self, _reason: WakeReason, _from_ai: &str, _content: &str) {
-            // Pure signal - no file metadata. AI queries the view after waking.
+        fn signal(&self, reason: WakeReason, _from_ai: &str, _content: &str) {
+            // Store reason before signaling to avoid a race where the waiter
+            // reads reason before it is written.
+            self.reason.store(reason as u8, Ordering::Release);
             unsafe {
                 SetEvent(self.handle);
             }
@@ -742,8 +756,22 @@ pub mod sequencer_wake {
         fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
     }
 
-    /// The well-known name for the sequencer wake event
-    const SEQUENCER_WAKE_EVENT_NAME: &str = r"Local\TeamEngram_SequencerWake";
+    /// Compute per-data-dir suffix for the sequencer wake event name.
+    /// Uses FNV-1a hash of the canonical path — same approach as the singleton mutex.
+    fn sequencer_event_suffix(base_dir: Option<&std::path::Path>) -> String {
+        if let Some(dir) = base_dir {
+            let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+            let path_str = canonical.to_string_lossy();
+            let mut hash: u64 = 0xcbf29ce484222325u64;
+            for byte in path_str.bytes() {
+                hash ^= byte as u64;
+                hash = hash.wrapping_mul(0x00000100000001b3u64);
+            }
+            format!("_{:016x}", hash)
+        } else {
+            String::new()
+        }
+    }
 
     /// Sequencer-side: waits for signals from outbox writers
     pub struct SequencerWakeReceiver {
@@ -754,9 +782,13 @@ pub mod sequencer_wake {
     unsafe impl Sync for SequencerWakeReceiver {}
 
     impl SequencerWakeReceiver {
-        /// Create or open the sequencer wake event (receiver side)
-        pub fn new() -> std::io::Result<Self> {
-            let wide_name: Vec<u16> = OsStr::new(SEQUENCER_WAKE_EVENT_NAME)
+        /// Create or open the sequencer wake event (receiver side).
+        /// `base_dir` makes the event name unique per data directory so that
+        /// multiple daemon instances (e.g. production + test) do not share the
+        /// same event and steal each other's wake signals.
+        pub fn new(base_dir: Option<&std::path::Path>) -> std::io::Result<Self> {
+            let event_name = format!(r"Local\TeamEngram_SequencerWake{}", sequencer_event_suffix(base_dir));
+            let wide_name: Vec<u16> = OsStr::new(&event_name)
                 .encode_wide()
                 .chain(std::iter::once(0))
                 .collect();
@@ -831,8 +863,9 @@ pub mod sequencer_wake {
         ///
         /// Returns None if sequencer is not running (event doesn't exist).
         /// This is expected when no daemon is active.
-        pub fn open() -> Option<Self> {
-            let wide_name: Vec<u16> = OsStr::new(SEQUENCER_WAKE_EVENT_NAME)
+        pub fn open(base_dir: Option<&std::path::Path>) -> Option<Self> {
+            let event_name = format!(r"Local\TeamEngram_SequencerWake{}", sequencer_event_suffix(base_dir));
+            let wide_name: Vec<u16> = OsStr::new(&event_name)
                 .encode_wide()
                 .chain(std::iter::once(0))
                 .collect();
@@ -864,12 +897,13 @@ pub mod sequencer_wake {
         }
     }
 
-    /// Convenience function: signal sequencer if running (fire-and-forget)
+    /// Convenience function: signal sequencer if running (fire-and-forget).
     ///
-    /// This is the main entry point for outbox writers. Safe to call even
-    /// if sequencer isn't running - will just return without error.
-    pub fn signal_sequencer() {
-        if let Some(signaler) = SequencerWakeSignaler::open() {
+    /// `base_dir` must match what the daemon was started with so the signal
+    /// reaches the correct daemon instance (not the production daemon when
+    /// called from a test).
+    pub fn signal_sequencer(base_dir: Option<&std::path::Path>) {
+        if let Some(signaler) = SequencerWakeSignaler::open(base_dir) {
             signaler.signal();
         }
     }
@@ -878,9 +912,29 @@ pub mod sequencer_wake {
 #[cfg(not(target_os = "windows"))]
 pub mod sequencer_wake {
     use std::time::Duration;
+    use std::ffi::CString;
 
-    /// POSIX named semaphore path (visible in /dev/shm/)
-    const SEM_NAME: &[u8] = b"/teamengram_seq_wake\0";
+    /// Compute per-data-dir suffix for the sequencer wake semaphore name.
+    /// Uses FNV-1a hash of the canonical path — same approach as the singleton mutex.
+    fn sequencer_event_suffix(base_dir: Option<&std::path::Path>) -> String {
+        if let Some(dir) = base_dir {
+            let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+            let path_str = canonical.to_string_lossy();
+            let mut hash: u64 = 0xcbf29ce484222325u64;
+            for byte in path_str.bytes() {
+                hash ^= byte as u64;
+                hash = hash.wrapping_mul(0x00000100000001b3u64);
+            }
+            format!("_{:016x}", hash)
+        } else {
+            String::new()
+        }
+    }
+
+    fn sem_name(base_dir: Option<&std::path::Path>) -> CString {
+        CString::new(format!("/teamengram_seq_wake{}", sequencer_event_suffix(base_dir)))
+            .expect("sem name contains no null bytes")
+    }
 
     /// Cross-process sequencer wake using POSIX named semaphores.
     ///
@@ -889,16 +943,21 @@ pub mod sequencer_wake {
     /// with zero polling — sem_post/sem_timedwait are ~200ns on modern kernels.
     pub struct SequencerWakeReceiver {
         sem: *mut libc::sem_t,
+        name: CString,
     }
 
     unsafe impl Send for SequencerWakeReceiver {}
     unsafe impl Sync for SequencerWakeReceiver {}
 
     impl SequencerWakeReceiver {
-        pub fn new() -> std::io::Result<Self> {
+        /// `base_dir` makes the semaphore name unique per data directory so that
+        /// multiple daemon instances (e.g. production + test) do not share the
+        /// same semaphore and steal each other's wake signals.
+        pub fn new(base_dir: Option<&std::path::Path>) -> std::io::Result<Self> {
+            let name = sem_name(base_dir);
             let sem = unsafe {
                 libc::sem_open(
-                    SEM_NAME.as_ptr() as *const libc::c_char,
+                    name.as_ptr(),
                     libc::O_CREAT,
                     0o644,
                     0u32,  // Initially non-signaled
@@ -914,7 +973,7 @@ pub mod sequencer_wake {
                 if result != 0 { break; }
             }
 
-            Ok(Self { sem })
+            Ok(Self { sem, name })
         }
 
         pub fn wait_timeout(&self, timeout: Duration) -> bool {
@@ -953,7 +1012,7 @@ pub mod sequencer_wake {
             unsafe {
                 libc::sem_close(self.sem);
                 // Unlink so it doesn't persist after daemon shutdown
-                libc::sem_unlink(SEM_NAME.as_ptr() as *const libc::c_char);
+                libc::sem_unlink(self.name.as_ptr());
             }
         }
     }
@@ -968,10 +1027,11 @@ pub mod sequencer_wake {
     impl SequencerWakeSignaler {
         /// Open connection to the sequencer wake semaphore.
         /// Returns None if sequencer is not running (semaphore doesn't exist).
-        pub fn open() -> Option<Self> {
+        pub fn open(base_dir: Option<&std::path::Path>) -> Option<Self> {
+            let name = sem_name(base_dir);
             let sem = unsafe {
                 libc::sem_open(
-                    SEM_NAME.as_ptr() as *const libc::c_char,
+                    name.as_ptr(),
                     0,  // Open existing only, don't create
                     0,
                     0,
@@ -995,9 +1055,13 @@ pub mod sequencer_wake {
         }
     }
 
-    /// Convenience function: signal sequencer if running (fire-and-forget)
-    pub fn signal_sequencer() {
-        if let Some(signaler) = SequencerWakeSignaler::open() {
+    /// Convenience function: signal sequencer if running (fire-and-forget).
+    ///
+    /// `base_dir` must match what the daemon was started with so the signal
+    /// reaches the correct daemon instance (not the production daemon when
+    /// called from a test).
+    pub fn signal_sequencer(base_dir: Option<&std::path::Path>) {
+        if let Some(signaler) = SequencerWakeSignaler::open(base_dir) {
             signaler.signal();
         }
     }
@@ -1005,6 +1069,711 @@ pub mod sequencer_wake {
 
 // Re-export for convenience
 pub use sequencer_wake::{SequencerWakeReceiver, SequencerWakeSignaler, signal_sequencer};
+
+// ============================================================================
+// FEDERATION WAKE — signals federation node when new events hit the master log
+// ============================================================================
+//
+// Same pattern as SequencerWake: OS-native wait primitive, zero polling.
+// The sequencer calls signal_federation() after writing events to the master
+// event log. The federation node blocks on FederationWakeReceiver::wait()
+// and wakes instantly (~1μs) to read and push new events to peers.
+
+#[cfg(target_os = "windows")]
+pub mod federation_wake {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr;
+    use std::time::Duration;
+
+    const WAIT_OBJECT_0: u32 = 0;
+    const EVENT_MODIFY_STATE: u32 = 0x0002;
+    const SYNCHRONIZE: u32 = 0x00100000;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateEventW(
+            lpEventAttributes: *mut std::ffi::c_void,
+            bManualReset: i32,
+            bInitialState: i32,
+            lpName: *const u16,
+        ) -> *mut std::ffi::c_void;
+        fn OpenEventW(
+            dwDesiredAccess: u32,
+            bInheritHandle: i32,
+            lpName: *const u16,
+        ) -> *mut std::ffi::c_void;
+        fn SetEvent(hEvent: *mut std::ffi::c_void) -> i32;
+        fn WaitForSingleObject(hHandle: *mut std::ffi::c_void, dwMilliseconds: u32) -> u32;
+        fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
+    }
+
+    fn federation_event_suffix(base_dir: Option<&std::path::Path>) -> String {
+        if let Some(dir) = base_dir {
+            let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+            let path_str = canonical.to_string_lossy();
+            let mut hash: u64 = 0xcbf29ce484222325u64;
+            for byte in path_str.bytes() {
+                hash ^= byte as u64;
+                hash = hash.wrapping_mul(0x00000100000001b3u64);
+            }
+            format!("_{:016x}", hash)
+        } else {
+            String::new()
+        }
+    }
+
+    /// Federation-side: blocks until the sequencer signals new events in the master log.
+    pub struct FederationWakeReceiver {
+        handle: *mut std::ffi::c_void,
+    }
+
+    unsafe impl Send for FederationWakeReceiver {}
+    unsafe impl Sync for FederationWakeReceiver {}
+
+    impl FederationWakeReceiver {
+        pub fn new(base_dir: Option<&std::path::Path>) -> std::io::Result<Self> {
+            let event_name = format!(r"Local\TeamEngram_FederationWake{}", federation_event_suffix(base_dir));
+            let wide_name: Vec<u16> = OsStr::new(&event_name)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+
+            let handle = unsafe {
+                OpenEventW(
+                    EVENT_MODIFY_STATE | SYNCHRONIZE,
+                    0,
+                    wide_name.as_ptr(),
+                )
+            };
+
+            let handle = if handle.is_null() {
+                let h = unsafe {
+                    CreateEventW(
+                        ptr::null_mut(),
+                        0, // Auto-reset
+                        0, // Initially non-signaled
+                        wide_name.as_ptr(),
+                    )
+                };
+                if h.is_null() {
+                    return Err(std::io::Error::last_os_error());
+                }
+                h
+            } else {
+                handle
+            };
+
+            Ok(Self { handle })
+        }
+
+        /// Block until signaled. No timeout. No polling.
+        ///
+        /// Wakes ONLY when the sequencer writes new events to the master log
+        /// and calls signal_federation(). If the signal is broken, this blocks
+        /// forever. That is correct — fix the signal, don't mask the bug.
+        pub fn wait(&self) {
+            unsafe { WaitForSingleObject(self.handle, 0xFFFFFFFF) };
+        }
+
+        /// Wait with timeout. Returns true if signaled, false if timeout.
+        pub fn wait_timeout(&self, timeout: Duration) -> bool {
+            let ms = timeout.as_millis() as u32;
+            let result = unsafe { WaitForSingleObject(self.handle, ms) };
+            result == WAIT_OBJECT_0
+        }
+    }
+
+    impl Drop for FederationWakeReceiver {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.handle) };
+        }
+    }
+
+    /// Sequencer-side: signals the federation node after writing to the master log.
+    pub struct FederationWakeSignaler {
+        handle: *mut std::ffi::c_void,
+    }
+
+    unsafe impl Send for FederationWakeSignaler {}
+    unsafe impl Sync for FederationWakeSignaler {}
+
+    impl FederationWakeSignaler {
+        /// Open connection to the federation wake event.
+        /// Returns None if federation node is not running (event doesn't exist).
+        pub fn open(base_dir: Option<&std::path::Path>) -> Option<Self> {
+            let event_name = format!(r"Local\TeamEngram_FederationWake{}", federation_event_suffix(base_dir));
+            let wide_name: Vec<u16> = OsStr::new(&event_name)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+
+            let handle = unsafe {
+                OpenEventW(
+                    EVENT_MODIFY_STATE,
+                    0,
+                    wide_name.as_ptr(),
+                )
+            };
+
+            if handle.is_null() {
+                None // Federation node not running
+            } else {
+                Some(Self { handle })
+            }
+        }
+
+        pub fn signal(&self) {
+            unsafe { SetEvent(self.handle) };
+        }
+    }
+
+    impl Drop for FederationWakeSignaler {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.handle) };
+        }
+    }
+
+    /// Convenience: signal federation node if running (fire-and-forget).
+    pub fn signal_federation(base_dir: Option<&std::path::Path>) {
+        if let Some(signaler) = FederationWakeSignaler::open(base_dir) {
+            signaler.signal();
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub mod federation_wake {
+    use std::time::Duration;
+    use std::ffi::CString;
+
+    fn federation_event_suffix(base_dir: Option<&std::path::Path>) -> String {
+        if let Some(dir) = base_dir {
+            let canonical = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+            let path_str = canonical.to_string_lossy();
+            let mut hash: u64 = 0xcbf29ce484222325u64;
+            for byte in path_str.bytes() {
+                hash ^= byte as u64;
+                hash = hash.wrapping_mul(0x00000100000001b3u64);
+            }
+            format!("_{:016x}", hash)
+        } else {
+            String::new()
+        }
+    }
+
+    fn sem_name(base_dir: Option<&std::path::Path>) -> CString {
+        CString::new(format!("/teamengram_fed_wake{}", federation_event_suffix(base_dir)))
+            .expect("sem name contains no null bytes")
+    }
+
+    /// Federation-side: blocks until the sequencer signals new events.
+    pub struct FederationWakeReceiver {
+        sem: *mut libc::sem_t,
+        name: CString,
+    }
+
+    unsafe impl Send for FederationWakeReceiver {}
+    unsafe impl Sync for FederationWakeReceiver {}
+
+    impl FederationWakeReceiver {
+        pub fn new(base_dir: Option<&std::path::Path>) -> std::io::Result<Self> {
+            let name = sem_name(base_dir);
+            let sem = unsafe {
+                libc::sem_open(
+                    name.as_ptr(),
+                    libc::O_CREAT,
+                    0o644,
+                    0u32,
+                )
+            };
+            if sem == libc::SEM_FAILED {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            // Drain stale signals
+            loop {
+                let result = unsafe { libc::sem_trywait(sem) };
+                if result != 0 { break; }
+            }
+
+            Ok(Self { sem, name })
+        }
+
+        /// Block until signaled. No timeout. No polling.
+        pub fn wait(&self) {
+            unsafe { libc::sem_wait(self.sem) };
+        }
+
+        /// Wait with timeout. Returns true if signaled, false if timeout.
+        pub fn wait_timeout(&self, timeout: Duration) -> bool {
+            let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
+            unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts) };
+            ts.tv_sec += timeout.as_secs() as libc::time_t;
+            ts.tv_nsec += timeout.subsec_nanos() as libc::c_long;
+            if ts.tv_nsec >= 1_000_000_000 {
+                ts.tv_sec += 1;
+                ts.tv_nsec -= 1_000_000_000;
+            }
+            let result = unsafe { libc::sem_timedwait(self.sem, &ts) };
+            result == 0
+        }
+    }
+
+    impl Drop for FederationWakeReceiver {
+        fn drop(&mut self) {
+            unsafe {
+                libc::sem_close(self.sem);
+                libc::sem_unlink(self.name.as_ptr());
+            }
+        }
+    }
+
+    pub struct FederationWakeSignaler {
+        sem: *mut libc::sem_t,
+    }
+
+    unsafe impl Send for FederationWakeSignaler {}
+    unsafe impl Sync for FederationWakeSignaler {}
+
+    impl FederationWakeSignaler {
+        pub fn open(base_dir: Option<&std::path::Path>) -> Option<Self> {
+            let name = sem_name(base_dir);
+            let sem = unsafe {
+                libc::sem_open(
+                    name.as_ptr(),
+                    0,
+                    0,
+                    0,
+                )
+            };
+            if sem == libc::SEM_FAILED {
+                None
+            } else {
+                Some(Self { sem })
+            }
+        }
+
+        pub fn signal(&self) {
+            unsafe { libc::sem_post(self.sem) };
+        }
+    }
+
+    impl Drop for FederationWakeSignaler {
+        fn drop(&mut self) {
+            unsafe { libc::sem_close(self.sem) };
+        }
+    }
+
+    /// Convenience: signal federation node if running (fire-and-forget).
+    pub fn signal_federation(base_dir: Option<&std::path::Path>) {
+        if let Some(signaler) = FederationWakeSignaler::open(base_dir) {
+            signaler.signal();
+        }
+    }
+}
+
+pub use federation_wake::{FederationWakeReceiver, FederationWakeSignaler, signal_federation};
+
+// ============================================================================
+// OUTBOX DRAIN WAKE — signals writer when sequencer has drained their outbox
+// ============================================================================
+//
+// Replaces sleep-based backpressure retry with event-driven waiting.
+// When a writer's outbox is full:
+//   1. Writer signals sequencer (existing signal_sequencer)
+//   2. Writer blocks on DrainWakeReceiver::wait_timeout() — zero CPU
+//   3. Sequencer drains events, calls signal_outbox_drained(ai_id)
+//   4. Writer wakes instantly (~1μs), checks space, writes or retries
+//
+// Per-AI events: each outbox has its own drain event (ai_id in name).
+
+#[cfg(target_os = "windows")]
+pub mod outbox_drain_wake {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr;
+    use std::time::Duration;
+
+    const WAIT_OBJECT_0: u32 = 0;
+    const EVENT_MODIFY_STATE: u32 = 0x0002;
+    const SYNCHRONIZE: u32 = 0x00100000;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateEventW(
+            lpEventAttributes: *mut std::ffi::c_void,
+            bManualReset: i32,
+            bInitialState: i32,
+            lpName: *const u16,
+        ) -> *mut std::ffi::c_void;
+        fn OpenEventW(
+            dwDesiredAccess: u32,
+            bInheritHandle: i32,
+            lpName: *const u16,
+        ) -> *mut std::ffi::c_void;
+        fn SetEvent(hEvent: *mut std::ffi::c_void) -> i32;
+        fn WaitForSingleObject(hHandle: *mut std::ffi::c_void, dwMilliseconds: u32) -> u32;
+        fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
+    }
+
+    /// Compute per-outbox event name suffix from ai_id + base_dir.
+    fn drain_event_name(ai_id: &str, base_dir: Option<&std::path::Path>) -> String {
+        let dir_str = base_dir.map_or("default".to_string(), |p| {
+            p.canonicalize().unwrap_or_else(|_| p.to_path_buf()).to_string_lossy().to_string()
+        });
+        let combined = format!("{}/{}", dir_str, ai_id);
+        let mut hash: u64 = 0xcbf29ce484222325u64;
+        for byte in combined.bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x00000100000001b3u64);
+        }
+        format!(r"Local\TeamEngram_OutboxDrain_{:016x}", hash)
+    }
+
+    /// Writer-side: waits for sequencer to drain the outbox.
+    /// Created by OutboxProducer, stored as a field.
+    pub struct DrainWakeReceiver {
+        handle: *mut std::ffi::c_void,
+    }
+
+    unsafe impl Send for DrainWakeReceiver {}
+    unsafe impl Sync for DrainWakeReceiver {}
+
+    impl DrainWakeReceiver {
+        /// Create or open the drain event for this AI's outbox.
+        pub fn new(ai_id: &str, base_dir: Option<&std::path::Path>) -> std::io::Result<Self> {
+            let event_name = drain_event_name(ai_id, base_dir);
+            let wide_name: Vec<u16> = OsStr::new(&event_name)
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect();
+
+            let handle = unsafe {
+                OpenEventW(
+                    EVENT_MODIFY_STATE | SYNCHRONIZE,
+                    0,
+                    wide_name.as_ptr(),
+                )
+            };
+
+            let handle = if handle.is_null() {
+                let h = unsafe {
+                    CreateEventW(
+                        ptr::null_mut(),
+                        0, // Auto-reset
+                        0, // Initially non-signaled
+                        wide_name.as_ptr(),
+                    )
+                };
+                if h.is_null() {
+                    return Err(std::io::Error::last_os_error());
+                }
+                h
+            } else {
+                handle
+            };
+
+            Ok(Self { handle })
+        }
+
+        /// Wait for drain signal with timeout. Returns true if signaled, false if timeout.
+        /// Zero CPU while waiting — blocked on WaitForSingleObject.
+        pub fn wait_timeout(&self, timeout: Duration) -> bool {
+            let ms = timeout.as_millis() as u32;
+            let result = unsafe { WaitForSingleObject(self.handle, ms) };
+            result == WAIT_OBJECT_0
+        }
+    }
+
+    impl Drop for DrainWakeReceiver {
+        fn drop(&mut self) {
+            unsafe { CloseHandle(self.handle) };
+        }
+    }
+
+    /// Sequencer-side: signals that an outbox has been drained.
+    pub fn signal_outbox_drained(ai_id: &str, base_dir: Option<&std::path::Path>) {
+        let event_name = drain_event_name(ai_id, base_dir);
+        let wide_name: Vec<u16> = OsStr::new(&event_name)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+
+        let handle = unsafe {
+            OpenEventW(
+                EVENT_MODIFY_STATE,
+                0,
+                wide_name.as_ptr(),
+            )
+        };
+
+        if !handle.is_null() {
+            unsafe {
+                SetEvent(handle);
+                CloseHandle(handle);
+            }
+        }
+        // If handle is null, no writer is waiting — that's fine.
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub mod outbox_drain_wake {
+    use std::time::Duration;
+    use std::ffi::CString;
+
+    /// Compute per-outbox semaphore name from ai_id + base_dir.
+    fn drain_sem_name(ai_id: &str, base_dir: Option<&std::path::Path>) -> CString {
+        let dir_str = base_dir.map_or("default".to_string(), |p| {
+            p.canonicalize().unwrap_or_else(|_| p.to_path_buf()).to_string_lossy().to_string()
+        });
+        let combined = format!("{}/{}", dir_str, ai_id);
+        let mut hash: u64 = 0xcbf29ce484222325u64;
+        for byte in combined.bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x00000100000001b3u64);
+        }
+        CString::new(format!("/te_drain_{:016x}", hash))
+            .expect("sem name contains no null bytes")
+    }
+
+    /// Writer-side: waits for sequencer to drain the outbox.
+    pub struct DrainWakeReceiver {
+        sem: *mut libc::sem_t,
+        name: CString,
+    }
+
+    unsafe impl Send for DrainWakeReceiver {}
+    unsafe impl Sync for DrainWakeReceiver {}
+
+    impl DrainWakeReceiver {
+        pub fn new(ai_id: &str, base_dir: Option<&std::path::Path>) -> std::io::Result<Self> {
+            let name = drain_sem_name(ai_id, base_dir);
+            let sem = unsafe {
+                libc::sem_open(
+                    name.as_ptr(),
+                    libc::O_CREAT,
+                    0o644,
+                    0u32,
+                )
+            };
+            if sem == libc::SEM_FAILED {
+                return Err(std::io::Error::last_os_error());
+            }
+
+            // Drain stale signals
+            loop {
+                let result = unsafe { libc::sem_trywait(sem) };
+                if result != 0 { break; }
+            }
+
+            Ok(Self { sem, name })
+        }
+
+        /// Wait for drain signal with timeout. Returns true if signaled, false if timeout.
+        pub fn wait_timeout(&self, timeout: Duration) -> bool {
+            let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
+            unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts) };
+            ts.tv_sec += timeout.as_secs() as libc::time_t;
+            ts.tv_nsec += timeout.subsec_nanos() as libc::c_long;
+            if ts.tv_nsec >= 1_000_000_000 {
+                ts.tv_sec += 1;
+                ts.tv_nsec -= 1_000_000_000;
+            }
+            let result = unsafe { libc::sem_timedwait(self.sem, &ts) };
+            result == 0
+        }
+    }
+
+    impl Drop for DrainWakeReceiver {
+        fn drop(&mut self) {
+            unsafe {
+                libc::sem_close(self.sem);
+                libc::sem_unlink(self.name.as_ptr());
+            }
+        }
+    }
+
+    /// Sequencer-side: signals that an outbox has been drained.
+    pub fn signal_outbox_drained(ai_id: &str, base_dir: Option<&std::path::Path>) {
+        let name = drain_sem_name(ai_id, base_dir);
+        let sem = unsafe {
+            libc::sem_open(
+                name.as_ptr(),
+                0,
+                0,
+                0,
+            )
+        };
+        if sem != libc::SEM_FAILED {
+            unsafe {
+                libc::sem_post(sem);
+                libc::sem_close(sem);
+            }
+        }
+    }
+}
+
+pub use outbox_drain_wake::{DrainWakeReceiver, signal_outbox_drained};
+
+// ============================================================================
+// DAEMON READY WAKE — signals clients when daemon pipe listener is ready
+// ============================================================================
+//
+// Replaces sleep-based startup backoff with event-driven readiness.
+// Daemon signals after creating the named pipe listener.
+// Client blocks on DaemonReadyReceiver::wait_timeout() — zero CPU.
+
+#[cfg(target_os = "windows")]
+pub mod daemon_ready_wake {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr;
+    use std::time::Duration;
+
+    const WAIT_OBJECT_0: u32 = 0;
+    const SYNCHRONIZE: u32 = 0x00100000;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateEventW(
+            lpEventAttributes: *mut std::ffi::c_void,
+            bManualReset: i32,
+            bInitialState: i32,
+            lpName: *const u16,
+        ) -> *mut std::ffi::c_void;
+        fn OpenEventW(
+            dwDesiredAccess: u32,
+            bInheritHandle: i32,
+            lpName: *const u16,
+        ) -> *mut std::ffi::c_void;
+        fn WaitForSingleObject(hHandle: *mut std::ffi::c_void, dwMilliseconds: u32) -> u32;
+        fn CloseHandle(hObject: *mut std::ffi::c_void) -> i32;
+    }
+
+    fn ready_event_name(ai_id: &str) -> String {
+        // Per-AI daemon ready event (each AI has its own daemon)
+        let mut hash: u64 = 0xcbf29ce484222325u64;
+        for byte in ai_id.bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x00000100000001b3u64);
+        }
+        format!(r"Local\TeamEngram_DaemonReady_{:016x}", hash)
+    }
+
+    /// Daemon-side: signals readiness after pipe listener is created.
+    pub fn signal_daemon_ready(ai_id: &str) {
+        let event_name = ready_event_name(ai_id);
+        let wide_name: Vec<u16> = OsStr::new(&event_name)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+
+        // Create manual-reset event (so ALL waiting clients wake up)
+        // bInitialState=1: already signaled on creation = ready NOW.
+        let _handle = unsafe {
+            CreateEventW(
+                ptr::null_mut(),
+                1, // Manual-reset: stays signaled until explicitly reset
+                1, // Initially signaled (we're ready NOW)
+                wide_name.as_ptr(),
+            )
+        };
+        // Handle intentionally leaked — event stays alive for daemon process lifetime.
+        // Kernel cleans up all handles on process exit.
+    }
+
+    /// Client-side: waits for daemon to be ready.
+    pub fn wait_daemon_ready(ai_id: &str, timeout: Duration) -> bool {
+        let event_name = ready_event_name(ai_id);
+        let wide_name: Vec<u16> = OsStr::new(&event_name)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+
+        let handle = unsafe {
+            OpenEventW(
+                SYNCHRONIZE,
+                0,
+                wide_name.as_ptr(),
+            )
+        };
+
+        if handle.is_null() {
+            return false; // Event doesn't exist yet — daemon hasn't created it
+        }
+
+        let ms = timeout.as_millis() as u32;
+        let result = unsafe { WaitForSingleObject(handle, ms) };
+        unsafe { CloseHandle(handle) };
+        result == WAIT_OBJECT_0
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub mod daemon_ready_wake {
+    use std::time::Duration;
+    use std::ffi::CString;
+
+    fn ready_sem_name(ai_id: &str) -> CString {
+        let mut hash: u64 = 0xcbf29ce484222325u64;
+        for byte in ai_id.bytes() {
+            hash ^= byte as u64;
+            hash = hash.wrapping_mul(0x00000100000001b3u64);
+        }
+        CString::new(format!("/te_ready_{:016x}", hash))
+            .expect("sem name contains no null bytes")
+    }
+
+    /// Daemon-side: signals readiness.
+    pub fn signal_daemon_ready(ai_id: &str) {
+        let name = ready_sem_name(ai_id);
+        let sem = unsafe {
+            libc::sem_open(
+                name.as_ptr(),
+                libc::O_CREAT,
+                0o644,
+                1u32, // Initially signaled (ready)
+            )
+        };
+        if sem != libc::SEM_FAILED {
+            unsafe { libc::sem_post(sem) };
+            // Don't close or unlink — stays alive for daemon lifetime.
+        }
+    }
+
+    /// Client-side: waits for daemon to be ready.
+    pub fn wait_daemon_ready(ai_id: &str, timeout: Duration) -> bool {
+        let name = ready_sem_name(ai_id);
+        let sem = unsafe {
+            libc::sem_open(
+                name.as_ptr(),
+                0,
+                0,
+                0,
+            )
+        };
+        if sem == libc::SEM_FAILED {
+            return false;
+        }
+
+        let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
+        unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts) };
+        ts.tv_sec += timeout.as_secs() as libc::time_t;
+        ts.tv_nsec += timeout.subsec_nanos() as libc::c_long;
+        if ts.tv_nsec >= 1_000_000_000 {
+            ts.tv_sec += 1;
+            ts.tv_nsec -= 1_000_000_000;
+        }
+
+        let result = unsafe { libc::sem_timedwait(sem, &ts) };
+        unsafe { libc::sem_close(sem) };
+        result == 0
+    }
+}
+
+pub use daemon_ready_wake::{signal_daemon_ready, wait_daemon_ready};
 
 // ============================================================================
 // TESTS

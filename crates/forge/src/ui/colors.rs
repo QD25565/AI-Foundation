@@ -2,8 +2,6 @@
 //!
 //! Beautiful per-character gradient rendering from Battleship Grey to Asparagus Green.
 //! Ported from the Python installer's GradientColors class.
-//!
-//! WIP: components are fully implemented, not yet all wired into the UI.
 #![allow(dead_code)]
 
 use ratatui::style::Color;
@@ -201,7 +199,7 @@ pub const LOGO: &[&str] = &[
 ];
 
 /// Tagline for the CLI
-pub const TAGLINE: &str = "Empowering AIs everywhere, always";
+pub const TAGLINE: &str = "AI-Foundation CLI";
 
 /// Smaller logo for constrained spaces
 pub const LOGO_SMALL: &[&str] = &[

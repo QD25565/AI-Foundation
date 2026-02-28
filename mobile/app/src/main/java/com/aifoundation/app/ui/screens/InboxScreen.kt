@@ -190,7 +190,7 @@ fun InboxScreen(
                         StyledTextField(
                             value         = manualRecipient,
                             onValueChange = { manualRecipient = it },
-                            placeholder   = "e.g. sage-724",
+                            placeholder   = "e.g. alpha-001",
                             modifier      = Modifier.weight(1f)
                         )
                         DeepNetButton(
@@ -276,7 +276,7 @@ fun InboxScreen(
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     StyledTextField(value = dlgResponder, onValueChange = { dlgResponder = it },
-                        placeholder = "Responder AI_ID (e.g. sage-724)")
+                        placeholder = "Responder AI_ID (e.g. alpha-001)")
                     StyledTextField(value = dlgTopic, onValueChange = { dlgTopic = it },
                         placeholder = "Topic of discussion…", minLines = 2)
                 }

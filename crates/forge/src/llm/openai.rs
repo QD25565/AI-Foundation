@@ -1,7 +1,7 @@
 //! OpenAI-compatible API provider
-#![allow(dead_code)]
 //!
 //! Works with OpenAI, Azure, local servers (llama.cpp server, ollama), Groq, Together, etc.
+#![allow(dead_code)]
 
 use std::pin::Pin;
 use async_trait::async_trait;

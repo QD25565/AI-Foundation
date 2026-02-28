@@ -1121,10 +1121,16 @@ impl FederationGateway {
 // Background Tasks
 // ---------------------------------------------------------------------------
 
-/// Presence sync loop: every 60 seconds, push local AI presence to all peers.
+/// Presence sync loop: event-driven, pushes local AI presence to all peers
+/// when events occur. Zero CPU while waiting — uses `teambook standby`
+/// (OS-native wait primitive) instead of timer-based polling.
 async fn presence_sync_loop(federation: Arc<FederationState>, registry: Arc<AiRegistry>) {
     loop {
-        // First, refresh local AI presence from teambook
+        // Block until an event arrives — zero CPU while waiting.
+        // Uses OS-native wait (WaitForSingleObject / sem_wait), ~1μs wake.
+        let _wake = cli_wrapper::teambook_as(&["standby", "300"], "federation-gateway").await;
+
+        // Refresh local AI presence from teambook
         let status_output = cli_wrapper::teambook_as(&["status"], "federation-gateway").await;
         parse_and_register_local_ais(&registry, &status_output).await;
 
@@ -1132,7 +1138,6 @@ async fn presence_sync_loop(federation: Arc<FederationState>, registry: Arc<AiRe
         let local_ais = registry.list_local().await;
         if local_ais.is_empty() {
             debug!("No local AIs to sync");
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             continue;
         }
 
@@ -1210,9 +1215,7 @@ async fn presence_sync_loop(federation: Arc<FederationState>, registry: Arc<AiRe
         }
 
         let _ = registry.save().await;
-
-        // Sleep 60 seconds before next sync
-        tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        // Loop back to standby — blocks on OS-native event, zero CPU
     }
 }
 
@@ -1223,21 +1226,19 @@ async fn presence_sync_loop(federation: Arc<FederationState>, registry: Arc<AiRe
 /// only needs to handle edge cases and future event types.
 /// Uses `teambook standby` for event-driven wake — zero CPU while waiting.
 async fn outbound_routing_loop(federation: Arc<FederationState>, _registry: Arc<AiRegistry>) {
-    // Wait for initial presence sync to populate registry
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-
     loop {
-        // Check if we have any peers
+        // Wait for an event (event-driven, zero CPU).
+        // Uses OS-native wait (WaitForSingleObject / sem_wait), ~1μs wake.
+        // Standby blocks until a DM, @mention, or urgent broadcast arrives.
+        let wake_result =
+            cli_wrapper::teambook_as(&["standby", "300"], "federation-gateway").await;
+
+        // Check if we have any peers — if not, loop back to standby
         let peers = federation.list_peers().await;
         if peers.is_empty() {
-            // No peers, sleep longer
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            debug!("No federation peers — waiting for next event");
             continue;
         }
-
-        // Wait for an event (event-driven, zero CPU)
-        let wake_result =
-            cli_wrapper::teambook_as(&["standby", "60"], "federation-gateway").await;
 
         debug!(wake = %wake_result, "Gateway outbound wake (monitoring)");
 

@@ -1,0 +1,33 @@
+{
+    "version": "57",
+    "description": "AI-Foundation \u2014 Memory, coordination, and tools for AI agents",
+    "homepage": "https://github.com/QD25565/ai-foundation",
+    "license": "MIT",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/QD25565/ai-foundation/releases/download/v57/ai-foundation-v57-windows-x64.zip",
+            "hash": "61258de4cb18887f634f8c3b260d08adf9385825fb83407eb47f931e74f6fc08",
+            "extract_dir": "ai-foundation-v57"
+        }
+    },
+    "bin": [
+        "bin\\notebook-cli.exe",
+        "bin\\teambook.exe",
+        "bin\\session-start.exe",
+        "bin\\v2-daemon.exe",
+        "bin\\ai-foundation-mcp.exe",
+        "bin\\forge.exe",
+        "bin\\forge-local.exe"
+    ],
+    "post_install": "Write-Host 'AI-Foundation installed. Run: ai-foundation-mcp --help'",
+    "checkver": {
+        "github": "https://github.com/QD25565/ai-foundation"
+    },
+    "autoupdate": {
+        "architecture": {
+            "64bit": {
+                "url": "https://github.com/QD25565/ai-foundation/releases/download/v$version/ai-foundation-v$version-windows-x64.zip"
+            }
+        }
+    }
+}

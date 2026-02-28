@@ -173,23 +173,23 @@ mod tests {
 
     #[test]
     fn test_zerocopy_roundtrip() {
-        let msg = ZcMessage::direct("ai-1", "Hello from zero-copy!");
+        let msg = ZcMessage::direct("beta-002", "Hello from zero-copy!");
         let bytes = msg.to_bytes();
 
         // Zero-copy access
         let archived = access_message(&bytes).expect("Should access");
-        assert_eq!(archived.sender(), "ai-1");
+        assert_eq!(archived.sender(), "beta-002");
         assert_eq!(archived.payload_str(), Some("Hello from zero-copy!"));
         assert_eq!(archived.msg_type(), ZcMessageType::DirectMessage);
 
         // Full deserialization (when needed)
         let deserialized = ZcMessage::from_bytes(&bytes).expect("Should deserialize");
-        assert_eq!(deserialized.sender, "ai-1");
+        assert_eq!(deserialized.sender, "beta-002");
     }
 
     #[test]
     fn test_zerocopy_broadcast() {
-        let msg = ZcMessage::broadcast("ai-2", "Team announcement!");
+        let msg = ZcMessage::broadcast("alpha-001", "Team announcement!");
         let bytes = msg.to_bytes();
 
         let archived = access_message(&bytes).unwrap();
@@ -199,7 +199,7 @@ mod tests {
 
     #[test]
     fn test_zerocopy_ping() {
-        let msg = ZcMessage::ping("ai-3");
+        let msg = ZcMessage::ping("gamma-003");
         let bytes = msg.to_bytes();
 
         let archived = access_message(&bytes).unwrap();

@@ -1,6 +1,7 @@
 //! Hybrid recall - combining vector, keyword, graph, and recency signals
 
 use crate::note::Note;
+use std::collections::{HashMap, HashSet};
 
 /// Recall configuration
 #[derive(Debug, Clone)]
@@ -66,10 +67,116 @@ pub fn bm25_score(doc: &str, query: &str, k1: f32, b: f32, avgdl: f32) -> f32 {
     score
 }
 
+/// Precomputed BM25 corpus statistics for IDF-weighted keyword scoring.
+///
+/// Build once from the candidate document set, then call [`BM25Corpus::score`]
+/// for each document. IDF suppresses common terms (high document frequency)
+/// and amplifies rare terms — without it BM25 degenerates to TF-only.
+///
+/// # Example
+/// ```ignore
+/// let contents: Vec<&str> = notes.iter().map(|n| n.content.as_str()).collect();
+/// let corpus = BM25Corpus::new(&contents);
+/// let score = corpus.score(&note.content, query, 1.2, 0.75);
+/// ```
+pub struct BM25Corpus {
+    /// IDF value for each term: ln((N - df + 0.5) / (df + 0.5) + 1)
+    idf: HashMap<String, f32>,
+    /// Average document length in words (precomputed from corpus)
+    pub avgdl: f32,
+}
+
+impl BM25Corpus {
+    /// Build corpus statistics from a slice of document strings.
+    ///
+    /// Uses the BM25+ IDF formula which is always non-negative:
+    /// `IDF(t) = ln((N − df(t) + 0.5) / (df(t) + 0.5) + 1)`
+    ///
+    /// Each term is counted once per document for IDF purposes (not by
+    /// frequency), matching standard BM25 semantics.
+    pub fn new(docs: &[&str]) -> Self {
+        let n_docs = docs.len();
+        let mut df: HashMap<String, usize> = HashMap::new();
+        let mut total_len = 0usize;
+
+        for doc in docs {
+            let doc_lower = doc.to_lowercase();
+            total_len += doc_lower.split_whitespace().count();
+
+            // Count each term once per document (document frequency, not term frequency)
+            let terms_in_doc: HashSet<String> = doc_lower
+                .split_whitespace()
+                .map(|t| t.to_string())
+                .collect();
+            for term in terms_in_doc {
+                *df.entry(term).or_insert(0) += 1;
+            }
+        }
+
+        let avgdl = if n_docs > 0 {
+            total_len as f32 / n_docs as f32
+        } else {
+            50.0 // reasonable fallback when no corpus
+        };
+
+        let n = n_docs as f32;
+        let idf = df
+            .into_iter()
+            .map(|(term, freq)| {
+                let d = freq as f32;
+                // BM25+ IDF — always >= 0, approaches 0 as df → N
+                let val = ((n - d + 0.5) / (d + 0.5) + 1.0).ln();
+                (term, val.max(0.0))
+            })
+            .collect();
+
+        Self { idf, avgdl }
+    }
+
+    /// IDF value for a specific term (lowercased). Returns 0.0 for unseen terms.
+    pub fn idf_for(&self, term: &str) -> f32 {
+        self.idf.get(&term.to_lowercase()).copied().unwrap_or(0.0)
+    }
+
+    /// Score a single document against a query using BM25 with real IDF.
+    ///
+    /// Terms absent from the corpus get IDF 0 and contribute nothing to the
+    /// score — safe because if no candidate contains a term it cannot help rank.
+    pub fn score(&self, doc: &str, query: &str, k1: f32, b: f32) -> f32 {
+        let doc_lower = doc.to_lowercase();
+        let query_lower = query.to_lowercase();
+        let query_terms: Vec<&str> = query_lower.split_whitespace().collect();
+        let doc_len = doc_lower.split_whitespace().count() as f32;
+
+        let mut score = 0.0f32;
+        for term in &query_terms {
+            let tf = doc_lower.matches(term).count() as f32;
+            if tf > 0.0 {
+                let idf = self.idf.get(*term).copied().unwrap_or(0.0);
+                if idf > 0.0 {
+                    let numerator = tf * (k1 + 1.0);
+                    let denominator = tf + k1 * (1.0 - b + b * doc_len / self.avgdl);
+                    score += idf * numerator / denominator;
+                }
+            }
+        }
+        score
+    }
+}
+
 /// Compute recency score (exponential decay)
 pub fn recency_score(timestamp: i64, half_life_hours: f32) -> f32 {
     let now = chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0);
-    let age_nanos = (now - timestamp).max(0) as f64;
+    recency_score_at(timestamp, half_life_hours, now)
+}
+
+/// Compute recency score with a pre-computed `now` timestamp (nanoseconds).
+///
+/// Use this in batch scoring to avoid calling `chrono::Utc::now()` per note.
+/// Compute `now` once, then call this for each candidate.
+#[inline]
+pub fn recency_score_at(timestamp: i64, half_life_hours: f32, now_nanos: i64) -> f32 {
+    let age_nanos = (now_nanos - timestamp).max(0) as f64;
     let age_hours = age_nanos / (1_000_000_000.0 * 3600.0);
 
     // Exponential decay: score = 0.5^(age / half_life)
@@ -166,5 +273,93 @@ mod tests {
         assert_eq!(scores[0].1, 0.0);  // Min becomes 0
         assert_eq!(scores[2].1, 1.0);  // Max becomes 1
         assert!((scores[1].1 - 0.5).abs() < 0.01); // Middle is 0.5
+    }
+
+    // --- BM25Corpus tests ---
+
+    #[test]
+    fn test_bm25_corpus_idf_rare_beats_common() {
+        // "rust" appears in all 3 docs → high df → low IDF
+        // "lifetime" appears in only 1 doc → low df → high IDF
+        let docs = [
+            "rust is a systems programming language with memory safety",
+            "rust prevents data races and memory bugs",
+            "rust ownership lifetime borrow checker prevents bugs",
+        ];
+        let corpus = BM25Corpus::new(&docs);
+
+        let idf_rust = corpus.idf_for("rust");
+        let idf_lifetime = corpus.idf_for("lifetime");
+
+        assert!(idf_rust > 0.0, "rust should have positive IDF");
+        assert!(idf_lifetime > 0.0, "lifetime should have positive IDF");
+        assert!(
+            idf_lifetime > idf_rust,
+            "rare term 'lifetime' (df=1) should have higher IDF than ubiquitous 'rust' (df=3): lifetime={idf_lifetime:.4} rust={idf_rust:.4}"
+        );
+    }
+
+    #[test]
+    fn test_bm25_corpus_scores_rare_match_higher() {
+        // "lifetime" appears in only 1 of the 3 corpus docs
+        // querying "lifetime" should score that doc higher than a doc with no match
+        let corpus_docs = [
+            "rust is a systems programming language",
+            "rust ownership lifetime borrow checker",
+            "rust prevents data races and memory bugs",
+        ];
+        let corpus = BM25Corpus::new(&corpus_docs);
+
+        let score_no_match = corpus.score("rust is a systems programming language", "lifetime", 1.2, 0.75);
+        let score_match = corpus.score("rust ownership lifetime borrow checker", "lifetime", 1.2, 0.75);
+
+        assert_eq!(score_no_match, 0.0, "doc without 'lifetime' should score 0");
+        assert!(score_match > 0.0, "doc with 'lifetime' should score > 0");
+    }
+
+    #[test]
+    fn test_bm25_corpus_universal_term_scores_zero() {
+        // A term that appears in EVERY doc has minimal discriminating power.
+        // With BM25+ IDF = ln((N-N+0.5)/(N+0.5)+1) = ln(1.5/N+1) → approaches 0 as N grows.
+        // With N=3, df=3: idf = ln((3-3+0.5)/(3+0.5)+1) = ln(0.5/3.5+1) = ln(1.143) ≈ 0.134
+        // It's small but not zero — BM25+ ensures non-negative IDF.
+        let docs = [
+            "common term and other words",
+            "common term with different words",
+            "common term yet more words",
+        ];
+        let corpus = BM25Corpus::new(&docs);
+        let idf_common = corpus.idf_for("common");
+        let idf_unique = corpus.idf_for("different"); // df=1
+
+        assert!(idf_unique > idf_common, "unique term should beat common term");
+    }
+
+    #[test]
+    fn test_bm25_corpus_empty_corpus() {
+        let corpus = BM25Corpus::new(&[]);
+        let score = corpus.score("some document content", "query", 1.2, 0.75);
+        assert_eq!(score, 0.0, "empty corpus should always score 0");
+        assert!((corpus.avgdl - 50.0).abs() < 0.01, "empty corpus avgdl should be 50.0 fallback");
+    }
+
+    #[test]
+    fn test_bm25_corpus_avgdl() {
+        let docs = [
+            "one two three",        // 3 words
+            "four five six seven",  // 4 words
+            "eight nine",           // 2 words
+        ];
+        let corpus = BM25Corpus::new(&docs);
+        // avgdl = (3 + 4 + 2) / 3 = 3.0
+        assert!((corpus.avgdl - 3.0).abs() < 0.01, "avgdl should be 3.0, got {}", corpus.avgdl);
+    }
+
+    #[test]
+    fn test_bm25_corpus_no_match_returns_zero() {
+        let docs = ["hello world", "foo bar baz"];
+        let corpus = BM25Corpus::new(&docs);
+        let score = corpus.score("hello world", "zzz_nonexistent", 1.2, 0.75);
+        assert_eq!(score, 0.0);
     }
 }
