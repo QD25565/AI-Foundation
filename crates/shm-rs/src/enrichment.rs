@@ -19,7 +19,7 @@
 //! # Usage from hook-bulletin.rs
 //!
 //! ```rust,ignore
-//! use shm::enrichment::{extract_keywords, ContextAccumulator, scan_fp_bytes, RecentlyRecalled};
+//! use shm_rs::enrichment::{extract_keywords, ContextAccumulator, scan_fp_bytes, RecentlyRecalled};
 //!
 //! let keywords = extract_keywords(&tool_name, &tool_input);
 //! accumulator.push_keywords(&keywords);

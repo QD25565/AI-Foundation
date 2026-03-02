@@ -4,7 +4,7 @@
 //! Validates performance claims: ~50-100ns read, ~200ns write.
 
 use std::time::Instant;
-use shm::context::{ContextWriter, ContextReader};
+use shm_rs::context::{ContextWriter, ContextReader};
 
 const WARMUP: usize = 10_000;
 const ITERATIONS: usize = 100_000;
@@ -78,7 +78,7 @@ fn main() {
     bench_contention(ai_id);
 
     // Cleanup
-    if let Ok(path) = shm::context::context_shm_path(ai_id) {
+    if let Ok(path) = shm_rs::context::context_shm_path(ai_id) {
         let _ = std::fs::remove_file(path);
     }
 

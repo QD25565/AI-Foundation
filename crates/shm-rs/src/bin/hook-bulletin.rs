@@ -11,9 +11,9 @@
 //! DEDUPLICATION: Tracks DM view counts per AI - DMs shown max 2 times then pruned.
 //! State stored at ~/.ai-foundation/state/hook_{ai_id}.json
 
-use shm::bulletin::BulletinBoard;
-use shm::context::ContextReader;
-use shm::enrichment::{self, ContextAccumulator, RecentlyRecalled, RecallHit, OutcomeRing, classify_outcome, format_anomaly_pulse};
+use shm_rs::bulletin::BulletinBoard;
+use shm_rs::context::ContextReader;
+use shm_rs::enrichment::{self, ContextAccumulator, RecentlyRecalled, RecallHit, OutcomeRing, classify_outcome, format_anomaly_pulse};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashSet, HashMap};
 use std::env;
@@ -577,7 +577,7 @@ fn read_context_or_local(ai_id: &str, accumulator: &ContextAccumulator) -> Optio
     let (simhash, bloom) = accumulator.fingerprint();
 
     // Write to context.shm so other processes can see our context
-    if let Ok(mut writer) = shm::context::ContextWriter::open_or_create(ai_id) {
+    if let Ok(mut writer) = shm_rs::context::ContextWriter::open_or_create(ai_id) {
         let _ = writer.update(simhash, bloom);
     }
 
