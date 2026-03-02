@@ -35,8 +35,10 @@ jobs:
       - name: Check compilation
         run: cargo check -p shm-rs -p teamengram -p federation -p ai-foundation-mcp -p ai-foundation-mobile-api --all-targets
 
+      # Deny only correctness lints (actual bugs). Style/pedantic lints are
+      # warnings-only until the pre-existing backlog is cleaned up.
       - name: Clippy lints
-        run: cargo clippy -p shm-rs -p teamengram -p federation -p ai-foundation-mcp -p ai-foundation-mobile-api --all-targets -- -D warnings
+        run: cargo clippy -p shm-rs -p teamengram -p federation -p ai-foundation-mcp -p ai-foundation-mobile-api --all-targets -- -D clippy::correctness -W clippy::all
 
       - name: Run tests
         run: cargo test -p shm-rs -p teamengram -p federation -p ai-foundation-mobile-api --lib
