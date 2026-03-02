@@ -88,6 +88,11 @@ fs2 = "0.4"
 
 # Cross-platform file locking (SWMR - Single Writer Multiple Reader)
 
+# Shared memory bulletin board for hook awareness
+shm_rs = { path = "../shm-rs", package = "shm-rs" }
+
+# TOML serialization (federation manifest + consent records)
+toml = "0.8"
 
 # Unix API (POSIX named semaphores, PID-based presence)
 [target.'cfg(not(windows))'.dependencies]
@@ -96,15 +101,6 @@ libc = "0.2"
 # Windows API (for singleton mutex in daemon)
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_System_Threading", "Win32_System_Pipes", "Win32_Storage_FileSystem", "Win32_Security", "Win32_System_IO"] }
-
-# Types are now defined locally in compat_types.rs - NO external PostgreSQL dependencies
-# teambook-rs dependency REMOVED - we build our own infrastructure
-
-# Shared memory bulletin board for hook awareness
-shm_rs = { path = "../shm-rs", package = "shm-rs" }
-
-# TOML serialization (federation manifest + consent records)
-toml = "0.8"
 
 [dev-dependencies]
 tempfile = "3.10"
