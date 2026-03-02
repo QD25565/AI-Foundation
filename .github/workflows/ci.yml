@@ -27,7 +27,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ci-cargo-v2-${{ hashFiles('**/Cargo.lock') }}
+          key: ci-cargo-v3-${{ hashFiles('**/Cargo.lock') }}
 
       # engram, notebook-rs, and forge depend on llama-cpp-sys-2 which needs
       # cmake + C++ toolchain. Exclude them from Ubuntu CI; Windows CI builds all.
