@@ -33,7 +33,7 @@
 //! - Notification latency: <1μs (vs ~1ms Redis)
 //! - Memory: <20MB (vs ~100MB PostgreSQL + Redis)
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
