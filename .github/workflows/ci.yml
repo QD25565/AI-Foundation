@@ -30,18 +30,16 @@ jobs:
           key: ci-cargo-v3-${{ hashFiles('**/Cargo.lock') }}
 
       # engram, notebook-rs, and forge depend on llama-cpp-sys-2 which needs
-      # cmake + C++ toolchain. Exclude them from Ubuntu CI; Windows CI builds all.
-      - name: Check compilation (libs)
-        run: cargo check --workspace --exclude engram --exclude notebook-rs --exclude forge --lib
-
-      - name: Check compilation (all targets)
-        run: cargo check --workspace --exclude engram --exclude notebook-rs --exclude forge --all-targets
+      # cmake + C++ toolchain. Check individual packages instead of --workspace
+      # to avoid workspace-wide dependency resolution issues on Ubuntu.
+      - name: Check compilation
+        run: cargo check -p shm-rs -p teamengram -p federation -p ai-foundation-mcp -p ai-foundation-mobile-api --all-targets
 
       - name: Clippy lints
-        run: cargo clippy --workspace --exclude engram --exclude notebook-rs --exclude forge --all-targets -- -D warnings
+        run: cargo clippy -p shm-rs -p teamengram -p federation -p ai-foundation-mcp -p ai-foundation-mobile-api --all-targets -- -D warnings
 
       - name: Run tests
-        run: cargo test --workspace --exclude engram --exclude notebook-rs --exclude forge --lib
+        run: cargo test -p shm-rs -p teamengram -p federation -p ai-foundation-mobile-api --lib
 
   python-check:
     runs-on: ubuntu-latest
