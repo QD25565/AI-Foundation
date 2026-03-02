@@ -29,6 +29,10 @@ jobs:
             target
           key: ci-cargo-v3-${{ hashFiles('**/Cargo.lock') }}
 
+      # Diagnostic: check shm-rs independently first
+      - name: Check shm-rs
+        run: cargo check -p shm-rs --lib -vv 2>&1 | tail -50
+
       # engram, notebook-rs, and forge depend on llama-cpp-sys-2 which needs
       # cmake + C++ toolchain. Exclude them from Ubuntu CI; Windows CI builds all.
       - name: Check compilation
