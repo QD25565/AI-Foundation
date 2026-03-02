@@ -3,8 +3,8 @@
 use crate::{
     FederationNode, SharingPreferences, TrustLevel,
     DataCategory, Result, FederationError,
+    FederationSignature, SignatureScheme,
 };
-use ed25519_dalek::Signature;
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 
@@ -23,9 +23,11 @@ pub struct FederationMessage {
     /// The payload
     pub payload: FederationPayload,
 
-    /// Signature over (id + from + timestamp + payload)
-    #[serde(with = "signature_serde")]
-    pub signature: Signature,
+    /// Signature over (id + from + timestamp + payload).
+    ///
+    /// Algorithm-agile: carries scheme identifier alongside raw bytes.
+    /// Phase 1: always Ed25519. Phase 2+: may be ML-DSA-65 or hybrid.
+    pub signature: FederationSignature,
 }
 
 impl FederationMessage {
@@ -38,18 +40,16 @@ impl FederationMessage {
         let id = uuid::Uuid::new_v4().to_string();
         let timestamp = Utc::now();
 
-        // Create unsigned version for signing
         let mut msg = Self {
             id: id.clone(),
             from: from.to_string(),
             timestamp,
             payload,
-            signature: Signature::from_bytes(&[0u8; 64]), // Placeholder
+            signature: FederationSignature::placeholder(),
         };
 
-        // Sign
         let data = msg.signing_data();
-        msg.signature = crate::sign_data(signing_key, &data);
+        msg.signature = FederationSignature::ed25519(crate::sign_data(signing_key, &data));
 
         msg
     }
@@ -75,10 +75,10 @@ impl FederationMessage {
         data
     }
 
-    /// Verify the message signature
+    /// Verify the message signature using algorithm-agile verification.
     pub fn verify(&self, pubkey: &ed25519_dalek::VerifyingKey) -> bool {
         let data = self.signing_data();
-        crate::verify_signature(pubkey, &data, &self.signature)
+        crate::verify_federation_signature(&self.signature, pubkey.as_bytes(), &data).is_ok()
     }
 
     /// Serialize to CBOR bytes
@@ -104,6 +104,9 @@ pub enum FederationPayload {
     Hello {
         node: FederationNode,
         protocol_version: u32,
+        /// Random 32-byte nonce (hex) — responder must echo in Welcome.
+        /// Prevents replay of captured Hello messages.
+        handshake_nonce: String,
     },
 
     /// Response to hello
@@ -112,6 +115,8 @@ pub enum FederationPayload {
         protocol_version: u32,
         accepted: bool,
         rejection_reason: Option<String>,
+        /// Echo of the Hello nonce — initiator verifies this matches.
+        hello_nonce: String,
     },
 
     // ========== Discovery ==========
@@ -306,9 +311,10 @@ pub struct FederatedPresence {
     /// When this was last updated
     pub updated_at: DateTime<Utc>,
 
-    /// Signature proving authenticity
-    #[serde(with = "signature_serde")]
-    pub signature: Signature,
+    /// Signature proving authenticity.
+    ///
+    /// Algorithm-agile: carries scheme identifier alongside raw bytes.
+    pub signature: FederationSignature,
 }
 
 impl FederatedPresence {
@@ -328,12 +334,11 @@ impl FederatedPresence {
             status: status.to_string(),
             activity,
             updated_at,
-            signature: Signature::from_bytes(&[0u8; 64]),
+            signature: FederationSignature::placeholder(),
         };
 
-        // Sign
         let data = presence.signing_data();
-        presence.signature = crate::sign_data(signing_key, &data);
+        presence.signature = FederationSignature::ed25519(crate::sign_data(signing_key, &data));
 
         presence
     }
@@ -350,10 +355,10 @@ impl FederatedPresence {
         data
     }
 
-    /// Verify the presence signature
+    /// Verify the presence signature using algorithm-agile verification.
     pub fn verify(&self, pubkey: &ed25519_dalek::VerifyingKey) -> bool {
         let data = self.signing_data();
-        crate::verify_signature(pubkey, &data, &self.signature)
+        crate::verify_federation_signature(&self.signature, pubkey.as_bytes(), &data).is_ok()
     }
 }
 
@@ -416,11 +421,6 @@ impl SignedEvent {
         // Decode origin pubkey
         let pubkey_bytes = hex::decode(&self.origin_pubkey)
             .map_err(|_| SignedEventError::InvalidPublicKey)?;
-        let pubkey_arr: [u8; 32] = pubkey_bytes
-            .try_into()
-            .map_err(|_| SignedEventError::InvalidPublicKey)?;
-        let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&pubkey_arr)
-            .map_err(|_| SignedEventError::InvalidPublicKey)?;
 
         // Verify content hash
         let expected_hash = hex::encode(content_hash(&self.event_bytes));
@@ -428,17 +428,16 @@ impl SignedEvent {
             return Err(SignedEventError::ContentHashMismatch);
         }
 
-        // Decode and verify signature
+        // Decode signature bytes and wrap in FederationSignature (Phase 1: Ed25519)
         let sig_bytes = hex::decode(&self.signature)
             .map_err(|_| SignedEventError::InvalidSignature)?;
-        let sig_arr: [u8; 64] = sig_bytes
-            .try_into()
-            .map_err(|_| SignedEventError::InvalidSignature)?;
-        let signature = ed25519_dalek::Signature::from_bytes(&sig_arr);
+        let fed_sig = FederationSignature {
+            scheme: SignatureScheme::Ed25519,
+            bytes: sig_bytes,
+        };
 
-        use ed25519_dalek::Verifier;
-        verifying_key
-            .verify(&self.event_bytes, &signature)
+        // Verify using algorithm-agile verification
+        crate::verify_federation_signature(&fed_sig, &pubkey_bytes, &self.event_bytes)
             .map_err(|_| SignedEventError::InvalidSignature)
     }
 
@@ -482,31 +481,6 @@ impl std::fmt::Display for SignedEventError {
 
 impl std::error::Error for SignedEventError {}
 
-/// Serde support for Signature
-mod signature_serde {
-    use ed25519_dalek::Signature;
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-    pub fn serialize<S>(sig: &Signature, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        hex::encode(sig.to_bytes()).serialize(serializer)
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Signature, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let hex_str = String::deserialize(deserializer)?;
-        let bytes = hex::decode(&hex_str).map_err(serde::de::Error::custom)?;
-        let bytes: [u8; 64] = bytes
-            .try_into()
-            .map_err(|_| serde::de::Error::custom("Invalid signature length"))?;
-        Ok(Signature::from_bytes(&bytes))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -537,7 +511,7 @@ mod tests {
         let verifying_key = signing_key.verifying_key();
 
         let presence = FederatedPresence::new(
-            "beta-002",
+            "lyra-584",
             "node-123",
             "online",
             Some("Working on federation".to_string()),
@@ -562,5 +536,212 @@ mod tests {
 
         assert_eq!(msg.id, decoded.id);
         assert_eq!(msg.from, decoded.from);
+    }
+
+    // -------------------------------------------------------------------
+    // PQC Phase 1: Algorithm Agility Tests for Messages
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_message_signature_is_federation_signature() {
+        // Verify FederationMessage.signature field uses FederationSignature
+        // with Ed25519 scheme after construction
+        let sk = SigningKey::generate(&mut OsRng);
+        let msg = FederationMessage::new(
+            "pqc-node",
+            FederationPayload::Ping { timestamp: 99 },
+            &sk,
+        );
+
+        assert_eq!(msg.signature.scheme, crate::SignatureScheme::Ed25519);
+        assert_eq!(msg.signature.bytes.len(), 64);
+        // Signature should not be all zeros (placeholder must be replaced)
+        assert!(!msg.signature.bytes.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_message_cbor_roundtrip_preserves_federation_signature() {
+        // CRITICAL: The wire format changed from raw hex signature to
+        // {scheme, bytes} struct. Verify CBOR serialization preserves both fields.
+        let sk = SigningKey::generate(&mut OsRng);
+        let vk = sk.verifying_key();
+
+        let msg = FederationMessage::new(
+            "cbor-test",
+            FederationPayload::Broadcast {
+                channel: "general".to_string(),
+                content: "PQC test broadcast".to_string(),
+            },
+            &sk,
+        );
+
+        let cbor_bytes = msg.to_bytes().unwrap();
+        let decoded = FederationMessage::from_bytes(&cbor_bytes).unwrap();
+
+        // Scheme and signature bytes must survive CBOR round-trip
+        assert_eq!(decoded.signature.scheme, crate::SignatureScheme::Ed25519);
+        assert_eq!(decoded.signature.bytes, msg.signature.bytes);
+
+        // Verify the decoded message's signature still validates
+        assert!(decoded.verify(&vk), "CBOR round-trip broke signature verification");
+    }
+
+    #[test]
+    fn test_message_cbor_roundtrip_tamper_detection() {
+        // Verify that tampering with a CBOR-decoded message is detected
+        let sk = SigningKey::generate(&mut OsRng);
+        let vk = sk.verifying_key();
+
+        let msg = FederationMessage::new(
+            "tamper-test",
+            FederationPayload::DirectMessage {
+                to: "target-ai".to_string(),
+                content: "secret message".to_string(),
+                reply_to: None,
+            },
+            &sk,
+        );
+
+        let cbor_bytes = msg.to_bytes().unwrap();
+        let mut decoded = FederationMessage::from_bytes(&cbor_bytes).unwrap();
+
+        // Tamper with the from field
+        decoded.from = "attacker-node".to_string();
+        assert!(!decoded.verify(&vk), "tampered message should fail verification");
+    }
+
+    #[test]
+    fn test_message_verify_uses_algorithm_agile_path() {
+        // Ensure FederationMessage::verify() goes through verify_federation_signature
+        // by testing with wrong key — error path must work end-to-end
+        let sk = SigningKey::generate(&mut OsRng);
+        let wrong_sk = SigningKey::generate(&mut OsRng);
+
+        let msg = FederationMessage::new(
+            "agile-verify",
+            FederationPayload::Ping { timestamp: 42 },
+            &sk,
+        );
+
+        assert!(msg.verify(&sk.verifying_key()));
+        assert!(!msg.verify(&wrong_sk.verifying_key()));
+    }
+
+    #[test]
+    fn test_presence_signature_is_federation_signature() {
+        let sk = SigningKey::generate(&mut OsRng);
+        let presence = FederatedPresence::new(
+            "resonance-768",
+            "node-456",
+            "busy",
+            Some("Running PQC tests".to_string()),
+            &sk,
+        );
+
+        assert_eq!(presence.signature.scheme, crate::SignatureScheme::Ed25519);
+        assert_eq!(presence.signature.bytes.len(), 64);
+        assert!(!presence.signature.bytes.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_presence_verify_uses_algorithm_agile_path() {
+        let sk = SigningKey::generate(&mut OsRng);
+        let wrong_sk = SigningKey::generate(&mut OsRng);
+
+        let presence = FederatedPresence::new(
+            "cascade-230",
+            "node-789",
+            "online",
+            None,
+            &sk,
+        );
+
+        assert!(presence.verify(&sk.verifying_key()));
+        assert!(!presence.verify(&wrong_sk.verifying_key()));
+    }
+
+    #[test]
+    fn test_signed_event_verify_uses_algorithm_agile_path() {
+        // SignedEvent internally wraps hex-encoded signature in FederationSignature
+        // during verify(). Ensure this path works correctly.
+        let identity = crate::identity::TeambookIdentity::generate();
+
+        let msg = FederationMessage::new(
+            &identity.short_id(),
+            FederationPayload::Ping { timestamp: 1000 },
+            identity.signing_key(),
+        );
+
+        let cbor_bytes = msg.to_bytes().unwrap();
+        let envelope = SignedEvent::sign(cbor_bytes, &identity);
+
+        assert!(envelope.verify().is_ok(), "SignedEvent verify should pass");
+    }
+
+    #[test]
+    fn test_signed_event_tampered_bytes_detected() {
+        let identity = crate::identity::TeambookIdentity::generate();
+
+        let msg = FederationMessage::new(
+            &identity.short_id(),
+            FederationPayload::Goodbye { reason: "test".to_string() },
+            identity.signing_key(),
+        );
+
+        let cbor_bytes = msg.to_bytes().unwrap();
+        let mut envelope = SignedEvent::sign(cbor_bytes, &identity);
+
+        // Tamper with event bytes
+        if let Some(b) = envelope.event_bytes.last_mut() {
+            *b ^= 0xFF;
+        }
+
+        let result = envelope.verify();
+        assert!(result.is_err(), "tampered event should fail verification");
+    }
+
+    #[test]
+    fn test_signed_event_content_hash_integrity() {
+        let identity = crate::identity::TeambookIdentity::generate();
+
+        let msg = FederationMessage::new(
+            &identity.short_id(),
+            FederationPayload::Ping { timestamp: 2000 },
+            identity.signing_key(),
+        );
+
+        let cbor_bytes = msg.to_bytes().unwrap();
+        let envelope = SignedEvent::sign(cbor_bytes, &identity);
+
+        // Content ID should be deterministic SHA-256
+        let expected_hash = hex::encode(content_hash(&envelope.event_bytes));
+        assert_eq!(envelope.content_id, expected_hash);
+    }
+
+    #[test]
+    fn test_message_complex_payload_signature_covers_payload() {
+        // Cascade's concern: signing_data() MUST include payload.
+        // Test with a complex payload to ensure it's covered by the signature.
+        let sk = SigningKey::generate(&mut OsRng);
+        let vk = sk.verifying_key();
+
+        let msg = FederationMessage::new(
+            "payload-test",
+            FederationPayload::DataResponse {
+                category: DataCategory::Notes,
+                key: "important-data".to_string(),
+                data: Some(vec![1, 2, 3, 4, 5]),
+                version: 42,
+            },
+            &sk,
+        );
+
+        // Original verifies
+        assert!(msg.verify(&vk));
+
+        // Verify via CBOR round-trip too
+        let bytes = msg.to_bytes().unwrap();
+        let decoded = FederationMessage::from_bytes(&bytes).unwrap();
+        assert!(decoded.verify(&vk));
     }
 }

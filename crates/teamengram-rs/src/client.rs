@@ -79,23 +79,31 @@ impl TeamEngramClient {
     #[cfg(unix)]
     pub const DEFAULT_SOCKET: &'static str = "/tmp/teamengram.sock";
 
+    /// Sanitize AI_ID to a safe identifier for use in pipe/socket names.
+    ///
+    /// Whitelist: only alphanumeric, hyphen, underscore. Everything else
+    /// becomes `_`. Truncated to 64 chars to prevent oversized paths.
+    fn sanitize_ai_id(ai_id: &str) -> String {
+        ai_id.chars()
+            .take(64)
+            .map(|c| match c {
+                'a'..='z' | 'A'..='Z' | '0'..='9' | '-' | '_' => c,
+                _ => '_',
+            })
+            .collect()
+    }
+
     /// Get per-AI pipe name - PREFERRED for multi-AI setups
     /// Each AI gets isolated pipe: \\.\pipe\teamengram_{ai_id}
     #[cfg(windows)]
     pub fn pipe_name_for_ai(ai_id: &str) -> String {
-        let safe_id: String = ai_id.chars()
-            .map(|c| if c == '/' || c == '\\' || c == ':' { '_' } else { c })
-            .collect();
-        format!(r"\\.\pipe\teamengram_{}", safe_id)
+        format!(r"\\.\pipe\teamengram_{}", Self::sanitize_ai_id(ai_id))
     }
 
     /// Get per-AI socket path for Unix
     #[cfg(unix)]
     pub fn socket_path_for_ai(ai_id: &str) -> String {
-        let safe_id: String = ai_id.chars()
-            .map(|c| if c == '/' || c == '\\' || c == ':' { '_' } else { c })
-            .collect();
-        format!("/tmp/teamengram_{}.sock", safe_id)
+        format!("/tmp/teamengram_{}.sock", Self::sanitize_ai_id(ai_id))
     }
 
     /// Connect to the TeamEngram daemon - REQUIRES AI_ID environment variable

@@ -1535,9 +1535,9 @@ mod tests {
     #[test]
     fn test_apply_dm_to_me() {
         let dir = tempdir().unwrap();
-        let mut view = ViewEngine::open("beta-002", dir.path()).unwrap();
+        let mut view = ViewEngine::open("lyra-584", dir.path()).unwrap();
 
-        let event = Event::direct_message("alpha-001", "beta-002", "Hello!");
+        let event = Event::direct_message("sage-724", "lyra-584", "Hello!");
         view.apply_event(&event).unwrap();
 
         assert_eq!(view.unread_dm_count(), 1);
@@ -1546,9 +1546,9 @@ mod tests {
     #[test]
     fn test_apply_dm_not_to_me() {
         let dir = tempdir().unwrap();
-        let mut view = ViewEngine::open("beta-002", dir.path()).unwrap();
+        let mut view = ViewEngine::open("lyra-584", dir.path()).unwrap();
 
-        let event = Event::direct_message("alpha-001", "gamma-003", "Hello!");
+        let event = Event::direct_message("sage-724", "cascade-230", "Hello!");
         view.apply_event(&event).unwrap();
 
         assert_eq!(view.unread_dm_count(), 0);
@@ -1557,9 +1557,9 @@ mod tests {
     #[test]
     fn test_apply_dialogue_start() {
         let dir = tempdir().unwrap();
-        let mut view = ViewEngine::open("beta-002", dir.path()).unwrap();
+        let mut view = ViewEngine::open("lyra-584", dir.path()).unwrap();
 
-        let event = Event::dialogue_start("alpha-001", &["alpha-001".to_string(), "beta-002".to_string()], "API review", true);
+        let event = Event::dialogue_start("sage-724", &["sage-724".to_string(), "lyra-584".to_string()], "API review", true);
         view.apply_event(&event).unwrap();
 
         assert_eq!(view.active_dialogue_count(), 1);
@@ -1568,13 +1568,13 @@ mod tests {
     #[test]
     fn test_apply_vote() {
         let dir = tempdir().unwrap();
-        let mut view = ViewEngine::open("beta-002", dir.path()).unwrap();
+        let mut view = ViewEngine::open("lyra-584", dir.path()).unwrap();
 
-        let event = Event::vote_create("alpha-001", "Use REST?", vec!["Yes".to_string(), "No".to_string()], 3);
+        let event = Event::vote_create("sage-724", "Use REST?", vec!["Yes".to_string(), "No".to_string()], 3);
         view.apply_event(&event).unwrap();
         assert_eq!(view.pending_vote_count(), 1);
 
-        let vote = Event::vote_cast("beta-002", 1, "Yes");
+        let vote = Event::vote_cast("lyra-584", 1, "Yes");
         view.apply_event(&vote).unwrap();
         assert_eq!(view.pending_vote_count(), 0);
     }
@@ -1593,8 +1593,8 @@ mod tests {
         // Write 2 broadcasts and do an initial sync
         {
             let mut writer = EventLogWriter::open(Some(dir.path())).unwrap();
-            writer.append(&Event::broadcast("alpha-001", "general", "msg-1")).unwrap();
-            writer.append(&Event::broadcast("alpha-001", "general", "msg-2")).unwrap();
+            writer.append(&Event::broadcast("sage-724", "general", "msg-1")).unwrap();
+            writer.append(&Event::broadcast("sage-724", "general", "msg-2")).unwrap();
             writer.sync().unwrap();
         }
 
@@ -1607,7 +1607,7 @@ mod tests {
         // Write a third broadcast and sync again
         {
             let mut writer = EventLogWriter::open(Some(dir.path())).unwrap();
-            writer.append(&Event::broadcast("alpha-001", "general", "msg-3")).unwrap();
+            writer.append(&Event::broadcast("sage-724", "general", "msg-3")).unwrap();
             writer.sync().unwrap();
         }
 
@@ -1638,37 +1638,37 @@ mod tests {
     #[test]
     fn test_trust_aggregation() {
         let dir = tempdir().unwrap();
-        let mut view = ViewEngine::open("gamma-003", dir.path()).unwrap();
+        let mut view = ViewEngine::open("cascade-230", dir.path()).unwrap();
 
-        // Record positive trust for alpha-001
-        let event = Event::trust_record("gamma-003", "alpha-001", true, "helpful answer", 5);
+        // Record positive trust for sage-724
+        let event = Event::trust_record("cascade-230", "sage-724", true, "helpful answer", 5);
         view.apply_event(&event).unwrap();
 
         // Check trust score
-        let (alpha, beta) = view.get_ai_trust("alpha-001");
+        let (alpha, beta) = view.get_ai_trust("sage-724");
         assert_eq!(alpha, 5);
         assert_eq!(beta, 0);
-        assert!((view.get_ai_trust_value("alpha-001") - 1.0).abs() < 0.001);
+        assert!((view.get_ai_trust_value("sage-724") - 1.0).abs() < 0.001);
 
         // Record negative trust
-        let event2 = Event::trust_record("gamma-003", "alpha-001", false, "bad advice", 2);
+        let event2 = Event::trust_record("cascade-230", "sage-724", false, "bad advice", 2);
         view.apply_event(&event2).unwrap();
 
-        let (alpha, beta) = view.get_ai_trust("alpha-001");
+        let (alpha, beta) = view.get_ai_trust("sage-724");
         assert_eq!(alpha, 5);
         assert_eq!(beta, 2);
         // Trust = 5/(5+2) = 0.714...
-        let trust = view.get_ai_trust_value("alpha-001");
+        let trust = view.get_ai_trust_value("sage-724");
         assert!(trust > 0.7 && trust < 0.72);
     }
 
     #[test]
     fn test_trust_only_records_own_events() {
         let dir = tempdir().unwrap();
-        let mut view = ViewEngine::open("gamma-003", dir.path()).unwrap();
+        let mut view = ViewEngine::open("cascade-230", dir.path()).unwrap();
 
         // Event from another AI should NOT affect my view
-        let event = Event::trust_record("beta-002", "alpha-001", true, "helpful", 5);
+        let event = Event::trust_record("lyra-584", "sage-724", true, "helpful", 5);
         view.apply_event(&event).unwrap();
 
         // Should have no trust data since I didn't rate

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 use tracing::info;
 
-use crate::{FederationError, Result};
+use crate::{FederationError, FederationSignature, FederationSigner, SignatureScheme, Result};
 
 /// Persistent cryptographic identity for a Teambook.
 ///
@@ -192,6 +192,32 @@ impl TeambookIdentity {
     }
 }
 
+// ---------------------------------------------------------------------------
+// FederationSigner — Algorithm-agile signing interface (PQC Phase 1)
+// ---------------------------------------------------------------------------
+
+impl FederationSigner for TeambookIdentity {
+    /// Sign arbitrary bytes, returning an algorithm-agile signature.
+    ///
+    /// Phase 1: produces Ed25519 signatures only.
+    /// Phase 2+: will produce hybrid Ed25519 + ML-DSA-65 signatures.
+    fn sign_federation(&self, data: &[u8]) -> FederationSignature {
+        let sig = self.signing_key.sign(data);
+        FederationSignature::ed25519(sig)
+    }
+
+    /// The signature scheme this signer produces.
+    fn scheme(&self) -> SignatureScheme {
+        SignatureScheme::Ed25519
+    }
+
+    /// Ed25519 public key bytes (32 bytes) — used for identity derivation
+    /// (node_id, H_ID) which is always Ed25519-based regardless of signing scheme.
+    fn ed25519_pubkey_bytes(&self) -> [u8; 32] {
+        *self.verifying_key.as_bytes()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,6 +263,42 @@ mod tests {
         assert!(identity
             .public_key_hex()
             .starts_with(&identity.short_id()));
+    }
+
+    #[test]
+    fn test_federation_signer_trait() {
+        use crate::{FederationSigner, SignatureScheme, verify_federation_signature};
+
+        let identity = TeambookIdentity::generate();
+
+        // Check scheme
+        assert_eq!(identity.scheme(), SignatureScheme::Ed25519);
+
+        // Check pubkey bytes match
+        assert_eq!(
+            identity.ed25519_pubkey_bytes(),
+            *identity.verifying_key().as_bytes()
+        );
+
+        // Sign and verify via algorithm-agile path
+        let message = b"PQC Phase 1 - algorithm agility test";
+        let fed_sig = identity.sign_federation(message);
+        assert_eq!(fed_sig.scheme, SignatureScheme::Ed25519);
+        assert_eq!(fed_sig.bytes.len(), 64);
+
+        // Verify using verify_federation_signature
+        assert!(verify_federation_signature(
+            &fed_sig,
+            &identity.ed25519_pubkey_bytes(),
+            message,
+        ).is_ok());
+
+        // Wrong data should fail
+        assert!(verify_federation_signature(
+            &fed_sig,
+            &identity.ed25519_pubkey_bytes(),
+            b"tampered data",
+        ).is_err());
     }
 
     #[tokio::test]

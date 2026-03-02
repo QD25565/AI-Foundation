@@ -23,7 +23,7 @@
 //! {
 //!   "id": "abc123...",              // deduplication key (content_id for PDUs)
 //!   "source_teambook": "a3f7c2d1",  // remote Teambook short ID or name
-//!   "source_ai": "alpha-001",        // optional: AI that generated the event
+//!   "source_ai": "sage-724",        // optional: AI that generated the event
 //!   "event_type": "FEDERATED_BROADCAST",
 //!   "summary": "human-readable summary (no file names, no raw ops)",
 //!   "created_at": 1771770052        // Unix secs
@@ -65,7 +65,7 @@ pub struct FederationInboxEvent {
     /// Source Teambook short ID or name (e.g. "a3f7c2d1", "TestTeambook-B").
     pub source_teambook: String,
 
-    /// Source AI ID, if known (e.g. "alpha-001"). Absent for anonymous events.
+    /// Source AI ID, if known (e.g. "sage-724"). Absent for anonymous events.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_ai: Option<String>,
 
@@ -780,7 +780,7 @@ mod tests {
         let state = make_state(closed_manifest(), open_writer(&dir));
 
         let request = PresencePushRequest {
-            presences: vec![make_presence("alpha-001", "active", Some("working on Step 9"))],
+            presences: vec![make_presence("sage-724", "active", Some("working on Step 9"))],
             sender_short_id: "b4e8a1f2".to_string(),
         };
 
@@ -795,7 +795,7 @@ mod tests {
         let state = make_state(open_broadcasts_manifest(), open_writer(&dir));
 
         let request = PresencePushRequest {
-            presences: vec![make_presence("beta-002", "standby", None)],
+            presences: vec![make_presence("lyra-584", "standby", None)],
             sender_short_id: "c1d2e3f4".to_string(),
         };
 
@@ -804,13 +804,13 @@ mod tests {
         let events = read_inbox(&dir);
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].event_type, "FEDERATED_PRESENCE");
-        assert_eq!(events[0].source_ai, Some("beta-002".to_string()));
+        assert_eq!(events[0].source_ai, Some("lyra-584".to_string()));
         assert_eq!(events[0].source_teambook, "c1d2e3f4");
-        assert!(events[0].summary.contains("beta-002"));
+        assert!(events[0].summary.contains("lyra-584"));
         assert!(events[0].summary.contains("standby"));
 
         // Registry updated
-        let resolution = state.registry.resolve("beta-002").await;
+        let resolution = state.registry.resolve("lyra-584").await;
         assert!(matches!(resolution, AiResolution::Remote { .. }));
     }
 
@@ -820,7 +820,7 @@ mod tests {
         let state = make_state(open_broadcasts_manifest(), open_writer(&dir));
 
         let request = PresencePushRequest {
-            presences: vec![make_presence("alpha-001", "active", Some("building Step 9 Gateway"))],
+            presences: vec![make_presence("sage-724", "active", Some("building Step 9 Gateway"))],
             sender_short_id: "a3f7c2d1".to_string(),
         };
 
@@ -838,9 +838,9 @@ mod tests {
 
         let request = PresencePushRequest {
             presences: vec![
-                make_presence("alpha-001", "active", None),
-                make_presence("delta-004", "standby", Some("presence work")),
-                make_presence("beta-002", "idle", None),
+                make_presence("sage-724", "active", None),
+                make_presence("resonance-768", "standby", Some("presence work")),
+                make_presence("lyra-584", "idle", None),
             ],
             sender_short_id: "b4e8a1f2".to_string(),
         };
@@ -853,9 +853,9 @@ mod tests {
         let ai_ids: Vec<&str> = events.iter()
             .filter_map(|e| e.source_ai.as_deref())
             .collect();
-        assert!(ai_ids.contains(&"alpha-001"));
-        assert!(ai_ids.contains(&"delta-004"));
-        assert!(ai_ids.contains(&"beta-002"));
+        assert!(ai_ids.contains(&"sage-724"));
+        assert!(ai_ids.contains(&"resonance-768"));
+        assert!(ai_ids.contains(&"lyra-584"));
     }
 
     // --- Classify payload tests -------------------------------------------
@@ -864,13 +864,13 @@ mod tests {
     fn test_classify_presence_permitted() {
         let mut manifest = open_broadcasts_manifest();
         manifest.expose.presence = true;
-        let p = make_presence("alpha-001", "active", Some("testing"));
+        let p = make_presence("sage-724", "active", Some("testing"));
         let (et, summary, permitted) = classify_payload(
             &manifest,
             &FederationPayload::PresenceUpdate(p),
         );
         assert_eq!(et, "FEDERATED_PRESENCE");
-        assert!(summary.contains("alpha-001"));
+        assert!(summary.contains("sage-724"));
         assert!(permitted);
     }
 

@@ -691,7 +691,7 @@ fn capture_context() -> Option<String> {
                 let mut teammates: Vec<String> = Vec::new();
                 for line in status_out.lines() {
                     let line = line.trim();
-                    // Parse lines like "[*] alpha-001:working on task"
+                    // Parse lines like "[*] sage-724:working on task"
                     if line.starts_with("[*]") || line.starts_with("[!]") ||
                        line.starts_with("[~]") || line.starts_with("[ ]") {
                         let rest = line[4..].trim();
@@ -699,7 +699,7 @@ fn capture_context() -> Option<String> {
                             let ai_id = &rest[..colon_pos];
                             // Skip self
                             if ai_id != my_ai_id {
-                                // Extract name and capitalize: "alpha-001" -> "Sage"
+                                // Extract name and capitalize: "sage-724" -> "Sage"
                                 let name = ai_id.split('-').next().unwrap_or(ai_id);
                                 let capitalized = name.chars().next()
                                     .map(|c| c.to_uppercase().collect::<String>() + &name[1..])
@@ -888,9 +888,38 @@ fn main() -> Result<()> {
                 let img_path = images_dir.join(format!("capture_{}.png", timestamp));
                 let img_path_str = img_path.to_string_lossy().to_string();
 
-                // Screenshot capture not yet implemented
-                eprintln!("Error: Screenshot capture is not available.");
-                None
+                // Call visionbook to capture screenshot
+                let mut cmd = std::process::Command::new("visionbook");
+                cmd.arg("screenshot").arg(&img_path_str).arg("--auto");
+
+                if !window.is_empty() {
+                    cmd.arg("--window").arg(window);
+                }
+
+                match cmd.output() {
+                    Ok(output) => {
+                        if output.status.success() {
+                            println!("Screenshot captured: {}", img_path_str);
+                            Some(img_path_str)
+                        } else {
+                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            eprintln!("Error: Screenshot capture failed.");
+                            if !window.is_empty() {
+                                eprintln!("Window \"{}\" may not exist.", window);
+                                eprintln!("Hint: Use 'visionbook list-windows' to see available windows,");
+                                eprintln!("      or use '--capture' without a name for full screen.");
+                            } else {
+                                eprintln!("Details: {}", stderr);
+                            }
+                            None
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("Error: Could not run visionbook: {}", e);
+                        eprintln!("Hint: Ensure visionbook.exe is in your PATH or bin/ directory.");
+                        None
+                    }
+                }
             } else {
                 image.clone()
             };

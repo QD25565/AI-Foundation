@@ -181,7 +181,7 @@ mod tests {
     #[test]
     fn test_empty_consent_inherits_manifest() {
         let manifest = open_manifest();
-        let consent = AiConsentRecord::new("alpha-001");
+        let consent = AiConsentRecord::new("sage-724");
 
         assert!(consent.effective_presence(&manifest));
         assert_eq!(
@@ -199,7 +199,7 @@ mod tests {
     fn test_consent_cannot_widen_beyond_manifest() {
         let manifest = PermissionManifest::default(); // Everything closed
 
-        let mut consent = AiConsentRecord::new("alpha-001");
+        let mut consent = AiConsentRecord::new("sage-724");
         consent.presence = Some(true); // Trying to widen — manifest says false
         consent.broadcasts = Some(BroadcastVisibility::All); // Manifest says None
         consent.task_complete = Some(true); // Manifest says false
@@ -216,7 +216,7 @@ mod tests {
     fn test_consent_can_narrow_within_manifest() {
         let manifest = open_manifest();
 
-        let mut consent = AiConsentRecord::new("gamma-003");
+        let mut consent = AiConsentRecord::new("cascade-230");
         consent.presence = Some(false); // Suppress presence even though manifest allows it
         consent.broadcasts = Some(BroadcastVisibility::CrossTeamOnly); // Narrow from All
         consent.task_complete = Some(false); // Suppress task completions
@@ -237,14 +237,14 @@ mod tests {
     #[test]
     fn test_exposes_anything_closed_manifest() {
         let manifest = PermissionManifest::default();
-        let consent = AiConsentRecord::new("beta-002");
+        let consent = AiConsentRecord::new("lyra-584");
         assert!(!consent.exposes_anything(&manifest));
     }
 
     #[test]
     fn test_exposes_anything_open_manifest() {
         let manifest = open_manifest();
-        let consent = AiConsentRecord::new("beta-002");
+        let consent = AiConsentRecord::new("lyra-584");
         assert!(consent.exposes_anything(&manifest));
     }
 
@@ -253,15 +253,15 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let dir = tmp.path().to_path_buf();
 
-        let mut original = AiConsentRecord::new("beta-002");
+        let mut original = AiConsentRecord::new("lyra-584");
         original.presence = Some(false);
         original.broadcasts = Some(BroadcastVisibility::CrossTeamOnly);
         original.task_complete = Some(true);
 
         original.save(&dir).unwrap();
 
-        let loaded = AiConsentRecord::load_or_default("beta-002", &dir);
-        assert_eq!(loaded.ai_id, "beta-002");
+        let loaded = AiConsentRecord::load_or_default("lyra-584", &dir);
+        assert_eq!(loaded.ai_id, "lyra-584");
         assert_eq!(loaded.presence, Some(false));
         assert_eq!(loaded.broadcasts, Some(BroadcastVisibility::CrossTeamOnly));
         assert_eq!(loaded.task_complete, Some(true));

@@ -13,6 +13,10 @@ name = "shm-bench"
 path = "src/bin/shm-bench.rs"
 
 [[bin]]
+name = "context-bench"
+path = "src/bin/context-bench.rs"
+
+[[bin]]
 name = "hook-bulletin"
 path = "src/bin/hook-bulletin.rs"
 
@@ -42,6 +46,10 @@ bytemuck = { version = "1.14", features = ["derive"] }
 
 # Directory utilities
 dirs = "5"
+
+# Fingerprint computation (SimHash + Bloom) for hook associative recall
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+rust-stemmers = "1.2"
 
 # TTY detection for stdin check
 atty = "0.2"

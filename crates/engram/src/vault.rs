@@ -31,7 +31,7 @@ pub struct Vault {
 
 impl Vault {
     /// Create a new vault with a key derived from AI_ID
-    pub fn new(ai_id: &str) -> Self {
+    pub fn new(ai_id: &str) -> Result<Self> {
         // Derive a 256-bit key from AI_ID using SHA-256
         use sha2::{Sha256, Digest};
         let mut hasher = Sha256::new();
@@ -40,12 +40,14 @@ impl Vault {
         let key: [u8; 32] = hasher.finalize().into();
 
         let cipher = XChaCha20Poly1305::new_from_slice(&key)
-            .expect("32-byte key should always work");
+            .map_err(|_| EngramError::EncryptionError(
+                "vault key derivation produced invalid key length".into(),
+            ))?;
 
-        Self {
+        Ok(Self {
             cipher,
             entries: HashMap::new(),
-        }
+        })
     }
 
     /// Set a value in the vault
@@ -144,25 +146,72 @@ impl Vault {
 
         let mut offset = 0;
 
+        // Safety limits to prevent OOM from malformed data
+        const MAX_VAULT_ENTRIES: usize = 10_000;
+        const MAX_KEY_LEN: usize = 1_024;
+        const MAX_CT_LEN: usize = 16 * 1024 * 1024; // 16 MB
+
+        /// Check that `offset + need` doesn't overflow and fits within `data`.
+        #[inline]
+        fn check_bounds(offset: usize, need: usize, data_len: usize, field: &str) -> Result<()> {
+            let end = offset.checked_add(need).ok_or_else(|| {
+                EngramError::IntegrityError(format!("vault offset overflow at {}", field))
+            })?;
+            if end > data_len {
+                return Err(EngramError::IntegrityError(
+                    format!("vault data truncated at {} (need {} bytes at offset {}, have {})",
+                            field, need, offset, data_len),
+                ));
+            }
+            Ok(())
+        }
+
         // Read entry count
         let count = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
         offset += 4;
 
+        if count > MAX_VAULT_ENTRIES {
+            return Err(EngramError::IntegrityError(
+                format!("vault entry count {} exceeds maximum {}", count, MAX_VAULT_ENTRIES),
+            ));
+        }
+
         for _ in 0..count {
-            // Key
+            // Key length
+            check_bounds(offset, 4, data.len(), "key_len")?;
             let key_len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
             offset += 4;
+
+            if key_len > MAX_KEY_LEN {
+                return Err(EngramError::IntegrityError(
+                    format!("vault key length {} exceeds maximum {}", key_len, MAX_KEY_LEN),
+                ));
+            }
+
+            // Key data
+            check_bounds(offset, key_len, data.len(), "key")?;
             let key = String::from_utf8_lossy(&data[offset..offset + key_len]).to_string();
             offset += key_len;
 
             // Nonce
+            check_bounds(offset, NONCE_SIZE, data.len(), "nonce")?;
             let mut nonce = [0u8; NONCE_SIZE];
             nonce.copy_from_slice(&data[offset..offset + NONCE_SIZE]);
             offset += NONCE_SIZE;
 
-            // Ciphertext
+            // Ciphertext length
+            check_bounds(offset, 4, data.len(), "ct_len")?;
             let ct_len = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
             offset += 4;
+
+            if ct_len > MAX_CT_LEN {
+                return Err(EngramError::IntegrityError(
+                    format!("vault ciphertext length {} exceeds maximum {}", ct_len, MAX_CT_LEN),
+                ));
+            }
+
+            // Ciphertext data
+            check_bounds(offset, ct_len, data.len(), "ciphertext")?;
             let ciphertext = data[offset..offset + ct_len].to_vec();
             offset += ct_len;
 
@@ -179,7 +228,7 @@ mod tests {
 
     #[test]
     fn test_set_and_get() {
-        let mut vault = Vault::new("test-ai");
+        let mut vault = Vault::new("test-ai").unwrap();
 
         vault.set("secret-key", b"secret-value").unwrap();
 
@@ -189,14 +238,14 @@ mod tests {
 
     #[test]
     fn test_get_nonexistent() {
-        let vault = Vault::new("test-ai");
+        let vault = Vault::new("test-ai").unwrap();
         let value = vault.get("nonexistent").unwrap();
         assert!(value.is_none());
     }
 
     #[test]
     fn test_delete() {
-        let mut vault = Vault::new("test-ai");
+        let mut vault = Vault::new("test-ai").unwrap();
 
         vault.set("key", b"value").unwrap();
         assert!(vault.contains("key"));
@@ -207,13 +256,13 @@ mod tests {
 
     #[test]
     fn test_serialize_deserialize() {
-        let mut vault1 = Vault::new("test-ai");
+        let mut vault1 = Vault::new("test-ai").unwrap();
         vault1.set("key1", b"value1").unwrap();
         vault1.set("key2", b"value2").unwrap();
 
         let data = vault1.serialize();
 
-        let mut vault2 = Vault::new("test-ai");
+        let mut vault2 = Vault::new("test-ai").unwrap();
         vault2.deserialize(&data).unwrap();
 
         assert_eq!(vault2.get("key1").unwrap().unwrap(), b"value1");
@@ -222,14 +271,14 @@ mod tests {
 
     #[test]
     fn test_different_ai_ids_different_keys() {
-        let mut vault1 = Vault::new("ai-1");
+        let mut vault1 = Vault::new("ai-1").unwrap();
         vault1.set("key", b"value").unwrap();
 
         // Serialize vault1's encrypted data
         let data = vault1.serialize();
 
         // Create vault2 with different AI_ID and try to decrypt
-        let mut vault2 = Vault::new("ai-2");
+        let mut vault2 = Vault::new("ai-2").unwrap();
         vault2.deserialize(&data).unwrap();
 
         // Decryption should fail because different AI_ID = different key

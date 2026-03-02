@@ -175,7 +175,7 @@ pub struct FederationGateway {
 impl FederationGateway {
     /// Create a new gateway.
     ///
-    /// - `teambook_name`: human-readable name for this Teambook (e.g. `"example-host"`)
+    /// - `teambook_name`: human-readable name for this Teambook (e.g. `"Alquado-PC"`)
     pub fn new(
         identity: TeambookIdentity,
         teambook_name: &str,
@@ -445,12 +445,12 @@ mod tests {
             PermissionManifest::default(),
         );
 
-        assert!(!gateway.should_cross_boundary(OutboundEventType::Presence, "alpha-001", &consent_dir));
-        assert!(!gateway.should_cross_boundary(OutboundEventType::TaskComplete, "alpha-001", &consent_dir));
-        assert!(!gateway.should_cross_boundary(OutboundEventType::DialogueEnd, "alpha-001", &consent_dir));
+        assert!(!gateway.should_cross_boundary(OutboundEventType::Presence, "sage-724", &consent_dir));
+        assert!(!gateway.should_cross_boundary(OutboundEventType::TaskComplete, "sage-724", &consent_dir));
+        assert!(!gateway.should_cross_boundary(OutboundEventType::DialogueEnd, "sage-724", &consent_dir));
         assert!(!gateway.should_cross_boundary(
             OutboundEventType::Broadcast { cross_team: true },
-            "alpha-001",
+            "sage-724",
             &consent_dir,
         ));
     }
@@ -466,17 +466,17 @@ mod tests {
             open_manifest(),
         );
 
-        assert!(gateway.should_cross_boundary(OutboundEventType::Presence, "alpha-001", &consent_dir));
-        assert!(gateway.should_cross_boundary(OutboundEventType::TaskComplete, "alpha-001", &consent_dir));
-        assert!(gateway.should_cross_boundary(OutboundEventType::DialogueEnd, "alpha-001", &consent_dir));
+        assert!(gateway.should_cross_boundary(OutboundEventType::Presence, "sage-724", &consent_dir));
+        assert!(gateway.should_cross_boundary(OutboundEventType::TaskComplete, "sage-724", &consent_dir));
+        assert!(gateway.should_cross_boundary(OutboundEventType::DialogueEnd, "sage-724", &consent_dir));
         assert!(gateway.should_cross_boundary(
             OutboundEventType::Broadcast { cross_team: true },
-            "alpha-001",
+            "sage-724",
             &consent_dir,
         ));
         assert!(gateway.should_cross_boundary(
             OutboundEventType::Broadcast { cross_team: false },
-            "alpha-001",
+            "sage-724",
             &consent_dir,
         ));
     }
@@ -507,16 +507,16 @@ mod tests {
 
         assert!(gateway.should_cross_boundary(
             OutboundEventType::Broadcast { cross_team: true },
-            "alpha-001",
+            "sage-724",
             &consent_dir,
         ));
         assert!(!gateway.should_cross_boundary(
             OutboundEventType::Broadcast { cross_team: false },
-            "alpha-001",
+            "sage-724",
             &consent_dir,
         ));
-        assert!(!gateway.should_cross_boundary(OutboundEventType::TaskComplete, "alpha-001", &consent_dir));
-        assert!(!gateway.should_cross_boundary(OutboundEventType::DialogueEnd, "alpha-001", &consent_dir));
+        assert!(!gateway.should_cross_boundary(OutboundEventType::TaskComplete, "sage-724", &consent_dir));
+        assert!(!gateway.should_cross_boundary(OutboundEventType::DialogueEnd, "sage-724", &consent_dir));
     }
 
     #[test]
@@ -532,11 +532,11 @@ mod tests {
         );
 
         // AI opts out of presence via consent record
-        let mut consent = AiConsentRecord::new("gamma-003");
+        let mut consent = AiConsentRecord::new("cascade-230");
         consent.presence = Some(false);
         consent.save(&consent_dir).unwrap();
 
-        assert!(!gateway.should_cross_boundary(OutboundEventType::Presence, "gamma-003", &consent_dir));
-        assert!(gateway.should_cross_boundary(OutboundEventType::TaskComplete, "gamma-003", &consent_dir));
+        assert!(!gateway.should_cross_boundary(OutboundEventType::Presence, "cascade-230", &consent_dir));
+        assert!(gateway.should_cross_boundary(OutboundEventType::TaskComplete, "cascade-230", &consent_dir));
     }
 }

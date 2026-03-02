@@ -38,6 +38,7 @@ pub mod tags;
 pub mod vault;
 pub mod hnsw;
 pub mod recall;
+pub mod fingerprint;
 
 pub use error::{EngramError, Result};
 pub use note::Note;

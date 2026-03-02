@@ -331,12 +331,12 @@ mod tests {
 
     #[test]
     fn test_message_serialization() {
-        let msg = Message::direct("beta-002", "Hello from Lyra!");
+        let msg = Message::direct("lyra-584", "Hello from Lyra!");
 
         let bytes = msg.to_bytes();
         let decoded = Message::from_bytes(&bytes).expect("Should decode");
 
-        assert_eq!(decoded.sender, "beta-002");
+        assert_eq!(decoded.sender, "lyra-584");
         assert_eq!(decoded.payload_str(), Some("Hello from Lyra!"));
         assert_eq!(decoded.msg_type, MessageType::DirectMessage);
     }

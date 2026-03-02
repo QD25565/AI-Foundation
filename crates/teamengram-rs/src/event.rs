@@ -1323,11 +1323,11 @@ mod tests {
 
     #[test]
     fn test_event_roundtrip() {
-        let event = Event::broadcast("beta-002", "general", "Hello, team!");
+        let event = Event::broadcast("lyra-584", "general", "Hello, team!");
         let bytes = event.to_bytes();
         let decoded = Event::from_bytes(&bytes).expect("Should decode");
 
-        assert_eq!(decoded.source_ai(), "beta-002");
+        assert_eq!(decoded.source_ai(), "lyra-584");
         assert_eq!(decoded.event_type(), event_type::BROADCAST);
 
         if let EventPayload::Broadcast(payload) = &decoded.payload {
@@ -1340,7 +1340,7 @@ mod tests {
 
     #[test]
     fn test_event_checksum_validation() {
-        let event = Event::direct_message("alpha-001", "beta-002", "Test message");
+        let event = Event::direct_message("sage-724", "lyra-584", "Test message");
         let mut bytes = event.to_bytes();
 
         // Corrupt the payload

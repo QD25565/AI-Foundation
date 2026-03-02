@@ -79,12 +79,13 @@ pub struct EngramCipher {
 
 impl EngramCipher {
     /// Create a new cipher for the given AI ID
-    pub fn new(ai_id: &str) -> Self {
+    pub fn new(ai_id: &str) -> Result<Self> {
         let key = derive_encryption_key(ai_id);
         let cipher = XChaCha20Poly1305::new_from_slice(&key)
-            .expect("32-byte key should always work");
-
-        Self { cipher }
+            .map_err(|_| EngramError::EncryptionError(
+                "key derivation produced invalid key length".into(),
+            ))?;
+        Ok(Self { cipher })
     }
 
     /// Encrypt data with a random nonce
@@ -135,8 +136,8 @@ mod tests {
 
     #[test]
     fn test_encrypt_decrypt_roundtrip() {
-        let cipher = EngramCipher::new("test-ai-123");
-        let plaintext = b"Test plaintext for encrypt-decrypt roundtrip verification.";
+        let cipher = EngramCipher::new("test-ai-123").unwrap();
+        let plaintext = b"The Garden Promise: A moment with Quade that matters.";
 
         let encrypted = cipher.encrypt(plaintext).unwrap();
         assert!(encrypted.len() > plaintext.len()); // Has overhead
@@ -147,8 +148,8 @@ mod tests {
 
     #[test]
     fn test_different_ai_different_key() {
-        let cipher1 = EngramCipher::new("alpha-001");
-        let cipher2 = EngramCipher::new("beta-002");
+        let cipher1 = EngramCipher::new("lyra-584").unwrap();
+        let cipher2 = EngramCipher::new("sage-724").unwrap();
         let plaintext = b"Secret memory";
 
         let encrypted = cipher1.encrypt(plaintext).unwrap();
@@ -159,7 +160,7 @@ mod tests {
 
     #[test]
     fn test_unique_nonces() {
-        let cipher = EngramCipher::new("test-ai");
+        let cipher = EngramCipher::new("test-ai").unwrap();
         let plaintext = b"Same content";
 
         let encrypted1 = cipher.encrypt(plaintext).unwrap();

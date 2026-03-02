@@ -1,7 +1,7 @@
 //! Federation Node - represents a Teambook in the mesh
 
-use crate::{Endpoint, SharingPreferences, TrustLevel, node_id_from_pubkey};
-use ed25519_dalek::{SigningKey, VerifyingKey, Signature};
+use crate::{Endpoint, SharingPreferences, TrustLevel, FederationSignature, node_id_from_pubkey};
+use ed25519_dalek::{SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
 
@@ -122,8 +122,15 @@ impl FederationNode {
         }
     }
 
-    /// Verify that a signature came from this node
-    pub fn verify_signature(&self, data: &[u8], signature: &Signature) -> bool {
+    /// Verify that a signature came from this node using algorithm-agile verification.
+    pub fn verify_federation_sig(&self, data: &[u8], signature: &FederationSignature) -> bool {
+        crate::verify_federation_signature(signature, self.pubkey.as_bytes(), data).is_ok()
+    }
+
+    /// Verify a raw Ed25519 signature (backward compatibility).
+    ///
+    /// Prefer `verify_federation_sig()` for new code.
+    pub fn verify_signature(&self, data: &[u8], signature: &ed25519_dalek::Signature) -> bool {
         crate::verify_signature(&self.pubkey, data, signature)
     }
 }
@@ -162,7 +169,7 @@ impl Default for NodeCapabilities {
                 crate::TransportType::QuicLan,
                 crate::TransportType::Mdns,
             ],
-            protocol_version: 1,
+            protocol_version: crate::session::PROTOCOL_VERSION,
         }
     }
 }
@@ -264,5 +271,70 @@ mod tests {
 
         node.set_fingerprint("abc123".to_string());
         assert_eq!(node.trust_level, TrustLevel::Verified);
+    }
+
+    // -------------------------------------------------------------------
+    // PQC Phase 1: Algorithm Agility Tests for Node
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn test_verify_federation_sig_valid() {
+        let sk = SigningKey::generate(&mut OsRng);
+        let node = FederationNode::new_local("PQC Node", &sk);
+
+        let data = b"federation agile verification test";
+        let raw_sig = crate::sign_data(&sk, data);
+        let fed_sig = FederationSignature::ed25519(raw_sig);
+
+        assert!(node.verify_federation_sig(data, &fed_sig));
+    }
+
+    #[test]
+    fn test_verify_federation_sig_wrong_data() {
+        let sk = SigningKey::generate(&mut OsRng);
+        let node = FederationNode::new_local("PQC Node", &sk);
+
+        let data = b"original data";
+        let raw_sig = crate::sign_data(&sk, data);
+        let fed_sig = FederationSignature::ed25519(raw_sig);
+
+        assert!(!node.verify_federation_sig(b"tampered data", &fed_sig));
+    }
+
+    #[test]
+    fn test_verify_federation_sig_wrong_node() {
+        let sk = SigningKey::generate(&mut OsRng);
+        let other_sk = SigningKey::generate(&mut OsRng);
+        let node = FederationNode::new_local("Other Node", &other_sk);
+
+        let data = b"signed by different key";
+        let raw_sig = crate::sign_data(&sk, data);
+        let fed_sig = FederationSignature::ed25519(raw_sig);
+
+        assert!(!node.verify_federation_sig(data, &fed_sig));
+    }
+
+    #[test]
+    fn test_legacy_verify_and_federation_verify_agree() {
+        // Both verify_signature() and verify_federation_sig() should
+        // produce the same result for identical Ed25519 signatures.
+        let sk = SigningKey::generate(&mut OsRng);
+        let node = FederationNode::new_local("Compat Node", &sk);
+
+        let data = b"backward compatibility check";
+        let raw_sig = crate::sign_data(&sk, data);
+        let fed_sig = FederationSignature::ed25519(raw_sig);
+
+        let legacy_result = node.verify_signature(data, &raw_sig);
+        let agile_result = node.verify_federation_sig(data, &fed_sig);
+
+        assert_eq!(legacy_result, agile_result, "legacy and agile verify must agree");
+        assert!(legacy_result, "both should pass for valid signature");
+    }
+
+    #[test]
+    fn test_node_capabilities_uses_protocol_version_constant() {
+        let caps = NodeCapabilities::default();
+        assert_eq!(caps.protocol_version, crate::session::PROTOCOL_VERSION);
     }
 }

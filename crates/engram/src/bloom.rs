@@ -63,6 +63,7 @@ impl BloomFilter {
 
     /// Create a Bloom filter with explicit parameters
     pub fn with_params(num_bits: usize, num_hashes: u8) -> Self {
+        let num_bits = num_bits.max(64); // Minimum 64 bits to prevent divide-by-zero
         let num_bytes = (num_bits + 7) / 8;
         Self {
             bits: vec![0u8; num_bytes],

@@ -65,6 +65,9 @@ dirs = "5"
 # Regex for entity extraction
 regex = "1.10"
 
+# Stemming for BM25 keyword search
+rust-stemmers = "1.2"
+
 # Migration tool dependencies
 rusqlite = { version = "0.31", features = ["bundled"] }
 serde_json = "1.0"

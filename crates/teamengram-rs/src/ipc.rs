@@ -82,14 +82,32 @@ pub struct NotificationRing {
     pub head: AtomicU64,
     /// Read position (each AI tracks their own)
     pub tail: AtomicU64,
+    /// Number of notifications lost to overflow (head wrapped past tail + NOTIFICATION_SLOTS).
+    /// Incremented when publish() detects it's about to overwrite an unread slot.
+    /// Pure instrumentation — zero behavior change on the hot path.
+    pub overflow_count: AtomicU64,
     /// Notification slots
     pub slots: [NotificationSlot; NOTIFICATION_SLOTS],
 }
 
 impl NotificationRing {
+    /// Get the number of notifications lost to overflow
+    pub fn overflow_count(&self) -> u64 {
+        self.overflow_count.load(Ordering::Relaxed)
+    }
+
     /// Publish a notification
     pub fn publish(&self, msg_type: IpcNotificationType, from_hash: u32, to_hash: u32, content: &str) {
         let head = self.head.fetch_add(1, Ordering::AcqRel);
+        let tail = self.tail.load(Ordering::Acquire);
+
+        // Detect overflow: head is about to overwrite an unread slot.
+        // This is pure instrumentation — we still write (ring buffer semantics),
+        // but consumers can check overflow_count to know notifications were lost.
+        if head >= tail + NOTIFICATION_SLOTS as u64 {
+            self.overflow_count.fetch_add(1, Ordering::Relaxed);
+        }
+
         let idx = (head as usize) % NOTIFICATION_SLOTS;
         let slot = &self.slots[idx];
 
@@ -253,6 +271,7 @@ impl ShmNotifyCallback {
                 let ring = self.ring_mut();
                 ring.head.store(0, Ordering::Release);
                 ring.tail.store(0, Ordering::Release);
+                ring.overflow_count.store(0, Ordering::Release);
 
                 // Mark ready
                 self.header_mut().init_state.store(2, Ordering::Release);
@@ -262,20 +281,32 @@ impl ShmNotifyCallback {
             Err(1) => {
                 // Another process claimed init — wait with bounded timeout.
                 // Initialization takes microseconds (few mmap writes + flush).
-                // If the initializer crashes, state stays at 1 forever — bail
-                // instead of burning CPU indefinitely.
+                // If the initializer crashes, state stays at 1 forever.
                 let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
                 loop {
-                    if header.init_state.load(Ordering::Acquire) != 1 {
-                        break;
+                    let state = header.init_state.load(Ordering::Acquire);
+                    if state == 2 {
+                        return Ok(());
+                    }
+                    if state != 1 {
+                        break; // Unexpected state — fall through to recovery
                     }
                     if std::time::Instant::now() >= deadline {
-                        anyhow::bail!(
-                            "IPC initialization timed out — another process claimed init \
-                             but did not complete within 100ms (possible crash during init)"
-                        );
+                        // Initializer likely crashed — reset to 0 and retry.
+                        // compare_exchange ensures only one process does recovery.
+                        if header.init_state.compare_exchange(
+                            1, 0, Ordering::AcqRel, Ordering::Acquire
+                        ).is_ok() {
+                            eprintln!(
+                                "[IPC] init state stuck at 1 (crashed initializer) — \
+                                 resetting to 0 and retrying"
+                            );
+                            return self.ensure_initialized();
+                        }
+                        // Another process beat us to recovery — retry from top
+                        return self.ensure_initialized();
                     }
-                    std::thread::yield_now(); // Yield CPU time slice, not spin
+                    std::thread::yield_now();
                 }
                 Ok(())
             }
@@ -569,15 +600,15 @@ mod tests {
         // Publish via NotifyCallback trait
         callback.notify(
             NotifyType::Broadcast,
-            "alpha-001",
+            "sage-724",
             "",
             "Hello team!"
         );
 
         callback.notify(
             NotifyType::DirectMessage,
-            "alpha-001",
-            "beta-002",
+            "sage-724",
+            "lyra-584",
             "Hey Lyra!"
         );
 
@@ -593,7 +624,105 @@ mod tests {
     #[test]
     fn test_hash_consistency() {
         // Verify hash matches Lyra's implementation
-        assert_eq!(hash_ai_id("alpha-001"), hash_ai_id("alpha-001"));
-        assert_ne!(hash_ai_id("alpha-001"), hash_ai_id("beta-002"));
+        assert_eq!(hash_ai_id("sage-724"), hash_ai_id("sage-724"));
+        assert_ne!(hash_ai_id("sage-724"), hash_ai_id("lyra-584"));
+    }
+
+    // ===== Fix 3: Overflow Detection Tests =====
+
+    #[test]
+    fn test_overflow_counter_zero_when_not_full() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("overflow-test.ipc");
+
+        let callback = ShmNotifyCallback::open(&path).unwrap();
+        let ring = callback.ring();
+
+        // Publish fewer than NOTIFICATION_SLOTS notifications
+        for i in 0..100 {
+            ring.publish(
+                IpcNotificationType::Broadcast,
+                hash_ai_id("test-ai"),
+                0,
+                &format!("msg {}", i),
+            );
+        }
+
+        assert_eq!(ring.overflow_count(), 0,
+            "No overflow when publishing fewer than NOTIFICATION_SLOTS");
+    }
+
+    #[test]
+    fn test_overflow_counter_increments() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("overflow-inc.ipc");
+
+        let callback = ShmNotifyCallback::open(&path).unwrap();
+        let ring = callback.ring();
+
+        // Publish exactly NOTIFICATION_SLOTS (fills the ring, no overflow yet)
+        for i in 0..NOTIFICATION_SLOTS {
+            ring.publish(
+                IpcNotificationType::Broadcast,
+                hash_ai_id("test-ai"),
+                0,
+                &format!("msg {}", i),
+            );
+        }
+        assert_eq!(ring.overflow_count(), 0,
+            "No overflow at exactly NOTIFICATION_SLOTS");
+
+        // One more publish overwrites slot 0 (unread) — overflow
+        ring.publish(
+            IpcNotificationType::Urgent,
+            hash_ai_id("test-ai"),
+            0,
+            "overflow!",
+        );
+        assert_eq!(ring.overflow_count(), 1,
+            "Overflow count should be 1 after overwriting one unread slot");
+
+        // Two more overflows
+        ring.publish(IpcNotificationType::Broadcast, 0, 0, "overflow2");
+        ring.publish(IpcNotificationType::Broadcast, 0, 0, "overflow3");
+        assert_eq!(ring.overflow_count(), 3,
+            "Overflow count should accumulate");
+    }
+
+    #[test]
+    fn test_overflow_counter_no_increment_with_drain() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("overflow-drain.ipc");
+
+        let callback = ShmNotifyCallback::open(&path).unwrap();
+        let ring = callback.ring();
+
+        // Publish half the slots
+        let half = NOTIFICATION_SLOTS / 2;
+        for i in 0..half {
+            ring.publish(
+                IpcNotificationType::Broadcast,
+                hash_ai_id("test-ai"),
+                0,
+                &format!("msg {}", i),
+            );
+        }
+
+        // "Drain" by advancing tail to match head
+        let current_head = ring.head.load(Ordering::Acquire);
+        ring.tail.store(current_head, Ordering::Release);
+
+        // Publish another full batch — should not overflow since we drained
+        for i in 0..NOTIFICATION_SLOTS {
+            ring.publish(
+                IpcNotificationType::Broadcast,
+                hash_ai_id("test-ai"),
+                0,
+                &format!("batch2 {}", i),
+            );
+        }
+
+        assert_eq!(ring.overflow_count(), 0,
+            "No overflow when drain keeps up with publish");
     }
 }

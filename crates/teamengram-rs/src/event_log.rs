@@ -1031,11 +1031,11 @@ mod tests {
         // Write events
         let mut writer = EventLogWriter::open(Some(base)).unwrap();
 
-        let event1 = Event::broadcast("beta-002", "general", "Hello!");
+        let event1 = Event::broadcast("lyra-584", "general", "Hello!");
         let seq1 = writer.append(&event1).unwrap();
         assert_eq!(seq1, 1);
 
-        let event2 = Event::broadcast("alpha-001", "general", "Hi there!");
+        let event2 = Event::broadcast("sage-724", "general", "Hi there!");
         let seq2 = writer.append(&event2).unwrap();
         assert_eq!(seq2, 2);
 

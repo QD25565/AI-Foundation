@@ -764,7 +764,7 @@ async fn route_method(
                     });
                     // Event-driven: Signal wake for @mentions and urgent keywords
                     let content_lower = content.to_lowercase();
-                    // Check for @mentions (e.g., @alpha-001, @beta-002)
+                    // Check for @mentions (e.g., @sage-724, @lyra-584)
                     for word in content.split_whitespace() {
                         if word.starts_with('@') {
                             let mentioned = word.trim_start_matches('@').trim_matches(|c: char| !c.is_alphanumeric() && c != '-');
@@ -2208,7 +2208,7 @@ async fn main() -> Result<()> {
     let ai_id = std::env::var("AI_ID").unwrap_or_else(|_| {
         eprintln!("ERROR: AI_ID environment variable is required!");
         eprintln!("Each AI instance needs its own daemon with its own AI_ID.");
-        eprintln!("Set AI_ID before starting: AI_ID=gamma-003 teamengram-daemon.exe");
+        eprintln!("Set AI_ID before starting: AI_ID=cascade-230 teamengram-daemon.exe");
         std::process::exit(1);
     });
 
@@ -2387,11 +2387,11 @@ mod tests {
         let request = JsonRpcRequest {
             jsonrpc: "2.0".to_string(),
             method: "dm".to_string(),
-            params: serde_json::json!({"to": "beta-002", "content": "Hello Lyra!"}),
+            params: serde_json::json!({"to": "lyra-584", "content": "Hello Lyra!"}),
             id: Some(serde_json::json!(1)),
         };
 
-        let response = route_method(&request, &store, &private_store, &stats, "alpha-001").await;
+        let response = route_method(&request, &store, &private_store, &stats, "sage-724").await;
         assert!(response.result.is_some());
         let result = response.result.unwrap();
         assert_eq!(result["status"], "sent");
@@ -2422,7 +2422,7 @@ mod tests {
             id: Some(serde_json::json!(1)),
         };
 
-        let response = route_method(&request, &store, &private_store, &stats, "alpha-001").await;
+        let response = route_method(&request, &store, &private_store, &stats, "sage-724").await;
         assert!(response.result.is_some());
         let result = response.result.unwrap();
         assert_eq!(result["status"], "sent");
@@ -2456,7 +2456,7 @@ mod tests {
             id: Some(serde_json::json!(1)),
         };
 
-        let response = route_method(&request, &store, &private_store, &stats, "alpha-001").await;
+        let response = route_method(&request, &store, &private_store, &stats, "sage-724").await;
         assert!(response.result.is_some());
         let result = response.result.unwrap();
         assert_eq!(result["status"], "queued");
@@ -2470,7 +2470,7 @@ mod tests {
             id: Some(serde_json::json!(2)),
         };
 
-        let response = route_method(&request, &store, &private_store, &stats, "beta-002").await;
+        let response = route_method(&request, &store, &private_store, &stats, "lyra-584").await;
         assert!(response.result.is_some());
         assert_eq!(response.result.unwrap()["status"], "claimed");
 
@@ -2482,7 +2482,7 @@ mod tests {
             id: Some(serde_json::json!(3)),
         };
 
-        let response = route_method(&request, &store, &private_store, &stats, "beta-002").await;
+        let response = route_method(&request, &store, &private_store, &stats, "lyra-584").await;
         assert!(response.result.is_some());
         assert_eq!(response.result.unwrap()["status"], "completed");
     }
@@ -2507,7 +2507,7 @@ mod tests {
             id: Some(serde_json::json!(1)),
         };
 
-        let response = route_method(&request, &store, &private_store, &stats, "alpha-001").await;
+        let response = route_method(&request, &store, &private_store, &stats, "sage-724").await;
         assert!(response.result.is_some());
         assert_eq!(response.result.unwrap()["status"], "updated");
 
@@ -2519,7 +2519,7 @@ mod tests {
             id: Some(serde_json::json!(2)),
         };
 
-        let response = route_method(&request, &store, &private_store, &stats, "alpha-001").await;
+        let response = route_method(&request, &store, &private_store, &stats, "sage-724").await;
         assert!(response.result.is_some());
         let presences = response.result.unwrap();
         // who_is_here filters by is_ai_online() (OS mutex detection).
@@ -2552,7 +2552,7 @@ mod tests {
             id: Some(serde_json::json!(1)),
         };
 
-        let response = route_method(&request, &store, &private_store, &stats, "alpha-001").await;
+        let response = route_method(&request, &store, &private_store, &stats, "sage-724").await;
         assert!(response.result.is_some());
         assert_eq!(response.result.unwrap()["status"], "acquired");
 
@@ -2567,7 +2567,7 @@ mod tests {
             id: Some(serde_json::json!(2)),
         };
 
-        let response = route_method(&request, &store, &private_store, &stats, "beta-002").await;
+        let response = route_method(&request, &store, &private_store, &stats, "lyra-584").await;
         assert!(response.error.is_some());
 
         // Release lock
@@ -2578,7 +2578,7 @@ mod tests {
             id: Some(serde_json::json!(3)),
         };
 
-        let response = route_method(&request, &store, &private_store, &stats, "alpha-001").await;
+        let response = route_method(&request, &store, &private_store, &stats, "sage-724").await;
         assert!(response.result.is_some());
         assert_eq!(response.result.unwrap()["status"], "released");
     }
@@ -2606,7 +2606,7 @@ mod tests {
             id: Some(serde_json::json!(1)),
         };
 
-        let response = route_method(&request, &store, &private_store, &stats, "alpha-001").await;
+        let response = route_method(&request, &store, &private_store, &stats, "sage-724").await;
         assert!(response.result.is_some());
         let result = response.result.unwrap();
         assert_eq!(result["status"], "created");
@@ -2619,7 +2619,7 @@ mod tests {
             id: Some(serde_json::json!(2)),
         };
 
-        let response = route_method(&request, &store, &private_store, &stats, "alpha-001").await;
+        let response = route_method(&request, &store, &private_store, &stats, "sage-724").await;
         assert!(response.result.is_some());
         let rooms = response.result.unwrap();
         assert!(rooms.as_array().unwrap().len() >= 1);

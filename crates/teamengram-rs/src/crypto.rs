@@ -74,6 +74,22 @@ impl TeamEngramCrypto {
         use hkdf::Hkdf;
         use sha2::Sha256;
 
+        // Minimum lengths to prevent weak key derivation.
+        // Production: ikm = 32-byte TPM-sealed key, salt = 32-byte H_ID hash.
+        const MIN_IKM_LEN: usize = 16;
+        const MIN_SALT_LEN: usize = 16;
+
+        if ikm.len() < MIN_IKM_LEN {
+            return Err(CryptoError::KeyDerivationFailed(
+                format!("input key material too short ({} bytes, minimum {})", ikm.len(), MIN_IKM_LEN),
+            ));
+        }
+        if salt.len() < MIN_SALT_LEN {
+            return Err(CryptoError::KeyDerivationFailed(
+                format!("salt too short ({} bytes, minimum {})", salt.len(), MIN_SALT_LEN),
+            ));
+        }
+
         let hk = Hkdf::<Sha256>::new(Some(salt), ikm);
         let mut key_bytes = [0u8; 32];
         hk.expand(b"teamengram-aes256gcm-v1", &mut key_bytes)
@@ -200,12 +216,16 @@ pub const ENCRYPTION_KEY_FILE: &str = "encryption.key";
 /// or `Err` if the file exists but is malformed.
 pub fn load_encryption_key(data_dir: &std::path::Path) -> Result<Option<TeamEngramCrypto>, CryptoError> {
     let key_path = data_dir.join(ENCRYPTION_KEY_FILE);
-    if !key_path.exists() {
-        return Ok(None);
-    }
 
-    let key_bytes = std::fs::read(&key_path)
-        .map_err(|e| CryptoError::KeyDerivationFailed(format!("failed to read {}: {}", key_path.display(), e)))?;
+    // Atomic read — no TOCTOU race between exists() and read().
+    // Handle NotFound as "encryption disabled", all other IO errors propagate.
+    let key_bytes = match std::fs::read(&key_path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(CryptoError::KeyDerivationFailed(
+            format!("failed to read {}: {}", key_path.display(), e)
+        )),
+    };
 
     if key_bytes.len() != 32 {
         return Err(CryptoError::KeyDerivationFailed(
@@ -322,12 +342,42 @@ mod tests {
     #[test]
     fn hkdf_different_salt_different_key() {
         let ikm = b"same-key-material-for-both-tests";
-        let crypto1 = TeamEngramCrypto::from_key_material(ikm, b"salt-a").unwrap();
-        let crypto2 = TeamEngramCrypto::from_key_material(ikm, b"salt-b").unwrap();
+        let salt_a = b"salt-aaaa-16bytes";  // >=16 bytes
+        let salt_b = b"salt-bbbb-16bytes";  // >=16 bytes
+        let crypto1 = TeamEngramCrypto::from_key_material(ikm, salt_a).unwrap();
+        let crypto2 = TeamEngramCrypto::from_key_material(ikm, salt_b).unwrap();
 
         let ciphertext = crypto1.encrypt_payload(b"test", 1, 0x0001).unwrap();
         let result = crypto2.decrypt_payload(&ciphertext, 1, 0x0001);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn hkdf_rejects_short_ikm() {
+        let short_ikm = b"too-short"; // 9 bytes < 16
+        let salt = b"fake-h_id-sha256-hash-32-bytes!!";
+        let result = TeamEngramCrypto::from_key_material(short_ikm, salt);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("input key material too short"));
+    }
+
+    #[test]
+    fn hkdf_rejects_short_salt() {
+        let ikm = b"fake-tpm-sealed-private-key-bytes!!";
+        let short_salt = b"tiny"; // 4 bytes < 16
+        let result = TeamEngramCrypto::from_key_material(ikm, short_salt);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("salt too short"));
+    }
+
+    #[test]
+    fn hkdf_accepts_minimum_lengths() {
+        let ikm = &[0xABu8; 16]; // exactly 16 bytes
+        let salt = &[0xCDu8; 16]; // exactly 16 bytes
+        let crypto = TeamEngramCrypto::from_key_material(ikm, salt).unwrap();
+        let ct = crypto.encrypt_payload(b"ok", 1, 0x0001).unwrap();
+        let pt = crypto.decrypt_payload(&ct, 1, 0x0001).unwrap();
+        assert_eq!(&pt, b"ok");
     }
 
     #[test]

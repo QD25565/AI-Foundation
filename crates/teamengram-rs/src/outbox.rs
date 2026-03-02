@@ -378,7 +378,13 @@ impl OutboxProducer {
             // Memory barrier: all writes visible before signaling.
             std::sync::atomic::fence(Ordering::Release);
             if let Err(e) = self.mmap.flush() {
-                eprintln!("[OUTBOX] mmap flush failed after write_event: {}", e);
+                // Flush failure is fatal — data may not be persisted.
+                // Set ERROR flag and return error instead of silently continuing.
+                self.header().set_flag(flags::ERROR);
+                return Err(OutboxError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("mmap flush failed after write_event: {}", e),
+                )));
             }
 
             // Backpressure: set PRESSURE flag + extra wake when fill is high.
@@ -453,7 +459,11 @@ impl OutboxProducer {
 
             std::sync::atomic::fence(Ordering::Release);
             if let Err(e) = self.mmap.flush() {
-                eprintln!("[OUTBOX] mmap flush failed after write_raw: {}", e);
+                self.header().set_flag(flags::ERROR);
+                return Err(OutboxError::Io(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("mmap flush failed after write_raw: {}", e),
+                )));
             }
 
             if self.header().fill_percent() >= HIGH_WATERMARK_PERCENT {
@@ -550,6 +560,12 @@ impl OutboxConsumer {
     /// Get the outbox header
     fn header(&self) -> &OutboxHeader {
         unsafe { &*(self.mmap.as_ptr() as *const OutboxHeader) }
+    }
+
+    /// Check if a specific flag is set on this outbox.
+    /// Public accessor for the sequencer to check PRESSURE etc.
+    pub fn has_flag(&self, flag: u32) -> bool {
+        self.header().has_flag(flag)
     }
 
     /// Get data buffer
@@ -963,12 +979,12 @@ mod tests {
     #[test]
     fn test_outbox_hash_consistency() {
         // Same AI ID should always produce same hash
-        let hash1 = hash_ai_id("beta-002");
-        let hash2 = hash_ai_id("beta-002");
+        let hash1 = hash_ai_id("lyra-584");
+        let hash2 = hash_ai_id("lyra-584");
         assert_eq!(hash1, hash2);
 
         // Different AI IDs should produce different hashes
-        let hash3 = hash_ai_id("alpha-001");
+        let hash3 = hash_ai_id("sage-724");
         assert_ne!(hash1, hash3);
     }
 
@@ -1090,13 +1106,13 @@ mod tests {
         let base = tmp.path();
 
         // Create multiple outboxes
-        let _p1 = OutboxProducer::open("beta-002", Some(base)).unwrap();
-        let _p2 = OutboxProducer::open("alpha-001", Some(base)).unwrap();
-        let _p3 = OutboxProducer::open("gamma-003", Some(base)).unwrap();
+        let _p1 = OutboxProducer::open("lyra-584", Some(base)).unwrap();
+        let _p2 = OutboxProducer::open("sage-724", Some(base)).unwrap();
+        let _p3 = OutboxProducer::open("cascade-230", Some(base)).unwrap();
 
         let mut ai_ids = list_outboxes(Some(base)).unwrap();
         ai_ids.sort();
 
-        assert_eq!(ai_ids, vec!["gamma-003", "beta-002", "alpha-001"]);
+        assert_eq!(ai_ids, vec!["cascade-230", "lyra-584", "sage-724"]);
     }
 }

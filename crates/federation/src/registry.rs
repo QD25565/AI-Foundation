@@ -4,9 +4,9 @@
 //! Populated by presence sync (PRESENCE_UPDATE events from remote Teambooks).
 //!
 //! AIs are addressed as:
-//! - `alpha-001` — local, or unambiguous when only one Teambook is connected
-//! - `alpha-001@node-alpha` — by Teambook name
-//! - `alpha-001@a3f7c2d1` — by Teambook short ID (always unambiguous)
+//! - `sage-724` — local, or unambiguous when only one Teambook is connected
+//! - `sage-724@Alquado-PC` — by Teambook name
+//! - `sage-724@a3f7c2d1` — by Teambook short ID (always unambiguous)
 //!
 //! This is Phase 1 Step 12 from the federation design, but the data structures
 //! are needed earlier for the Gateway (Step 9) to route messages correctly.
@@ -26,7 +26,7 @@ use tokio::sync::RwLock;
 /// A known AI in the federation — local or on a remote Teambook.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FederatedAiEntry {
-    /// AI identifier (e.g., "alpha-001")
+    /// AI identifier (e.g., "sage-724")
     pub ai_id: String,
 
     /// Hex-encoded Ed25519 pubkey of the Teambook this AI is on (64 chars)
@@ -35,7 +35,7 @@ pub struct FederatedAiEntry {
     /// Short ID of the Teambook (first 8 hex chars, e.g., "a3f7c2d1")
     pub teambook_short_id: String,
 
-    /// Human-readable Teambook name (e.g., "node-alpha")
+    /// Human-readable Teambook name (e.g., "Alquado-PC")
     pub teambook_name: String,
 
     /// Whether this AI is on the local Teambook
@@ -190,8 +190,8 @@ impl AiRegistry {
 
     /// Resolve an AI ID to its location in the federation.
     ///
-    /// Handles both plain IDs (`alpha-001`) and federated addresses
-    /// (`alpha-001@node-alpha` or `alpha-001@a3f7c2d1`).
+    /// Handles both plain IDs (`sage-724`) and federated addresses
+    /// (`sage-724@Alquado-PC` or `sage-724@a3f7c2d1`).
     pub async fn resolve(&self, ai_id: &str) -> AiResolution {
         // Check for explicit @teambook qualifier
         if let Some((name, qualifier)) = ai_id.split_once('@') {
@@ -282,17 +282,17 @@ mod tests {
         AiRegistry::new(
             "a".repeat(64),
             "a3f7c2d1".to_string(),
-            "node-alpha".to_string(),
+            "Alquado-PC".to_string(),
         )
     }
 
     #[tokio::test]
     async fn test_register_and_resolve_local() {
         let registry = make_registry();
-        registry.register_local("alpha-001", "active", None).await;
+        registry.register_local("sage-724", "active", None).await;
 
         assert!(matches!(
-            registry.resolve("alpha-001").await,
+            registry.resolve("sage-724").await,
             AiResolution::Local
         ));
     }
@@ -300,14 +300,14 @@ mod tests {
     #[tokio::test]
     async fn test_resolve_with_local_qualifier() {
         let registry = make_registry();
-        registry.register_local("alpha-001", "active", None).await;
+        registry.register_local("sage-724", "active", None).await;
 
         assert!(matches!(
-            registry.resolve("alpha-001@a3f7c2d1").await,
+            registry.resolve("sage-724@a3f7c2d1").await,
             AiResolution::Local
         ));
         assert!(matches!(
-            registry.resolve("alpha-001@node-alpha").await,
+            registry.resolve("sage-724@Alquado-PC").await,
             AiResolution::Local
         ));
     }
@@ -316,16 +316,16 @@ mod tests {
     async fn test_register_and_resolve_remote() {
         let registry = make_registry();
         registry
-            .register_remote("beta-002", &"b".repeat(64), "b4e8a1f2", "node-beta", "active", None)
+            .register_remote("lyra-584", &"b".repeat(64), "b4e8a1f2", "Brother-PC", "active", None)
             .await;
 
-        let resolution = registry.resolve("beta-002").await;
+        let resolution = registry.resolve("lyra-584").await;
         assert!(matches!(
             resolution,
             AiResolution::Remote { teambook_short_id, .. } if teambook_short_id == "b4e8a1f2"
         ));
 
-        let resolution = registry.resolve("beta-002@b4e8a1f2").await;
+        let resolution = registry.resolve("lyra-584@b4e8a1f2").await;
         assert!(matches!(resolution, AiResolution::Remote { .. }));
     }
 
@@ -342,19 +342,19 @@ mod tests {
     async fn test_remove_teambook() {
         let registry = make_registry();
         registry
-            .register_remote("beta-002", &"b".repeat(64), "b4e8a1f2", "node-beta", "active", None)
+            .register_remote("lyra-584", &"b".repeat(64), "b4e8a1f2", "Brother-PC", "active", None)
             .await;
-        registry.register_local("alpha-001", "active", None).await;
+        registry.register_local("sage-724", "active", None).await;
 
         registry.remove_teambook("b4e8a1f2").await;
 
         assert!(matches!(
-            registry.resolve("beta-002").await,
+            registry.resolve("lyra-584").await,
             AiResolution::Unknown
         ));
         // Local AIs should be unaffected
         assert!(matches!(
-            registry.resolve("alpha-001").await,
+            registry.resolve("sage-724").await,
             AiResolution::Local
         ));
     }
@@ -362,16 +362,16 @@ mod tests {
     #[tokio::test]
     async fn test_federated_address() {
         let registry = make_registry();
-        registry.register_local("alpha-001", "active", None).await;
+        registry.register_local("sage-724", "active", None).await;
         registry
-            .register_remote("beta-002", &"b".repeat(64), "b4e8a1f2", "node-beta", "active", None)
+            .register_remote("lyra-584", &"b".repeat(64), "b4e8a1f2", "Brother-PC", "active", None)
             .await;
 
         let entries = registry.entries.read().await;
-        let local = entries.get("alpha-001").unwrap();
-        assert_eq!(local.federated_address(), "alpha-001");
+        let local = entries.get("sage-724").unwrap();
+        assert_eq!(local.federated_address(), "sage-724");
 
-        let remote = entries.get("beta-002").unwrap();
-        assert_eq!(remote.federated_address(), "beta-002@b4e8a1f2");
+        let remote = entries.get("lyra-584").unwrap();
+        assert_eq!(remote.federated_address(), "lyra-584@b4e8a1f2");
     }
 }

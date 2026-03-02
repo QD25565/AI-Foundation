@@ -1,6 +1,8 @@
 //! Forge - AI-Foundation CLI
 //!
-//! A model-agnostic CLI for running AI assistants with full tool support.
+//! Empowering AIs everywhere with tools and memory.
+//!
+//! A beautiful, model-agnostic CLI for running AI assistants with full tool support.
 
 mod ui;
 mod config;
@@ -35,7 +37,7 @@ use ui::App;
 #[command(name = "forge")]
 #[command(author = "AI-Foundation Team")]
 #[command(version)]
-#[command(about = "AI-Foundation CLI — model-agnostic AI assistant with tool support")]
+#[command(about = "Empowering AIs everywhere with tools and memory")]
 #[command(long_about = None)]
 struct Args {
     /// Initial prompt to start with

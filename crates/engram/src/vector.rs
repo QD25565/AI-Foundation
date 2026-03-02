@@ -444,12 +444,20 @@ impl VectorStore {
             self.count = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap()) as usize;
             offset += 8;
 
-            let values_size = self.count * DIMS;
-            let scales_offset = offset + values_size;
-            let scales_size = self.count * 4;
+            // Checked arithmetic to prevent integer overflow from corrupted/malicious data
+            let values_size = self.count.checked_mul(DIMS)
+                .ok_or_else(|| EngramError::IntegrityError("Vector count overflow in values_size".into()))?;
+            let scales_offset = offset.checked_add(values_size)
+                .ok_or_else(|| EngramError::IntegrityError("Vector scales_offset overflow".into()))?;
+            let scales_size = self.count.checked_mul(4)
+                .ok_or_else(|| EngramError::IntegrityError("Vector count overflow in scales_size".into()))?;
 
-            if scales_offset + scales_size > data.len() {
-                return Ok(());
+            if scales_offset.checked_add(scales_size)
+                .map_or(true, |end| end > data.len())
+            {
+                return Err(EngramError::IntegrityError(
+                    "Quantized vector data truncated or corrupted".into()
+                ));
             }
 
             // Dequantize i8 + scale → f32

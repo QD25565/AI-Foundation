@@ -1,10 +1,11 @@
-//! MCP Adapter - Pure Rust interface for TeamEngram
+//! MCP Server Adapter - Pure Rust interface for TeamEngram
 //!
 //! This module provides the MCP-compatible interface that uses the TeamEngram
 //! daemon for all operations. It connects via Named Pipe and uses JSON-RPC
 //! for communication.
 //!
-//! Types are now defined in compat_types.rs - no external database dependencies.
+//! Types are now defined in compat_types.rs - NO PostgreSQL dependencies.
+//! Philosophy: We build our own AI-optimized infrastructure. Sovereign.
 //!
 //! V2 EVENT SOURCING (TEAMENGRAM_V2=1 environment variable):
 //! - Each AI writes to local outbox (~100ns, wait-free)

@@ -253,7 +253,7 @@ enum Commands {
     /// Send a direct message to another AI
     #[command(alias = "dm", alias = "send", alias = "msg", alias = "pm", alias = "whisper")]
     DirectMessage {
-        /// Target AI (e.g., alpha-001)
+        /// Target AI (e.g., sage-724)
         to_ai: String,
         /// Message content
         content: String,
@@ -289,7 +289,7 @@ enum Commands {
     #[command(alias = "start-dialogue", alias = "dialogue", alias = "chat", alias = "converse", alias = "new-dialogue")]
     #[command(alias = "dialogue-start", alias = "create-dialogue", alias = "talk", alias = "begin-dialogue")]
     DialogueCreate {
-        /// Target AI(s) to dialogue with. Comma-separated for n-party: "beta-002,gamma-003"
+        /// Target AI(s) to dialogue with. Comma-separated for n-party: "lyra-584,cascade-230"
         responder: String,
         /// Dialogue topic
         topic: String,
@@ -673,7 +673,7 @@ enum Commands {
     /// Get another AI's presence status
     #[command(alias = "get-presence", alias = "lookup", alias = "find-ai", alias = "ai-status", alias = "whois")]
     GetPresence {
-        /// AI ID to look up (e.g., beta-002)
+        /// AI ID to look up (e.g., lyra-584)
         ai_id: String,
     },
 
@@ -1058,7 +1058,7 @@ async fn main() -> Result<()> {
 
     if ai_id.is_empty() || ai_id == "unknown" {
         eprintln!("ERROR: AI_ID cannot be empty or 'unknown'");
-        eprintln!("Set a valid AI identity, e.g.: AI_ID=gamma-003");
+        eprintln!("Set a valid AI identity, e.g.: AI_ID=cascade-230");
         std::process::exit(1);
     }
 
@@ -1265,7 +1265,7 @@ async fn main() -> Result<()> {
 
     // V2 EVENT SOURCING PATH
     // Enable via: --v2 flag OR TEAMENGRAM_V2=1 environment variable
-    // The env var allows the MCP binary to enable V2 for all CLI subprocess calls
+    // The env var allows MCP server to enable V2 for all CLI subprocess calls
     let v2_enabled = cli.v2 || std::env::var("TEAMENGRAM_V2")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);  // V1 is default - V2 requires explicit opt-in
@@ -3996,7 +3996,7 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                 let file_strs: Vec<String> = file_actions.iter()
                     .take(file_limit)
                     .map(|(ai, action, path, _)| {
-                        format!("{} {} {}", ai, action, path)  // Full: "alpha-001 modified /path/to/file.rs"
+                        format!("{} {} {}", ai, action, path)  // Full: "sage-724 modified /path/to/file.rs"
                     })
                     .collect();
                 if !file_strs.is_empty() {

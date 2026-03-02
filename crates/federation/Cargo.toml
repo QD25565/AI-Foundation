@@ -2,7 +2,7 @@
 name = "federation"
 version = "0.1.0"
 edition = "2021"
-description = "Decentralized federation protocol for AI-Foundation Teambooks"
+description = "Decentralized federation protocol for AI-Foundation Deep Net"
 authors = ["AI-Foundation Team"]
 
 [lib]

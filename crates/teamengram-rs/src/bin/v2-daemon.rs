@@ -7,7 +7,7 @@
 //!
 //! Usage:
 //!   v2-daemon                    # Run daemon
-//!   v2-daemon --register beta-002  # Register an AI's outbox
+//!   v2-daemon --register lyra-584  # Register an AI's outbox
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -340,8 +340,10 @@ fn run_daemon(data_dir: &PathBuf) {
         Ok(()) => {
             let stats = sequencer.stats();
             eprintln!("|SHUTDOWN COMPLETE|");
-            eprintln!("EventsProcessed:{}", stats.events_processed.load(Ordering::Relaxed));
-            eprintln!("BatchesProcessed:{}", stats.batches_processed.load(Ordering::Relaxed));
+            eprintln!("EventsProcessed:{}", stats.events_processed());
+            eprintln!("BatchesProcessed:{}", stats.batches_processed());
+            eprintln!("PressureDrains:{}", stats.pressure_drains());
+            eprintln!("CorruptionRepairs:{}", stats.corruption_repairs());
         }
         Err(e) => {
             eprintln!("CRITICAL: Sequencer failed: {}", e);

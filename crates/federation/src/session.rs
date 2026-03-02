@@ -37,13 +37,32 @@ use crate::{
     FederationError, Result, TeambookIdentity,
 };
 use ed25519_dalek::SigningKey;
+use rand::RngCore;
 use tracing::{debug, info, warn};
 
 /// Current federation protocol version.
-pub const PROTOCOL_VERSION: u32 = 1;
+///
+/// Bumped to 2 for PQC Phase 1: FederationMessage now uses algorithm-agile
+/// FederationSignature instead of raw Ed25519 Signature. Peers at version 1
+/// cannot deserialize version 2 messages (signature wire format changed).
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// Handshake timeout in seconds.
 const HANDSHAKE_TIMEOUT_SECS: u64 = 30;
+
+/// Maximum CBOR payload size for session-level messages.
+///
+/// Defense-in-depth: transport layer already caps at MAX_MESSAGE_SIZE (2MB),
+/// but session-level messages (event push/response, presence) should never
+/// approach that. Individual FederationMessages are validated separately.
+const MAX_CBOR_PAYLOAD: usize = 1_500_000; // 1.5MB — generous for 500-event batches
+
+/// Generate a random 32-byte handshake nonce (hex-encoded).
+fn generate_nonce() -> String {
+    let mut bytes = [0u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    hex::encode(bytes)
+}
 
 // ---------------------------------------------------------------------------
 // CBOR helpers
@@ -57,6 +76,15 @@ fn cbor_encode<T: serde::Serialize>(value: &T) -> Result<Vec<u8>> {
 }
 
 fn cbor_decode<T: serde::de::DeserializeOwned>(data: &[u8]) -> Result<T> {
+    if data.len() > MAX_CBOR_PAYLOAD {
+        return Err(FederationError::SerializationError(format!(
+            "CBOR payload too large: {} > {MAX_CBOR_PAYLOAD}",
+            data.len()
+        )));
+    }
+    // Safety: all target types (EventPushRequest, EventPushResponse,
+    // PresencePushRequest) are concrete structs with no recursive fields,
+    // so deserialization depth is bounded by the type definition.
     ciborium::from_reader(data)
         .map_err(|e| FederationError::SerializationError(format!("CBOR decode failed: {e}")))
 }
@@ -117,12 +145,14 @@ impl PeerSession {
             FederationError::ConnectionFailed(format!("Failed to open handshake stream: {e}"))
         })?;
 
-        // Send Hello
+        // Send Hello with fresh nonce to prevent replay
+        let nonce = generate_nonce();
         let hello = FederationMessage::new(
             &my_node_id,
             FederationPayload::Hello {
                 node: local_node.clone(),
                 protocol_version: PROTOCOL_VERSION,
+                handshake_nonce: nonce.clone(),
             },
             &signing_key,
         );
@@ -149,6 +179,7 @@ impl PeerSession {
                 protocol_version,
                 accepted,
                 ref rejection_reason,
+                ref hello_nonce,
             } => {
                 if !accepted {
                     return Err(FederationError::ConnectionFailed(format!(
@@ -161,6 +192,13 @@ impl PeerSession {
                 if !welcome_msg.verify(&node.pubkey) {
                     return Err(FederationError::AuthenticationFailed(
                         "Welcome message signature verification failed".to_string(),
+                    ));
+                }
+
+                // Verify nonce echo — prevents replay of captured handshakes
+                if hello_nonce != &nonce {
+                    return Err(FederationError::AuthenticationFailed(
+                        "Welcome nonce mismatch — possible replay attack".to_string(),
                     ));
                 }
 
@@ -236,6 +274,7 @@ impl PeerSession {
             FederationPayload::Hello {
                 node: ref remote_node,
                 protocol_version,
+                ref handshake_nonce,
             } => {
                 // Verify the Hello message signature
                 if !hello_msg.verify(&remote_node.pubkey) {
@@ -244,6 +283,7 @@ impl PeerSession {
                         local_node,
                         false,
                         Some("Signature verification failed"),
+                        handshake_nonce,
                         &signing_key,
                     );
                     let _ = send_message(&mut send, &reject.to_bytes()?).await;
@@ -260,6 +300,7 @@ impl PeerSession {
                         local_node,
                         false,
                         Some("Unknown peer — not in local registry"),
+                        handshake_nonce,
                         &signing_key,
                     );
                     let _ = send_message(&mut send, &reject.to_bytes()?).await;
@@ -277,12 +318,13 @@ impl PeerSession {
                     );
                 }
 
-                // Send Welcome (accepted)
+                // Send Welcome (accepted) — echo the Hello nonce
                 let welcome = Self::build_welcome(
                     &my_node_id,
                     local_node,
                     true,
                     None,
+                    handshake_nonce,
                     &signing_key,
                 );
                 send_message(&mut send, &welcome.to_bytes()?).await?;
@@ -437,6 +479,7 @@ impl PeerSession {
         local_node: &FederationNode,
         accepted: bool,
         rejection_reason: Option<&str>,
+        hello_nonce: &str,
         signing_key: &SigningKey,
     ) -> FederationMessage {
         FederationMessage::new(
@@ -446,6 +489,7 @@ impl PeerSession {
                 protocol_version: PROTOCOL_VERSION,
                 accepted,
                 rejection_reason: rejection_reason.map(|s| s.to_string()),
+                hello_nonce: hello_nonce.to_string(),
             },
             signing_key,
         )
@@ -533,6 +577,7 @@ mod tests {
             FederationPayload::Hello {
                 node: node.clone(),
                 protocol_version: PROTOCOL_VERSION,
+                handshake_nonce: generate_nonce(),
             },
             &signing_key,
         );
@@ -549,12 +594,14 @@ mod tests {
     fn test_welcome_message_sign_verify() {
         let (_identity, node, signing_key) = make_identity_and_node("Responder");
         let node_id = node.node_id.clone();
+        let nonce = generate_nonce();
 
         let welcome = PeerSession::build_welcome(
             &node_id,
             &node,
             true,
             None,
+            &nonce,
             &signing_key,
         );
 
@@ -566,6 +613,7 @@ mod tests {
             &node,
             false,
             Some("test rejection"),
+            &nonce,
             &signing_key,
         );
         assert!(reject.verify(&node.pubkey));
@@ -575,12 +623,14 @@ mod tests {
     fn test_hello_welcome_cbor_roundtrip() {
         let (_identity, node, signing_key) = make_identity_and_node("TestNode");
         let node_id = node.node_id.clone();
+        let nonce = generate_nonce();
 
         let hello = FederationMessage::new(
             &node_id,
             FederationPayload::Hello {
                 node: node.clone(),
                 protocol_version: PROTOCOL_VERSION,
+                handshake_nonce: nonce.clone(),
             },
             &signing_key,
         );
@@ -592,15 +642,50 @@ mod tests {
         assert_eq!(restored.from, node_id);
         match restored.payload {
             FederationPayload::Hello {
-                protocol_version, ..
+                protocol_version,
+                ref handshake_nonce,
+                ..
             } => {
                 assert_eq!(protocol_version, PROTOCOL_VERSION);
+                assert_eq!(handshake_nonce, &nonce);
             }
             _ => panic!("Expected Hello payload"),
         }
 
         // Signature should still verify after roundtrip
         assert!(restored.verify(&node.pubkey));
+    }
+
+    #[test]
+    fn test_nonce_echo_in_welcome() {
+        let (_identity, node, signing_key) = make_identity_and_node("Responder");
+        let node_id = node.node_id.clone();
+        let nonce = generate_nonce();
+
+        let welcome = PeerSession::build_welcome(
+            &node_id,
+            &node,
+            true,
+            None,
+            &nonce,
+            &signing_key,
+        );
+
+        match welcome.payload {
+            FederationPayload::Welcome { ref hello_nonce, .. } => {
+                assert_eq!(hello_nonce, &nonce, "Welcome must echo the Hello nonce");
+            }
+            _ => panic!("Expected Welcome payload"),
+        }
+    }
+
+    #[test]
+    fn test_cbor_decode_rejects_oversized_payload() {
+        let oversized = vec![0u8; MAX_CBOR_PAYLOAD + 1];
+        let result = cbor_decode::<EventPushRequest>(&oversized);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("too large"), "Error should mention size: {err}");
     }
 
     #[test]

@@ -11,8 +11,8 @@
 //! ├─────────────────────────────────────────────────────┤
 //! │  Header: magic, version, num_mailboxes              │
 //! ├─────────────────────────────────────────────────────┤
-//! │  Mailbox 0: [ring buffer] AI_ID: beta-002           │
-//! │  Mailbox 1: [ring buffer] AI_ID: alpha-001           │
+//! │  Mailbox 0: [ring buffer] AI_ID: lyra-584           │
+//! │  Mailbox 1: [ring buffer] AI_ID: sage-724           │
 //! │  ...                                                │
 //! └─────────────────────────────────────────────────────┘
 //! ```
@@ -29,12 +29,16 @@ pub mod mailbox;
 pub mod region;
 pub mod zerocopy;
 pub mod bulletin;
+pub mod context;
+pub mod enrichment;
 
 pub use ring_buffer::SpscRingBuffer;
 pub use mailbox::{Mailbox, Message, MessageType};
 pub use region::SharedRegion;
 pub use bulletin::BulletinBoard;
 pub use zerocopy::{ZcMessage, ZcMessageType, ArchivedZcMessage, access_message, ZcMessageReader};
+pub use context::{ContextWriter, ContextReader, ContextFingerprint, ContextError};
+pub use enrichment::{extract_keywords, ContextAccumulator, scan_fp_bytes, RecallHit, RecentlyRecalled, engram_fp_path, compute_urgency, is_urgent, OwnedClaim, URGENCY_THRESHOLD, OutcomeRing, ToolOutcome, classify_outcome, format_anomaly_pulse};
 
 /// Default size for shared memory region (16MB)
 pub const DEFAULT_REGION_SIZE: usize = 16 * 1024 * 1024;

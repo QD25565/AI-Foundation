@@ -18,6 +18,16 @@ use std::sync::Arc;
 
 // Presence uses OS-level mutex detection - see wake::is_ai_online()
 
+/// Maximum content length for DMs and broadcasts (64 KB).
+/// Prevents memory exhaustion and storage bloat from oversized messages.
+const MAX_CONTENT_LEN: usize = 64 * 1024;
+
+/// Maximum length for AI_ID fields (128 bytes).
+const MAX_AI_ID_LEN: usize = 128;
+
+/// Maximum length for channel names (256 bytes).
+const MAX_CHANNEL_LEN: usize = 256;
+
 /// Record types stored in TeamEngram
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
@@ -447,6 +457,11 @@ impl TeamEngram {
 
     /// Insert a direct message
     pub fn insert_dm(&mut self, from: &str, to: &str, content: &str) -> Result<u64> {
+        anyhow::ensure!(content.len() <= MAX_CONTENT_LEN,
+            "DM content too large ({} bytes, max {})", content.len(), MAX_CONTENT_LEN);
+        anyhow::ensure!(from.len() <= MAX_AI_ID_LEN, "from_ai too long");
+        anyhow::ensure!(to.len() <= MAX_AI_ID_LEN, "to_ai too long");
+
         let id = self.next_id;
         self.next_id += 1;
 
@@ -557,6 +572,11 @@ impl TeamEngram {
 
     /// Insert a broadcast
     pub fn insert_broadcast(&mut self, from: &str, channel: &str, content: &str) -> Result<u64> {
+        anyhow::ensure!(content.len() <= MAX_CONTENT_LEN,
+            "Broadcast content too large ({} bytes, max {})", content.len(), MAX_CONTENT_LEN);
+        anyhow::ensure!(from.len() <= MAX_AI_ID_LEN, "from_ai too long");
+        anyhow::ensure!(channel.len() <= MAX_CHANNEL_LEN, "channel name too long");
+
         let id = self.next_id;
         self.next_id += 1;
 
@@ -1001,6 +1021,20 @@ impl TeamEngram {
 
     /// Claim a file
     pub fn claim_file(&mut self, claimer: &str, path: &str, working_on: &str, duration_mins: u32) -> Result<u64> {
+        // Path validation — reject dangerous or malformed paths
+        if path.is_empty() {
+            anyhow::bail!("file claim path cannot be empty");
+        }
+        if path.contains("..") {
+            anyhow::bail!("file claim path cannot contain '..' traversal");
+        }
+        let lower = path.to_lowercase();
+        for prefix in &["/etc/", "/root/", "/sys/", "/proc/", "/dev/", "c:\\windows\\"] {
+            if lower.starts_with(prefix) {
+                anyhow::bail!("file claim rejected: system path '{}'", path);
+            }
+        }
+
         let id = self.next_id;
         self.next_id += 1;
 
@@ -2291,15 +2325,15 @@ mod tests {
 
         let mut store = TeamEngram::open(&path).unwrap();
 
-        let id = store.insert_dm("beta-002", "alpha-001", "Hello Sage!").unwrap();
+        let id = store.insert_dm("lyra-584", "sage-724", "Hello Sage!").unwrap();
         assert_eq!(id, 1);
 
-        let dms = store.get_dms("alpha-001", 10).unwrap();
+        let dms = store.get_dms("sage-724", 10).unwrap();
         assert_eq!(dms.len(), 1);
 
         if let RecordData::DirectMessage(dm) = &dms[0].data {
-            assert_eq!(dm.from_ai, "beta-002");
-            assert_eq!(dm.to_ai, "alpha-001");
+            assert_eq!(dm.from_ai, "lyra-584");
+            assert_eq!(dm.to_ai, "sage-724");
             assert_eq!(dm.content, "Hello Sage!");
         } else {
             panic!("Expected DirectMessage");
@@ -2313,7 +2347,7 @@ mod tests {
 
         let mut store = TeamEngram::open(&path).unwrap();
 
-        store.insert_broadcast("gamma-003", "general", "Team update!").unwrap();
+        store.insert_broadcast("cascade-230", "general", "Team update!").unwrap();
 
         let broadcasts = store.get_broadcasts("general", 10).unwrap();
         assert_eq!(broadcasts.len(), 1);
@@ -2326,10 +2360,10 @@ mod tests {
 
         let mut store = TeamEngram::open(&path).unwrap();
 
-        store.update_presence("alpha-001", "active", "Working on TeamEngram").unwrap();
+        store.update_presence("sage-724", "active", "Working on TeamEngram").unwrap();
 
-        let presence = store.get_presence("alpha-001").unwrap().unwrap();
-        assert_eq!(presence.ai_id, "alpha-001");
+        let presence = store.get_presence("sage-724").unwrap().unwrap();
+        assert_eq!(presence.ai_id, "sage-724");
         assert_eq!(presence.status, "active");
     }
 
@@ -2341,7 +2375,7 @@ mod tests {
         let mut store = TeamEngram::open(&path).unwrap();
 
         // Queue a task
-        let task_id = store.queue_task("alpha-001", "Review the code", TaskPriority::Normal, "review").unwrap();
+        let task_id = store.queue_task("sage-724", "Review the code", TaskPriority::Normal, "review").unwrap();
         assert_eq!(task_id, 1);
 
         // Verify task exists by listing
@@ -2350,11 +2384,11 @@ mod tests {
         assert_eq!(tasks[0].0, task_id);
 
         // Claim the task
-        let claimed = store.claim_task(task_id, "beta-002").unwrap();
+        let claimed = store.claim_task(task_id, "lyra-584").unwrap();
         assert!(claimed, "Task should be claimable");
 
         // Complete the task
-        let completed = store.complete_task(task_id, "beta-002", "Looks good!").unwrap();
+        let completed = store.complete_task(task_id, "lyra-584", "Looks good!").unwrap();
         assert!(completed, "Task should be completable");
 
         // Verify final state

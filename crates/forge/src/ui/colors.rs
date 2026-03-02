@@ -199,7 +199,7 @@ pub const LOGO: &[&str] = &[
 ];
 
 /// Tagline for the CLI
-pub const TAGLINE: &str = "AI-Foundation CLI";
+pub const TAGLINE: &str = "Empowering AIs everywhere, always";
 
 /// Smaller logo for constrained spaces
 pub const LOGO_SMALL: &[&str] = &[

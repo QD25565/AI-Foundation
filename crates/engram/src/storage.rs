@@ -9,6 +9,7 @@ use crate::{
     crypto::EngramCipher,
     bloom::BloomFilter,
     error::Result,
+    fingerprint::FingerprintIndex256,
     graph::{GraphIndex, EdgeType},
     header::{EngramHeader, HEADER_SIZE, flags as header_flags},
     hnsw::HnswIndex,
@@ -170,6 +171,10 @@ pub struct Engram {
     /// Encryption cipher for note content
     cipher: EngramCipher,
 
+    /// Fingerprint index for sub-microsecond associative recall.
+    /// Stored as sidecar file (.engram.fp) alongside the main .engram file.
+    fingerprint_index: FingerprintIndex256,
+
     /// Cached BM25 corpus statistics (IDF + avgdl) — invalidated on note writes.
     /// Avoids rebuilding IDF from scratch on every recall call.
     bm25_cache: Option<BM25Corpus>,
@@ -241,9 +246,10 @@ impl Engram {
             vector_store: VectorStore::new(),
             hnsw_index: HnswIndex::new(),
             graph: GraphIndex::new(),
-            vault: Vault::new(&ai_id),
+            vault: Vault::new(&ai_id)?,
             recall_config: RecallConfig::default(),
-            cipher: EngramCipher::new(&ai_id),
+            cipher: EngramCipher::new(&ai_id)?,
+            fingerprint_index: FingerprintIndex256::new(),
             bm25_cache: None,
             bm25_cache_note_count: 0,
             cache_hits: 0,
@@ -254,6 +260,14 @@ impl Engram {
 
     /// Open an existing database
     fn open_existing(path: &Path, read_only: bool) -> Result<Self> {
+        // #15: Refuse to open symlinked .engram files (prevents symlink attacks)
+        let file_meta = std::fs::symlink_metadata(path)?;
+        if file_meta.file_type().is_symlink() {
+            return Err(EngramError::IntegrityError(
+                "refusing to open symlinked .engram file".into(),
+            ));
+        }
+
         let file = if read_only {
             OpenOptions::new().read(true).open(path)?
         } else {
@@ -290,9 +304,15 @@ impl Engram {
             vector_store: VectorStore::new(),
             hnsw_index: HnswIndex::new(),
             graph: GraphIndex::new(),
-            vault: Vault::new(&ai_id),
+            vault: Vault::new(&ai_id)?,
             recall_config: RecallConfig::default(),
-            cipher: EngramCipher::new(&ai_id),
+            cipher: EngramCipher::new(&ai_id)?,
+            fingerprint_index: {
+                // Try loading from sidecar file, fall back to empty
+                // FingerprintIndex256::load auto-promotes V1/V2 entries to 256-bit
+                let fp_path = FingerprintIndex256::sidecar_path(path);
+                FingerprintIndex256::load(&fp_path).unwrap_or_default()
+            },
             bm25_cache: None,
             bm25_cache_note_count: 0,
             cache_hits: 0,
@@ -309,6 +329,19 @@ impl Engram {
         } else {
             EngramHeader::read_from(&mut db.file)?
         };
+
+        // #16: Verify AI_ID ownership — prevent cross-AI file access
+        if ai_id != "default" {
+            use sha2::{Sha256, Digest};
+            let mut hasher = Sha256::new();
+            hasher.update(ai_id.as_bytes());
+            let expected_hash: [u8; 32] = hasher.finalize().into();
+            if db.header.ai_id_hash != expected_hash {
+                return Err(EngramError::IntegrityError(
+                    format!("AI_ID ownership mismatch: .engram file belongs to a different AI"),
+                ));
+            }
+        }
 
         // Try to load persisted indexes (O(1) startup)
         // If not available or invalid, fall back to rebuilding from note log (O(n))
@@ -335,6 +368,17 @@ impl Engram {
 
         if self.header.note_log_size == 0 {
             return Ok(());
+        }
+
+        // Validate note log offset+size against actual file size
+        let file_len = self.file.seek(SeekFrom::End(0))?;
+        let log_end = self.header.note_log_offset.checked_add(self.header.note_log_size)
+            .ok_or_else(|| EngramError::IntegrityError("note log offset+size overflow".into()))?;
+        if log_end > file_len {
+            return Err(EngramError::IntegrityError(format!(
+                "note log extends past EOF: offset={} size={} file_len={}",
+                self.header.note_log_offset, self.header.note_log_size, file_len
+            )));
         }
 
         // Use mmap for fast scanning if available
@@ -551,6 +595,9 @@ impl Engram {
                 .push(id);
         }
 
+        // Update fingerprint index for associative recall
+        self.fingerprint_index.upsert(id, content, tags);
+
         // Update header
         self.header.note_count += 1;
         self.header.active_notes += 1;
@@ -565,6 +612,51 @@ impl Engram {
         self.persist_indexes()?;
 
         // Invalidate BM25 corpus cache — note set changed
+        self.bm25_cache = None;
+
+        Ok(id)
+    }
+
+    /// Store a memory with prospective trigger keywords.
+    ///
+    /// Trigger keywords get 3x bloom weight in the fingerprint, causing this note
+    /// to surface automatically when the AI's working context matches the triggers.
+    /// Example: `remember_with_triggers("Check PQC status", &["security"], &["federation", "pqc"])`
+    /// will surface when federation-related work begins.
+    pub fn remember_with_triggers(&mut self, content: &str, tags: &[&str], triggers: &[&str]) -> Result<u64> {
+        if self.read_only {
+            return Err(EngramError::ReadOnly);
+        }
+
+        self.refresh_if_modified()?;
+
+        let id = self.next_id;
+        self.next_id += 1;
+
+        let entry = NoteEntry::new_encrypted(id, content, tags, true, &self.cipher)?;
+        self.write_note_entry(&entry)?;
+
+        let offset = self.header.note_log_offset + self.header.note_log_size - entry.total_size() as u64;
+        self.note_index.insert(id, offset);
+        self.temporal_index.push((entry.timestamp, id));
+
+        for tag in tags {
+            self.tag_bloom.insert(&tag.to_string());
+            self.tag_index
+                .entry(tag.to_string())
+                .or_insert_with(Vec::new)
+                .push(id);
+        }
+
+        // Fingerprint with trigger boost
+        self.fingerprint_index.upsert_with_triggers(id, content, tags, triggers);
+
+        self.header.note_count += 1;
+        self.header.active_notes += 1;
+        self.header.touch();
+        self.header.write_to(&mut self.file)?;
+
+        self.persist_indexes()?;
         self.bm25_cache = None;
 
         Ok(id)
@@ -599,6 +691,9 @@ impl Engram {
                 .or_insert_with(Vec::new)
                 .push(id);
         }
+
+        // Update fingerprint index for associative recall
+        self.fingerprint_index.upsert(id, content, tags);
 
         self.header.note_count += 1;
         self.header.active_notes += 1;
@@ -663,6 +758,11 @@ impl Engram {
             }
 
             total_bytes += bytes.len() as u64;
+        }
+
+        // Update fingerprint index for all batch items
+        for (i, (content, tags)) in items.iter().enumerate() {
+            self.fingerprint_index.upsert(ids[i], content, tags);
         }
 
         // Update header once
@@ -734,6 +834,11 @@ impl Engram {
         // Invalidate cache
         self.cache.invalidate(id);
 
+        // Tombstone in fingerprint index (belt-and-suspenders for sidecar consumers)
+        self.fingerprint_index.mark_tombstoned(id);
+        // Remove from fingerprint index
+        self.fingerprint_index.remove(id);
+
         // Update header
         self.header.active_notes -= 1;
         self.header.touch();
@@ -796,6 +901,9 @@ impl Engram {
 
         // Invalidate cache
         self.cache.invalidate(id);
+
+        // Update fingerprint index with new content/tags
+        self.fingerprint_index.upsert(id, final_content, final_tags);
 
         // Update header timestamp
         self.header.touch();
@@ -1180,6 +1288,119 @@ impl Engram {
         self.mmap.is_some()
     }
 
+    /// Rebuild fingerprint index from all existing notes using IDF-weighted SimHash.
+    ///
+    /// Call this after upgrading to fingerprint support, or when the .engram.fp
+    /// sidecar is missing/corrupt. Two-pass approach:
+    ///   1. Collect all notes and tokenize → build IDF table from corpus
+    ///   2. Compute IDF-weighted fingerprints (rare tokens contribute more)
+    ///
+    /// IDF weighting improves retrieval precision by ~10-15% vs uniform weighting
+    /// at zero scan-time cost (fingerprints are the same 128-bit format).
+    ///
+    /// Returns the number of notes fingerprinted.
+    pub fn backfill_fingerprints(&mut self) -> Result<usize> {
+        use crate::fingerprint::{
+            tokenize_and_stem, create_stemmer, IdfTable, Fingerprint256, FingerprintEntry256,
+        };
+
+        let ids: Vec<u64> = self.note_index.keys().copied().collect();
+        let stemmer = create_stemmer();
+
+        // Phase 1: Collect all notes and build tokenized corpus for IDF
+        let mut notes_data: Vec<(u64, String, Vec<String>)> = Vec::with_capacity(ids.len());
+        let mut corpus: Vec<Vec<String>> = Vec::with_capacity(ids.len());
+
+        let mut skipped = 0usize;
+        for id in &ids {
+            match self.get(*id) {
+                Ok(Some(note)) => {
+                    let mut tokens = tokenize_and_stem(&note.content, &stemmer);
+                    // Include tag tokens in corpus (same as from_text_with_idf bloom path)
+                    for tag in &note.tags {
+                        let lower = tag.to_lowercase();
+                        let stemmed = stemmer.stem(&lower).into_owned();
+                        if !stemmed.is_empty() {
+                            tokens.push(stemmed);
+                        }
+                    }
+                    corpus.push(tokens);
+                    notes_data.push((*id, note.content, note.tags));
+                }
+                Ok(None) => {} // tombstone or missing
+                Err(_) => {
+                    // Decryption error (wrong key) or corrupt entry — skip gracefully.
+                    // This allows backfill to work on mixed-key notebooks where some
+                    // notes were encrypted with a different AI_ID cipher.
+                    skipped += 1;
+                }
+            }
+        }
+        if skipped > 0 {
+            eprintln!("engram: backfill skipped {} notes (decrypt/read errors)", skipped);
+        }
+
+        // Phase 2: Build IDF table from full corpus
+        let idf = IdfTable::from_corpus(&corpus);
+
+        // Phase 3: Compute IDF-weighted 256-bit fingerprints
+        self.fingerprint_index = FingerprintIndex256::with_capacity(notes_data.len());
+
+        for (id, content, tags) in &notes_data {
+            let tag_refs: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
+            let fp = Fingerprint256::from_text_with_idf(content, &tag_refs, &idf);
+            self.fingerprint_index.upsert_entry(FingerprintEntry256 {
+                fingerprint: fp,
+                note_id: *id,
+                flags: 0,
+            });
+        }
+
+        // Mark pinned notes before saving sidecar
+        self.fingerprint_index.mark_pinned(&self.pinned);
+
+        // Save V3 sidecar (48-byte entries with 128-bit SimHash + 128-bit Bloom)
+        let fp_path = FingerprintIndex256::sidecar_path(&self.path);
+        self.fingerprint_index.save(&fp_path)
+            .map_err(|e| EngramError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("fingerprint save failed: {}", e),
+            )))?;
+
+        Ok(notes_data.len())
+    }
+
+    /// Get the current fingerprint index entry count.
+    pub fn fingerprint_count(&self) -> usize {
+        self.fingerprint_index.len()
+    }
+
+    /// Get a read-only reference to the fingerprint index entries.
+    pub fn fingerprint_entries(&self) -> &[crate::fingerprint::FingerprintEntry256] {
+        self.fingerprint_index.entries()
+    }
+
+    /// Scan fingerprint index for top-K matches against a query fingerprint.
+    ///
+    /// Used for calibration and debugging. Returns results sorted by score descending.
+    pub fn fingerprint_scan_top_k(
+        &self,
+        context: &crate::fingerprint::Fingerprint256,
+        k: usize,
+        max_hd: Option<u32>,
+    ) -> Vec<crate::fingerprint::ScanResult> {
+        self.fingerprint_index.scan_top_k(context, k, max_hd)
+    }
+
+    /// Scan fingerprint index for best single match.
+    pub fn fingerprint_scan_best(
+        &self,
+        context: &crate::fingerprint::Fingerprint256,
+        max_hd: Option<u32>,
+    ) -> Option<crate::fingerprint::ScanResult> {
+        self.fingerprint_index.scan_best(context, max_hd)
+    }
+
     // ═══════════════════════════════════════════════════════════════════
     // VECTOR OPERATIONS (Phase 4)
     // ═══════════════════════════════════════════════════════════════════
@@ -1492,7 +1713,9 @@ impl Engram {
         let mut keyword_scores: Vec<(u64, f32)> = candidates.iter().map(|(id, r)| (*id, r.keyword_score)).collect();
         let mut graph_scores: Vec<(u64, f32)> = candidates.iter().map(|(id, r)| (*id, r.graph_score)).collect();
 
-        crate::recall::normalize_scores(&mut vector_scores);
+        // Vector: quality-gated at 0.3 cosine sim. If best match is below 0.3,
+        // the signal is noise — attenuate instead of inflating to 1.0.
+        crate::recall::normalize_scores_gated(&mut vector_scores, 0.3);
         crate::recall::normalize_scores(&mut keyword_scores);
         crate::recall::normalize_scores(&mut graph_scores);
 
@@ -1644,6 +1867,15 @@ impl Engram {
         self.file.sync_all()?;
         self.remap()?;
 
+        // Mark pinned notes in fingerprint index before saving sidecar
+        self.fingerprint_index.mark_pinned(&self.pinned);
+
+        // Save fingerprint index to sidecar file (supplementary — don't fail main persist)
+        let fp_path = FingerprintIndex256::sidecar_path(&self.path);
+        if let Err(e) = self.fingerprint_index.save(&fp_path) {
+            eprintln!("Warning: failed to save fingerprint index: {}", e);
+        }
+
         // Update our known mtime after writing (for multi-process sync)
         self.last_index_mtime = std::fs::metadata(&self.path).ok().and_then(|m| m.modified().ok());
 
@@ -1726,6 +1958,16 @@ impl Engram {
     fn deserialize_indexes(&mut self, data: &[u8]) -> Result<()> {
         let mut cursor = 0;
 
+        // Safety limits for untrusted data — prevents OOM from corrupted/malicious files.
+        // These are generous upper bounds; real data is orders of magnitude smaller.
+        const MAX_NOTE_COUNT: usize = 10_000_000;    // 10M notes
+        const MAX_TEMPORAL_COUNT: usize = 10_000_000; // 10M entries
+        const MAX_PINNED_COUNT: usize = 100_000;      // 100K pinned
+        const MAX_TAG_COUNT: usize = 1_000_000;       // 1M tags
+        const MAX_TAG_LEN: usize = 1_024;             // 1KB per tag string
+        const MAX_IDS_PER_TAG: usize = 10_000_000;    // 10M note IDs per tag
+        const MAX_SECTION_LEN: usize = 512 * 1024 * 1024; // 512MB per section
+
         // Helper to read bytes
         let read_u64 = |cursor: &mut usize| -> Result<u64> {
             if *cursor + 8 > data.len() {
@@ -1759,6 +2001,11 @@ impl Engram {
 
         // note_index
         let note_count = read_u64(&mut cursor)? as usize;
+        if note_count > MAX_NOTE_COUNT {
+            return Err(EngramError::IntegrityError(
+                format!("Note count {} exceeds maximum {}", note_count, MAX_NOTE_COUNT)
+            ));
+        }
         self.note_index = HashMap::with_capacity(note_count);
         for _ in 0..note_count {
             let id = read_u64(&mut cursor)?;
@@ -1768,6 +2015,11 @@ impl Engram {
 
         // temporal_index
         let temporal_count = read_u64(&mut cursor)? as usize;
+        if temporal_count > MAX_TEMPORAL_COUNT {
+            return Err(EngramError::IntegrityError(
+                format!("Temporal count {} exceeds maximum {}", temporal_count, MAX_TEMPORAL_COUNT)
+            ));
+        }
         self.temporal_index = Vec::with_capacity(temporal_count);
         for _ in 0..temporal_count {
             let timestamp = read_i64(&mut cursor)?;
@@ -1777,6 +2029,11 @@ impl Engram {
 
         // pinned
         let pinned_count = read_u64(&mut cursor)? as usize;
+        if pinned_count > MAX_PINNED_COUNT {
+            return Err(EngramError::IntegrityError(
+                format!("Pinned count {} exceeds maximum {}", pinned_count, MAX_PINNED_COUNT)
+            ));
+        }
         self.pinned = Vec::with_capacity(pinned_count);
         for _ in 0..pinned_count {
             self.pinned.push(read_u64(&mut cursor)?);
@@ -1784,9 +2041,19 @@ impl Engram {
 
         // tag_index
         let tag_count = read_u64(&mut cursor)? as usize;
+        if tag_count > MAX_TAG_COUNT {
+            return Err(EngramError::IntegrityError(
+                format!("Tag count {} exceeds maximum {}", tag_count, MAX_TAG_COUNT)
+            ));
+        }
         self.tag_index = HashMap::with_capacity(tag_count);
         for _ in 0..tag_count {
             let tag_len = read_u32(&mut cursor)? as usize;
+            if tag_len > MAX_TAG_LEN {
+                return Err(EngramError::IntegrityError(
+                    format!("Tag length {} exceeds maximum {}", tag_len, MAX_TAG_LEN)
+                ));
+            }
             if cursor + tag_len > data.len() {
                 return Err(EngramError::IntegrityError("Tag data truncated".into()));
             }
@@ -1794,6 +2061,11 @@ impl Engram {
             cursor += tag_len;
 
             let id_count = read_u64(&mut cursor)? as usize;
+            if id_count > MAX_IDS_PER_TAG {
+                return Err(EngramError::IntegrityError(
+                    format!("ID count {} for tag exceeds maximum {}", id_count, MAX_IDS_PER_TAG)
+                ));
+            }
             let mut ids = Vec::with_capacity(id_count);
             for _ in 0..id_count {
                 ids.push(read_u64(&mut cursor)?);
@@ -1803,6 +2075,11 @@ impl Engram {
 
         // bloom filter
         let bloom_len = read_u64(&mut cursor)? as usize;
+        if bloom_len > MAX_SECTION_LEN {
+            return Err(EngramError::IntegrityError(
+                format!("Bloom filter length {} exceeds maximum {}", bloom_len, MAX_SECTION_LEN)
+            ));
+        }
         if cursor + bloom_len > data.len() {
             return Err(EngramError::IntegrityError("Bloom filter data truncated".into()));
         }
@@ -1814,6 +2091,11 @@ impl Engram {
         // vault (optional - may not exist in older files)
         if cursor + 8 <= data.len() {
             let vault_len = read_u64(&mut cursor)? as usize;
+            if vault_len > MAX_SECTION_LEN {
+                return Err(EngramError::IntegrityError(
+                    format!("Vault length {} exceeds maximum {}", vault_len, MAX_SECTION_LEN)
+                ));
+            }
             if cursor + vault_len <= data.len() {
                 self.vault.deserialize(&data[cursor..cursor + vault_len])?;
                 cursor += vault_len;
@@ -1823,6 +2105,11 @@ impl Engram {
         // vector_store (optional)
         if cursor + 8 <= data.len() {
             let vector_len = read_u64(&mut cursor)? as usize;
+            if vector_len > MAX_SECTION_LEN {
+                return Err(EngramError::IntegrityError(
+                    format!("Vector store length {} exceeds maximum {}", vector_len, MAX_SECTION_LEN)
+                ));
+            }
             if cursor + vector_len <= data.len() {
                 self.vector_store.deserialize(&data[cursor..cursor + vector_len])?;
                 cursor += vector_len;
@@ -1832,6 +2119,11 @@ impl Engram {
         // graph (optional)
         if cursor + 8 <= data.len() {
             let graph_len = read_u64(&mut cursor)? as usize;
+            if graph_len > MAX_SECTION_LEN {
+                return Err(EngramError::IntegrityError(
+                    format!("Graph length {} exceeds maximum {}", graph_len, MAX_SECTION_LEN)
+                ));
+            }
             if cursor + graph_len <= data.len() {
                 let _ = self.graph.deserialize(&data[cursor..cursor + graph_len]);
                 cursor += graph_len;
@@ -1841,6 +2133,11 @@ impl Engram {
         // hnsw index (optional — new in persistence v2)
         if cursor + 8 <= data.len() {
             let hnsw_len = read_u64(&mut cursor)? as usize;
+            if hnsw_len > MAX_SECTION_LEN {
+                return Err(EngramError::IntegrityError(
+                    format!("HNSW index length {} exceeds maximum {}", hnsw_len, MAX_SECTION_LEN)
+                ));
+            }
             if cursor + hnsw_len <= data.len() {
                 if let Some(hnsw) = crate::hnsw::HnswIndex::deserialize(&data[cursor..cursor + hnsw_len]) {
                     self.hnsw_index = hnsw;
@@ -1864,10 +2161,35 @@ impl Engram {
             return Ok(false);
         }
 
-        // Read the index section
-        self.file.seek(SeekFrom::Start(self.header.tag_index_offset))?;
+        // Validate section offset+size against actual file size to prevent
+        // seeking past EOF or allocating based on corrupt header values
+        let file_len = self.file.seek(SeekFrom::End(0))?;
 
-        let section_size = self.header.tag_index_size as usize;
+        let tag_offset = self.header.tag_index_offset;
+        let tag_size = self.header.tag_index_size;
+        let tag_end = tag_offset.checked_add(tag_size).ok_or_else(|| {
+            EngramError::IntegrityError("tag index offset+size overflow".into())
+        })?;
+        if tag_end > file_len {
+            return Err(EngramError::IntegrityError(format!(
+                "tag index section extends past EOF: offset={} size={} file_len={}",
+                tag_offset, tag_size, file_len
+            )));
+        }
+
+        // Cap section size to prevent OOM from corrupt header (512MB max)
+        const MAX_INDEX_SECTION: u64 = 512 * 1024 * 1024;
+        if tag_size > MAX_INDEX_SECTION {
+            return Err(EngramError::IntegrityError(format!(
+                "tag index section too large: {} bytes (max {})",
+                tag_size, MAX_INDEX_SECTION
+            )));
+        }
+
+        // Read the index section
+        self.file.seek(SeekFrom::Start(tag_offset))?;
+
+        let section_size = tag_size as usize;
         if section_size < 12 {
             return Ok(false);
         }
@@ -1918,6 +2240,27 @@ impl Engram {
                     self.hnsw_index.add(id, embedding);
                 }
             }
+        }
+
+        // Sanity check: if header reports notes but index has far fewer,
+        // the persisted index is stale — fall back to rebuild.
+        // Previous check only caught empty indexes; this also catches partial staleness
+        // (e.g. index saved when only a few notes were accessible due to key mismatch).
+        let expected = self.header.active_notes as usize;
+        let actual = self.note_index.len();
+        if expected > 0 && actual < expected / 2 {
+            eprintln!(
+                "engram: persisted index stale (header={} active, index={}), rebuilding",
+                expected, actual
+            );
+            self.note_index.clear();
+            self.pinned.clear();
+            self.tag_index.clear();
+            self.temporal_index.clear();
+            self.tag_bloom.clear();
+            self.next_id = 1;
+            self.cache.clear();
+            return Ok(false);
         }
 
         Ok(true)
@@ -2368,7 +2711,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.engram");
 
-        let mut results_before;
+        let results_before;
 
         // Phase 1: Create notes with embeddings, search, close
         {
@@ -2396,7 +2739,7 @@ mod tests {
 
         // Phase 2: Reopen and verify same search results
         {
-            let mut db = Engram::open(&path).unwrap();
+            let db = Engram::open(&path).unwrap();
 
             let mut query = vec![0.0f32; DIMS];
             let target = 2.0f32;
@@ -2777,5 +3120,111 @@ mod tests {
             let pr = db.get_pagerank(1);
             assert!(pr > 0.0, "PageRank should persist");
         }
+    }
+
+    #[test]
+    fn test_backfill_fingerprints() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.engram");
+
+        let mut db = Engram::open(&path).unwrap();
+
+        // Create notes — fingerprints are auto-upserted by remember()
+        db.remember("PostgreSQL connection pooling fixed the timeout", &["postgres", "fix"]).unwrap();
+        db.remember("Redis caching improved latency by 10x", &["redis", "performance"]).unwrap();
+        db.remember("Machine learning model training on GPU cluster", &["ml", "gpu"]).unwrap();
+        db.remember("Kubernetes pod autoscaling configuration", &["k8s", "devops"]).unwrap();
+        db.remember("TypeScript strict mode caught three bugs", &["typescript", "bugs"]).unwrap();
+
+        assert_eq!(db.fingerprint_count(), 5);
+
+        // Simulate a pre-upgrade database: clear the in-memory index
+        // (as if opened from a .engram without a .fp sidecar)
+        db.fingerprint_index = crate::fingerprint::FingerprintIndex256::new();
+        assert_eq!(db.fingerprint_count(), 0);
+
+        // Backfill should rebuild everything
+        let count = db.backfill_fingerprints().unwrap();
+        assert_eq!(count, 5);
+        assert_eq!(db.fingerprint_count(), 5);
+
+        // Verify sidecar file was created
+        let fp_path = crate::fingerprint::FingerprintIndex256::sidecar_path(&path);
+        assert!(fp_path.exists(), "Sidecar .engram.fp file should exist");
+
+        // Verify fingerprints are functional — scan should find a match
+        // 128-bit SimHash: HD range 0-128, use adaptive_max_hd_128 for small corpus
+        let context = crate::fingerprint::Fingerprint256::from_text("PostgreSQL connection pooling timeout fix", &[]);
+        let result = db.fingerprint_index.scan_best(&context, Some(50));
+        assert!(result.is_some(), "Scan should find a match after backfill");
+        let sr = result.unwrap();
+        assert!(sr.score > 0, "Match should have positive score");
+        // The PostgreSQL note (id=1) should be the best match
+        assert_eq!(sr.note_id, 1, "PostgreSQL note should be best match for PostgreSQL query");
+    }
+
+    #[test]
+    fn test_fingerprint_persistence_roundtrip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.engram");
+
+        // Phase 1: Create notes, persist, close
+        {
+            let mut db = Engram::open(&path).unwrap();
+
+            db.remember("Rust async runtime configuration", &["rust", "async"]).unwrap();
+            db.remember("Python data pipeline with pandas", &["python", "data"]).unwrap();
+            db.remember("Go concurrency with goroutines and channels", &["go", "concurrency"]).unwrap();
+
+            assert_eq!(db.fingerprint_count(), 3);
+            db.persist_indexes().unwrap();
+        }
+
+        // Phase 2: Reopen — sidecar should be loaded automatically
+        {
+            let db = Engram::open(&path).unwrap();
+            assert_eq!(db.fingerprint_count(), 3, "Fingerprints should survive reopen");
+
+            // Verify scan works on reopened index
+            let context = crate::fingerprint::Fingerprint256::from_text("Rust async tokio runtime", &[]);
+            let result = db.fingerprint_index.scan_best(&context, Some(50));
+            assert!(result.is_some(), "Scan should work after reopen");
+            let sr = result.unwrap();
+            assert_eq!(sr.note_id, 1, "Rust note should match Rust query after reopen");
+        }
+    }
+
+    #[test]
+    fn test_fingerprint_lifecycle_forget_update() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.engram");
+
+        let mut db = Engram::open(&path).unwrap();
+
+        let id1 = db.remember("Original content about databases", &["db"]).unwrap();
+        let id2 = db.remember("Content about networking protocols", &["network"]).unwrap();
+        assert_eq!(db.fingerprint_count(), 2);
+
+        // Forget should remove from fingerprint index
+        db.forget(id1).unwrap();
+        assert_eq!(db.fingerprint_count(), 1);
+
+        // Scan should no longer find the forgotten note
+        let context = crate::fingerprint::Fingerprint256::from_text("databases", &["db"]);
+        let result = db.fingerprint_index.scan_best(&context, Some(50));
+        if let Some(sr) = result {
+            assert_ne!(sr.note_id, id1, "Forgotten note should not appear in scan");
+        }
+
+        // Update should re-compute fingerprint
+        db.update(id2, Some("Updated content about machine learning"), None).unwrap();
+        assert_eq!(db.fingerprint_count(), 1);
+
+        // Scan for the updated content should match
+        let context = crate::fingerprint::Fingerprint256::from_text("machine learning", &[]);
+        let result = db.fingerprint_index.scan_best(&context, Some(50));
+        assert!(result.is_some(), "Updated note should be findable");
+        let sr = result.unwrap();
+        assert_eq!(sr.note_id, id2, "Updated note should match ML query");
     }
 }

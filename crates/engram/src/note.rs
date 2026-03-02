@@ -113,7 +113,11 @@ impl NoteEntry {
             tags_len: tags_data.len() as u16, updated_at: 0, ttl_hours: 0, tags_data, content_data })
     }
 
-    pub fn total_size(&self) -> usize { NOTE_HEADER_SIZE + self.tags_len as usize + self.content_len as usize }
+    pub fn total_size(&self) -> usize {
+        NOTE_HEADER_SIZE
+            .saturating_add(self.tags_len as usize)
+            .saturating_add(self.content_len as usize)
+    }
     pub fn is_tombstone(&self) -> bool { self.flags & flags::TOMBSTONE != 0 }
     pub fn is_pinned(&self) -> bool { self.flags & flags::PINNED != 0 }
     pub fn is_encrypted(&self) -> bool { self.flags & flags::ENCRYPTED != 0 }
@@ -143,7 +147,13 @@ impl NoteEntry {
         let updated_at = u32::from_le_bytes(bytes[26..30].try_into().unwrap());
         // bytes[30..32] = ttl_hours (was _padding[4..6]; old files read 0 → "no expiry")
         let ttl_hours = u16::from_le_bytes(bytes[30..32].try_into().unwrap());
-        if bytes.len() < NOTE_HEADER_SIZE + tags_len as usize + content_len as usize {
+        let total_size = (NOTE_HEADER_SIZE)
+            .checked_add(tags_len as usize)
+            .and_then(|v| v.checked_add(content_len as usize))
+            .ok_or_else(|| EngramError::IntegrityError(
+                format!("note {} entry size overflow: tags_len={} content_len={}", id, tags_len, content_len),
+            ))?;
+        if bytes.len() < total_size {
             return Err(EngramError::InvalidNoteEntry(id));
         }
         let tags_start = NOTE_HEADER_SIZE;

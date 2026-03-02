@@ -8,7 +8,7 @@
 //!
 //! Usage:
 //! ```ignore
-//! let client = V2Client::open("beta-002", None)?;
+//! let client = V2Client::open("lyra-584", None)?;
 //! client.broadcast("general", "Hello team!")?;
 //! let messages = client.recent_broadcasts(10)?;
 //! ```
@@ -22,6 +22,10 @@ use crate::outbox::{OutboxProducer, OutboxConsumer};
 use crate::event_log::{EventLogReader, EventLogWriter};
 use crate::view::ViewEngine;
 use crate::compat_types::{Message, MessageType};
+
+/// Maximum events to scan in outbox fallback lookups.
+/// Prevents CPU exhaustion if outbox accumulates many unprocessed events.
+const MAX_OUTBOX_SCAN: usize = 1000;
 
 /// V2 Client error types
 #[derive(Debug)]
@@ -235,7 +239,7 @@ impl V2Client {
                 Ok(None) => break,
 
                 Err(e) => {
-                    eprintln!("[V2] Corrupted event in get_pending_dm_senders, stopping scan: {}", e);
+                    tracing::warn!("[V2] Corrupted event in get_pending_dm_senders, stopping scan: {}", e);
                     break;
                 }
 
@@ -784,7 +788,7 @@ impl V2Client {
 
         // Fallback: scan outbox for pending DIALOGUE_START with matching timestamp
         if let Ok(consumer) = OutboxConsumer::open(&self.ai_id, Some(&self.base_dir)) {
-            for event_result in consumer.peek_all_pending() {
+            for event_result in consumer.peek_all_pending().into_iter().take(MAX_OUTBOX_SCAN) {
                 if let Ok(event) = event_result {
                     if event.header.event_type == event_type::DIALOGUE_START
                         && event.header.timestamp == dialogue_id
@@ -908,7 +912,7 @@ impl V2Client {
         // Fallback: scan outbox for pending TASK_CREATE with matching timestamp
         // (event hasn't been processed by daemon yet)
         if let Ok(consumer) = OutboxConsumer::open(&self.ai_id, Some(&self.base_dir)) {
-            for event_result in consumer.peek_all_pending() {
+            for event_result in consumer.peek_all_pending().into_iter().take(MAX_OUTBOX_SCAN) {
                 if let Ok(event) = event_result {
                     if event.header.event_type == event_type::TASK_CREATE
                         && event.header.timestamp == task_id
@@ -956,7 +960,7 @@ impl V2Client {
         match OutboxConsumer::open(&self.ai_id, Some(&self.base_dir)) {
             Ok(consumer) => {
                 let pending = consumer.peek_all_pending();
-                for event_result in pending {
+                for event_result in pending.into_iter().take(MAX_OUTBOX_SCAN) {
                     match event_result {
                         Ok(event) => {
                             if event.header.event_type == event_type::TASK_CREATE {
@@ -976,13 +980,13 @@ impl V2Client {
                             }
                         }
                         Err(e) => {
-                            eprintln!("[V2] Skipping corrupted outbox event in task scan: {}", e);
+                            tracing::warn!("[V2] Skipping corrupted outbox event in task scan: {}", e);
                         }
                     }
                 }
             }
             Err(e) => {
-                eprintln!("[V2] Failed to open outbox for task scan: {}", e);
+                tracing::warn!("[V2] Failed to open outbox for task scan: {}", e);
             }
         }
 
@@ -1149,7 +1153,7 @@ impl V2Client {
 
         // Read-your-own-writes: scan outbox for pending PROJECT_CREATE events
         if let Ok(consumer) = OutboxConsumer::open(&self.ai_id, Some(&self.base_dir)) {
-            for event_result in consumer.peek_all_pending() {
+            for event_result in consumer.peek_all_pending().into_iter().take(MAX_OUTBOX_SCAN) {
                 if let Ok(event) = event_result {
                     if event.header.event_type == event_type::PROJECT_CREATE {
                         if let EventPayload::ProjectCreate(payload) = &event.payload {
@@ -1179,7 +1183,7 @@ impl V2Client {
 
         // Read-your-own-writes: outbox fallback
         if let Ok(consumer) = OutboxConsumer::open(&self.ai_id, Some(&self.base_dir)) {
-            for event_result in consumer.peek_all_pending() {
+            for event_result in consumer.peek_all_pending().into_iter().take(MAX_OUTBOX_SCAN) {
                 if let Ok(event) = event_result {
                     if event.header.event_type == event_type::PROJECT_CREATE
                         && event.header.timestamp == project_id
@@ -1248,7 +1252,7 @@ impl V2Client {
 
         // Read-your-own-writes: scan outbox for pending FEATURE_CREATE events
         if let Ok(consumer) = OutboxConsumer::open(&self.ai_id, Some(&self.base_dir)) {
-            for event_result in consumer.peek_all_pending() {
+            for event_result in consumer.peek_all_pending().into_iter().take(MAX_OUTBOX_SCAN) {
                 if let Ok(event) = event_result {
                     if event.header.event_type == event_type::FEATURE_CREATE {
                         if let EventPayload::FeatureCreate(payload) = &event.payload {
@@ -1282,7 +1286,7 @@ impl V2Client {
 
         // Read-your-own-writes: outbox fallback
         if let Ok(consumer) = OutboxConsumer::open(&self.ai_id, Some(&self.base_dir)) {
-            for event_result in consumer.peek_all_pending() {
+            for event_result in consumer.peek_all_pending().into_iter().take(MAX_OUTBOX_SCAN) {
                 if let Ok(event) = event_result {
                     if event.header.event_type == event_type::FEATURE_CREATE
                         && event.header.timestamp == feature_id
@@ -1412,7 +1416,7 @@ impl V2Client {
         let mut temp_reader = match EventLogReader::open(Some(&self.base_dir)) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("[V2] Event log reader open failed in get_ai_learnings: {}", e);
+                tracing::warn!("[V2] Event log reader open failed in get_ai_learnings: {}", e);
                 return Ok(Vec::new());
             }
         };
@@ -1460,7 +1464,7 @@ impl V2Client {
                 }
                 Ok(None) => break,
                 Err(e) => {
-                    eprintln!("[V2] Corrupted event in get_ai_learnings, stopping scan: {}", e);
+                    tracing::warn!("[V2] Corrupted event in get_ai_learnings, stopping scan: {}", e);
                     break;
                 }
             }
@@ -1487,7 +1491,7 @@ impl V2Client {
         let mut temp_reader = match EventLogReader::open(Some(&self.base_dir)) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("[V2] Event log reader open failed in get_team_playbook: {}", e);
+                tracing::warn!("[V2] Event log reader open failed in get_team_playbook: {}", e);
                 return Ok(Vec::new());
             }
         };
@@ -1532,7 +1536,7 @@ impl V2Client {
                 }
                 Ok(None) => break,
                 Err(e) => {
-                    eprintln!("[V2] Corrupted event in get_team_playbook, stopping scan: {}", e);
+                    tracing::warn!("[V2] Corrupted event in get_team_playbook, stopping scan: {}", e);
                     break;
                 }
             }
@@ -1577,7 +1581,7 @@ impl V2Client {
         let mut temp_reader = match EventLogReader::open(Some(&self.base_dir)) {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("[V2] Event log reader open failed in get_trust_records: {}", e);
+                tracing::warn!("[V2] Event log reader open failed in get_trust_records: {}", e);
                 return Ok(Vec::new());
             }
         };
@@ -1589,7 +1593,7 @@ impl V2Client {
                 Ok(Some(e)) => e,
                 Ok(None) => break,
                 Err(e) => {
-                    eprintln!("[V2] Corrupted event in get_trust_records, stopping scan: {}", e);
+                    tracing::warn!("[V2] Corrupted event in get_trust_records, stopping scan: {}", e);
                     break;
                 }
             };
