@@ -459,6 +459,7 @@ impl BulletinBoard {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&path)
             .context("Failed to open bulletin file")?;
 

@@ -134,7 +134,7 @@ pub fn parse_team_status(text: &str) -> TeamStatus {
 
         // "Team: N online"
         if let Some(rest) = line.strip_prefix("Team:") {
-            if let Some(n_str) = rest.trim().split_whitespace().next() {
+            if let Some(n_str) = rest.split_whitespace().next() {
                 online_count = n_str.parse().unwrap_or(0);
             }
             continue;
@@ -177,8 +177,8 @@ fn parse_member_line(line: &str) -> Option<TeamMember> {
         "now".to_string()
     } else {
         status_info
-            .splitn(2, " - ")
-            .nth(1)
+            .split_once(" - ")
+            .map(|(_, rest)| rest)
             .unwrap_or("unknown")
             .to_string()
     };
@@ -587,7 +587,7 @@ pub fn parse_note_search(text: &str) -> Vec<NoteSearchResult> {
             results.push(NoteSearchResult {
                 id,
                 content: line.trim_end_matches("...").to_string(),
-                tags: current_tags.drain(..).collect(),
+                tags: std::mem::take(&mut current_tags),
                 score: current_score,
             });
         }

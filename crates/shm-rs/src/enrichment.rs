@@ -143,7 +143,7 @@ pub fn extract_keywords(tool_name: &str, tool_input: &serde_json::Value) -> Vec<
 /// Split a file path into keyword tokens.
 /// "/mnt/c/Users/.../engram/src/fingerprint.rs" → ["engram", "src", "fingerprint", "rs"]
 fn split_path_keywords(path: &str) -> Vec<String> {
-    path.split(|c: char| c == '/' || c == '\\' || c == '.')
+    path.split(['/', '\\', '.'])
         .filter(|s| !s.is_empty() && s.len() > 1)
         // Skip common path prefixes that add no signal
         .filter(|s| !matches!(*s, "mnt" | "Users" | "Desktop" | "home" | "src" | "bin" | "lib"))
@@ -183,7 +183,7 @@ fn extract_code_tokens(content: &str, max: usize) -> Vec<String> {
 fn extract_command_keywords(cmd: &str) -> Vec<String> {
     cmd.split_whitespace()
         .filter(|s| !s.starts_with('-') && !s.starts_with('|') && !s.starts_with('>'))
-        .flat_map(|s| split_to_tokens(s))
+        .flat_map(split_to_tokens)
         .filter(|s| {
             !matches!(
                 s.as_str(),
@@ -301,17 +301,17 @@ impl ContextAccumulator {
         let mut counters = [0i32; 64];
         for token in &self.keywords {
             let h = xxh3::xxh3_64(token.as_bytes());
-            for i in 0..64 {
+            for (i, counter) in counters.iter_mut().enumerate() {
                 if (h >> i) & 1 == 1 {
-                    counters[i] += 1;
+                    *counter += 1;
                 } else {
-                    counters[i] -= 1;
+                    *counter -= 1;
                 }
             }
         }
         let mut simhash: u64 = 0;
-        for i in 0..64 {
-            if counters[i] > 0 {
+        for (i, counter) in counters.iter().enumerate() {
+            if *counter > 0 {
                 simhash |= 1u64 << i;
             }
         }
@@ -370,9 +370,9 @@ const FP_VERSION_V1: u16 = 1;
 /// V2 format version
 const FP_VERSION_V2: u16 = 2;
 /// V3 format version (256-bit: 128-bit SimHash + 128-bit Bloom, 48-byte entries)
-const FP_VERSION_V3: u16 = 3;
+const _FP_VERSION_V3: u16 = 3;
 /// V3 entry size: simhash[0](8) + simhash[1](8) + bloom[0](8) + bloom[1](8) + note_id(8) + flags(1) + reserved(7) = 48
-const FP_ENTRY_SIZE_V3: usize = 48;
+const _FP_ENTRY_SIZE_V3: usize = 48;
 /// Skip this entry during recall (e.g., pinned note already in context)
 const FLAG_SKIP_RECALL: u8 = 0x01;
 /// Entry is tombstoned (note deleted)
@@ -481,7 +481,7 @@ pub fn scan_fp_bytes(
 
         let note_id = u64::from_le_bytes(data[offset + 16..offset + 24].try_into().ok()?);
         let score = overlap * 3 + (64 - hd);
-        let dominated = best.as_ref().map_or(false, |b| score <= b.score);
+        let dominated = best.as_ref().is_some_and(|b| score <= b.score);
         if !dominated {
             best = Some(RecallHit {
                 note_id,
@@ -658,11 +658,11 @@ fn claim_recency_weight(age_secs: u64) -> f32 {
 /// "/mnt/c/.../engram/src/storage.rs" → "storage"
 fn extract_claim_keyword(path: &str) -> String {
     // Take the filename without extension
-    path.rsplit(|c: char| c == '/' || c == '\\')
+    path.rsplit(['/', '\\'])
         .next()
         .unwrap_or("")
         .rsplit('.')
-        .last()
+        .next_back()
         .unwrap_or("")
         .to_lowercase()
 }
@@ -682,16 +682,11 @@ const ANOMALY_ERROR_THRESHOLD: usize = 3;
 const ANOMALY_MIN_FILLED: usize = 5;
 
 /// Outcome of a single tool call.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ToolOutcome {
+    #[default]
     Ok,
     Err,
-}
-
-impl Default for ToolOutcome {
-    fn default() -> Self {
-        ToolOutcome::Ok
-    }
 }
 
 /// Fixed-size ring buffer tracking the last 10 tool call outcomes.

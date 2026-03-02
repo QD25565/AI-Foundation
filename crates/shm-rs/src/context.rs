@@ -580,7 +580,7 @@ mod tests {
         let path = dir.path().join("context_bad-ai.shm");
 
         // Write 64 bytes of garbage (wrong magic)
-        std::fs::write(&path, &[0xFFu8; CONTEXT_SIZE]).expect("write garbage");
+        std::fs::write(&path, [0xFFu8; CONTEXT_SIZE]).expect("write garbage");
 
         let file = std::fs::File::open(&path).expect("open");
         let mmap = unsafe { memmap2::Mmap::map(&file).expect("mmap") };

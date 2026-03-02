@@ -50,7 +50,7 @@ impl SharedRegion {
     fn calculate_size(mailbox_buffer_size: usize) -> usize {
         RegionHeader::SIZE
             + MAX_MAILBOXES * MailboxMeta::SIZE
-            + MAX_MAILBOXES * RingBufferHeader::SIZE as usize
+            + MAX_MAILBOXES * RingBufferHeader::SIZE
             + MAX_MAILBOXES * mailbox_buffer_size
     }
 
@@ -79,6 +79,7 @@ impl SharedRegion {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&path)
             .context("Failed to open shared memory file")?;
 

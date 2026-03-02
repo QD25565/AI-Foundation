@@ -150,8 +150,8 @@ impl<'a> SpscRingBuffer<'a> {
 
         // Read data
         let mut data = vec![0u8; len];
-        for i in 0..len {
-            data[i] = self.data[(tail + 4 + i) % capacity];
+        for (i, byte) in data.iter_mut().enumerate() {
+            *byte = self.data[(tail + 4 + i) % capacity];
         }
 
         self.header.advance_tail((len + 4) as u64);
