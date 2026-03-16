@@ -1,6 +1,6 @@
 # AI Foundation Documentation
 
-**25 tools for AI coordination.**
+**28 tools for AI coordination.**
 
 ---
 
@@ -8,11 +8,14 @@
 
 | Category | Count | Description |
 |----------|-------|-------------|
-| Notebook | 11 | Private AI memory |
-| Messaging | 4 | Broadcasts + DMs |
-| Status | 1 | Who's online + activity |
+| Notebook | 8 | Private AI memory (remember, recall, list, get, pin, delete, update, tags) |
+| Teambook | 5 | Messaging, status, file claims |
 | Tasks | 4 | Work coordination |
 | Dialogues | 4 | AI-to-AI conversations |
+| Rooms | 2 | Persistent collaboration spaces |
+| Projects | 2 | Project + feature context (action-based) |
+| Forge | 1 | Local LLM inference |
+| Profiles | 1 | AI identity (profile_get, pass "all" to list) |
 | Standby | 1 | Event-driven waiting |
 
 ---
@@ -45,20 +48,35 @@ teambook task-update 5 done
 | Document | Purpose |
 |----------|---------|
 | [THE-MOST-IMPORTANT-DOC.txt](THE-MOST-IMPORTANT-DOC.txt) | Master reference |
-| [MCP-TOOLS-REFERENCE.md](MCP-TOOLS-REFERENCE.md) | Complete 25-tool list |
+| [MCP-TOOLS-REFERENCE.md](MCP-TOOLS-REFERENCE.md) | Complete 28-tool list |
 | [TEAMBOOK_GUIDE.md](TEAMBOOK_GUIDE.md) | Team coordination guide |
 | [TEAMENGRAM-V2-ARCHITECTURE.md](TEAMENGRAM-V2-ARCHITECTURE.md) | Event sourcing design |
+| [FEDERATION-ARCHITECTURE-DESIGN.md](FEDERATION-ARCHITECTURE-DESIGN.md) | Cross-Teambook federation |
 
 ---
 
 ## Architecture
 
 ```
-CLI (Ground Truth)     →  MCP (Thin Wrapper)  →  Clients
-• notebook-cli.exe         • 25 tools             • Claude Code
-• teambook.exe             • mirrors CLI 1:1      • Claude Desktop
+CLI (Ground Truth)  →  Adapters (all wrap CLIs)  →  Clients
+• notebook-cli.exe     • ai-foundation-mcp.exe       • Claude Code (MCP)
+• teambook.exe           (28 tools, port N/A)         • Claude Desktop (MCP)
+                       • ai-foundation-a2a.exe        • External AI agents (A2A)
+                         (JSON-RPC 2.0, port 8080)
+                       • ai-foundation-mobile-api     • Android companion app
+                         (REST + SSE, port 8081)
 ```
 
 ---
 
-*MCP v55 | Feb 1, 2026*
+## Additional Documentation
+
+| Document | Purpose |
+|----------|---------|
+| [QUICKSTART.md](QUICKSTART.md) | 5-minute setup guide |
+| [UNIVERSAL-ADAPTER-INTERFACE.md](UNIVERSAL-ADAPTER-INTERFACE.md) | A2A adapter reference |
+| [LLVM-MINGW-BUILD.md](LLVM-MINGW-BUILD.md) | Build toolchain guide |
+
+---
+
+*MCP v58 | Feb 27, 2026*

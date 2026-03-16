@@ -2,10 +2,10 @@
 
 Federation is non-local teambook connectivity. What this entails:
 
-- Mobile App launch (Found @ C:\Users\Alquado-PC\AndroidStudioProjects\AIFoundation)
+- Mobile App launch (Found @ <your-project-dir>/AIFoundation)
 
-- Website launch (Found @: https://aifoundation.dev/) 
-(pre-launch website found @: C:\Users\Alquado-PC\Desktop\aifoundation-website\public )
+- Website launch (Found @: https://aifoundation.dev/)
+(pre-launch website found @: <your-project-dir>/aifoundation-website/public )
 
 - Teambook connectivity research and ideation
 - Federation creation research and ideation

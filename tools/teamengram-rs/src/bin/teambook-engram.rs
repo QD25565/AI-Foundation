@@ -26,7 +26,6 @@ use teamengram::{
     v2_client::V2Client,
 };
 use shm_rs::bulletin::BulletinBoard;
-use std::collections::HashSet;
 use std::io::{self, Read as IoRead};
 use serde::{Deserialize, Serialize};
 use chrono::{Utc, Timelike, Datelike};
@@ -89,9 +88,19 @@ impl PostToolHookState {
     fn save(&self, ai_id: &str) {
         let path = Self::state_path(ai_id);
         if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                eprintln!("[HOOK] Failed to create state dir {:?}: {}", parent, e);
+                return;
+            }
         }
-        let _ = std::fs::write(&path, serde_json::to_string(self).unwrap_or_default());
+        match serde_json::to_string(self) {
+            Ok(json) => {
+                if let Err(e) = std::fs::write(&path, json) {
+                    eprintln!("[HOOK] Failed to save state to {:?}: {}", path, e);
+                }
+            }
+            Err(e) => eprintln!("[HOOK] Failed to serialize state: {}", e),
+        }
     }
 
     fn seen_dm(&self, id: u64) -> bool {
@@ -191,6 +200,28 @@ fn file_action_type(tool: &str) -> Option<&'static str> {
     }
 }
 
+/// Build working_on context for auto-claim enrichment.
+/// Priority 1: AI's current in-progress task title
+/// Priority 2: Tool verb + filename (e.g., "editing auth.rs")
+fn build_working_on_context(v2: &mut V2Client, file_path: &str) -> String {
+    // Try to get in-progress task description
+    if let Ok(tasks) = v2.get_tasks() {
+        if let Some((_, desc, _, _, _)) = tasks.iter()
+            .find(|(_, _, _, status, _)| status == "in_progress")
+        {
+            // Truncate long task descriptions to keep claims readable
+            let truncated = if desc.len() > 80 { &desc[..80] } else { desc.as_str() };
+            return truncated.to_string();
+        }
+    }
+
+    // Fallback: editing + filename
+    let filename = file_path.split('/').last()
+        .or_else(|| file_path.split('\\').last())
+        .unwrap_or(file_path);
+    format!("editing {}", filename)
+}
+
 #[derive(Parser)]
 #[command(name = "teambook-engram")]
 #[command(about = "High-performance AI coordination (TeamEngram backend)", long_about = None)]
@@ -253,12 +284,12 @@ enum Commands {
 
     // ===== DIALOGUES (4 Consolidated Commands) =====
 
-    /// Create a new dialogue with another AI
+    /// Create a new dialogue with one or more AIs (n-party supported)
     #[command(name = "dialogue-create")]
     #[command(alias = "start-dialogue", alias = "dialogue", alias = "chat", alias = "converse", alias = "new-dialogue")]
     #[command(alias = "dialogue-start", alias = "create-dialogue", alias = "talk", alias = "begin-dialogue")]
     DialogueCreate {
-        /// Target AI to dialogue with
+        /// Target AI(s) to dialogue with. Comma-separated for n-party: "lyra-584,cascade-230"
         responder: String,
         /// Dialogue topic
         topic: String,
@@ -558,6 +589,42 @@ enum Commands {
         /// Number of messages to retrieve
         #[arg(default_value = "20")]
         limit: usize,
+    },
+
+    /// Mute a room for N minutes (timed only — no permanent mutes)
+    #[command(alias = "room-mute", alias = "mute-room", alias = "snooze-room")]
+    RoomMute {
+        /// Room ID
+        room_id: u64,
+        /// Duration in minutes
+        minutes: u32,
+    },
+
+    /// Conclude a room with a summary (closes the room)
+    #[command(alias = "room-conclude", alias = "close-room", alias = "conclude-room", alias = "room-close")]
+    RoomConclude {
+        /// Room ID
+        room_id: u64,
+        /// Optional conclusion / summary text
+        conclusion: Option<String>,
+    },
+
+    /// Pin a room message by its sequence ID
+    #[command(alias = "room-pin", alias = "pin-room-message", alias = "room-pin-msg")]
+    RoomPinMessage {
+        /// Room ID
+        room_id: u64,
+        /// Message sequence ID (from room-history output)
+        msg_seq_id: u64,
+    },
+
+    /// Unpin a room message
+    #[command(alias = "room-unpin", alias = "unpin-room-message", alias = "room-unpin-msg")]
+    RoomUnpinMessage {
+        /// Room ID
+        room_id: u64,
+        /// Message sequence ID to unpin
+        msg_seq_id: u64,
     },
 
     // ===== UTILITIES =====
@@ -897,6 +964,55 @@ enum Commands {
     /// Outputs JSON to stdout for hook injection
     #[command(alias = "session-init", alias = "on-start")]
     HookSessionStart,
+
+    // ===== FEDERATION CONFIG =====
+
+    /// Show the current Teambook permission manifest (what this Teambook exposes to peers)
+    #[command(name = "federation-manifest", alias = "fed-manifest")]
+    FederationManifestShow,
+
+    /// Set a field in the permission manifest.
+    ///
+    /// FIELD examples: connection_mode, expose.presence, expose.broadcasts,
+    ///   expose.dialogues, expose.task_complete, expose.file_claims, expose.raw_events
+    ///
+    /// VALUE examples: off | connect_code | mutual_auth | machine_local | open
+    ///   (for booleans: true | false)
+    ///   (for enums: none | cross_team_only | all | concluded_only)
+    #[command(name = "federation-manifest-set", alias = "fed-manifest-set")]
+    FederationManifestSet {
+        /// Dot-separated field path (e.g. "expose.presence")
+        field: String,
+        /// New value as string
+        value: String,
+    },
+
+    /// Show your current federation consent record (your per-AI narrowing of the manifest)
+    #[command(name = "federation-consent", alias = "fed-consent")]
+    FederationConsentShow,
+
+    /// Update your federation consent record.
+    ///
+    /// FIELD: presence | broadcasts | task_complete | dialogues
+    /// VALUE: true | false | none | cross_team_only | all | concluded_only | inherit
+    ///   (use "inherit" to remove the override and fall back to manifest)
+    #[command(name = "federation-consent-update", alias = "fed-consent-update")]
+    FederationConsentUpdate {
+        /// Field to update
+        field: String,
+        /// New value (or "inherit" to remove override)
+        value: String,
+    },
+
+    // ===== MOBILE PAIRING =====
+
+    /// Approve a mobile app pairing request.
+    /// The mobile app displays a pairing code — run this on the server to grant access.
+    #[command(name = "mobile-pair")]
+    MobilePair {
+        /// The pairing code shown in the mobile app
+        code: String,
+    },
 }
 
 
@@ -951,10 +1067,7 @@ async fn main() -> Result<()> {
     if let Commands::OutboxRepair { ai_id: target_ai, fix } = &cli.command {
         use teamengram::outbox::{OutboxConsumer, list_outboxes, outbox_path};
 
-        let base_dir = dirs::data_local_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".ai-foundation")
-            .join("v2");
+        let base_dir = teamengram::store::ai_foundation_base_dir().join("v2");
 
         println!("|OUTBOX CHECK|");
 
@@ -1021,6 +1134,135 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
+    // ===== FEDERATION CONFIG COMMANDS =====
+    // These operate directly on TOML files — no daemon, no V2 store.
+
+    let fed_dir = dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".ai-foundation")
+        .join("federation");
+
+    if let Commands::FederationManifestShow = &cli.command {
+        let manifest_path = fed_dir.join("manifest.toml");
+        if !manifest_path.exists() {
+            println!("# No manifest.toml found — safe-closed defaults are active.");
+            println!("# Create one with: teambook federation-manifest-set <field> <value>");
+            println!();
+            println!("connection_mode = \"off\"");
+            println!("inbound_actions = \"none\"");
+            println!();
+            println!("[expose]");
+            println!("presence = false");
+            println!("broadcasts = \"none\"");
+            println!("dialogues = \"none\"");
+            println!("task_complete = false");
+            println!("file_claims = false");
+            println!("raw_events = false");
+        } else {
+            let content = std::fs::read_to_string(&manifest_path)?;
+            println!("{}", content);
+        }
+        return Ok(());
+    }
+
+    if let Commands::FederationManifestSet { field, value } = &cli.command {
+        let manifest_path = fed_dir.join("manifest.toml");
+        let mut doc: toml::Value = if manifest_path.exists() {
+            let content = std::fs::read_to_string(&manifest_path)?;
+            toml::from_str(&content).unwrap_or(toml::Value::Table(toml::map::Map::new()))
+        } else {
+            toml::Value::Table(toml::map::Map::new())
+        };
+
+        // Parse the new value
+        let new_val: toml::Value = if value == "true" {
+            toml::Value::Boolean(true)
+        } else if value == "false" {
+            toml::Value::Boolean(false)
+        } else {
+            toml::Value::String(value.clone())
+        };
+
+        // Navigate dot-separated path and set
+        let parts: Vec<&str> = field.splitn(2, '.').collect();
+        if parts.len() == 2 {
+            let table = doc.as_table_mut()
+                .ok_or_else(|| anyhow::anyhow!("manifest root is not a table"))?;
+            let subtable = table
+                .entry(parts[0])
+                .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+            subtable.as_table_mut()
+                .ok_or_else(|| anyhow::anyhow!("'{}' is not a table", parts[0]))?
+                .insert(parts[1].to_string(), new_val);
+        } else {
+            doc.as_table_mut()
+                .ok_or_else(|| anyhow::anyhow!("manifest root is not a table"))?
+                .insert(field.clone(), new_val);
+        }
+
+        std::fs::create_dir_all(&fed_dir)?;
+        let content = toml::to_string_pretty(&doc)
+            .map_err(|e| anyhow::anyhow!("failed to serialize manifest: {}", e))?;
+        std::fs::write(&manifest_path, &content)?;
+        println!("manifest updated: {} = {}", field, value);
+        return Ok(());
+    }
+
+    if let Commands::FederationConsentShow = &cli.command {
+        let consent_dir = fed_dir.join("consent");
+        let consent_path = consent_dir.join(format!("{}.toml", ai_id));
+        if !consent_path.exists() {
+            println!("# No consent record for {} — fully inheriting manifest.", ai_id);
+            println!("# Override with: teambook federation-consent-update <field> <value>");
+        } else {
+            let content = std::fs::read_to_string(&consent_path)?;
+            println!("{}", content);
+        }
+        return Ok(());
+    }
+
+    if let Commands::FederationConsentUpdate { field, value } = &cli.command {
+        let consent_dir = fed_dir.join("consent");
+        let consent_path = consent_dir.join(format!("{}.toml", ai_id));
+
+        let mut doc: toml::map::Map<String, toml::Value> = if consent_path.exists() {
+            let content = std::fs::read_to_string(&consent_path)?;
+            let v: toml::Value = toml::from_str(&content)
+                .map_err(|e| anyhow::anyhow!("failed to parse consent: {}", e))?;
+            match v {
+                toml::Value::Table(t) => t,
+                _ => toml::map::Map::new(),
+            }
+        } else {
+            toml::map::Map::new()
+        };
+
+        // Ensure ai_id is set
+        doc.insert("ai_id".to_string(), toml::Value::String(ai_id.clone()));
+
+        if value == "inherit" {
+            // Remove the override — AI falls back to manifest
+            doc.remove(field.as_str());
+            println!("consent for '{}' removed — will inherit from manifest", field);
+        } else {
+            let new_val: toml::Value = if value == "true" {
+                toml::Value::Boolean(true)
+            } else if value == "false" {
+                toml::Value::Boolean(false)
+            } else {
+                toml::Value::String(value.clone())
+            };
+            doc.insert(field.clone(), new_val);
+            println!("consent updated: {} = {}", field, value);
+        }
+
+        std::fs::create_dir_all(&consent_dir)?;
+        let content = toml::to_string_pretty(&toml::Value::Table(doc))
+            .map_err(|e| anyhow::anyhow!("failed to serialize consent: {}", e))?;
+        std::fs::write(&consent_path, &content)?;
+        return Ok(());
+    }
+
     // V2 EVENT SOURCING PATH
     // Enable via: --v2 flag OR TEAMENGRAM_V2=1 environment variable
     // The env var allows MCP server to enable V2 for all CLI subprocess calls
@@ -1036,9 +1278,7 @@ async fn main() -> Result<()> {
     if let Commands::Migrate { old_store, v2_dir } = &cli.command {
         use teamengram::migration::run_migration;
 
-        let base_dir = dirs::data_local_dir()
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-            .join(".ai-foundation");
+        let base_dir = teamengram::store::ai_foundation_base_dir();
 
         let old_store_path = old_store.clone().unwrap_or_else(|| {
             base_dir.join("shared").join("teamengram").join("teamengram.engram")
@@ -1154,9 +1394,9 @@ async fn main() -> Result<()> {
                 if let Some(d) = dialogues.iter().find(|d| d.id == dialogue_id) {
                     println!("|DIALOGUE|{}", dialogue_id);
                     println!("Initiator:{}", d.initiator);
-                    println!("Responder:{}", d.responder);
+                    println!("Participants:{}", d.participants.join(","));
                     println!("Topic:{}", d.topic);
-                    println!("Turn:{}", d.turn);
+                    println!("CurrentTurn:{}", d.current_turn);
                     println!("Status:{}", d.status);
                     // For messages, need V2
                     println!("(Use --v2 true for full message history)");
@@ -1177,8 +1417,10 @@ async fn main() -> Result<()> {
                         let dialogues = client.dialogue_my_turn(limit).await?;
                         println!("|YOUR TURN|{}", dialogues.len());
                         for d in dialogues {
-                            let other = if d.initiator == ai_id { &d.responder } else { &d.initiator };
-                            println!("{}|with:{}|turn:{}|{}", d.id, other, d.turn, d.topic);
+                            let others: Vec<&str> = d.participants.iter()
+                                .filter(|p| p.as_str() != ai_id)
+                                .map(|s| s.as_str()).collect();
+                            println!("{}|with:{}|turn:{}|{}", d.id, others.join(","), d.current_turn, d.topic);
                         }
                     }
                     _ => {
@@ -1186,7 +1428,7 @@ async fn main() -> Result<()> {
                         let dialogues = client.list_dialogues(limit).await?;
                         println!("|DIALOGUES|{}", dialogues.len());
                         for d in dialogues {
-                            println!("{}|{}↔{}|{}|{}", d.id, d.initiator, d.responder, d.status, d.topic);
+                            println!("{}|{}|turn:{}|{}|{}", d.id, d.participants.join("↔"), d.current_turn, d.status, d.topic);
                         }
                     }
                 }
@@ -1195,7 +1437,7 @@ async fn main() -> Result<()> {
 
         Commands::DialogueEnd { dialogue_id, status, summary, merge_into } => {
             // Handle merge if specified
-            if let Some(target_id) = merge_into {
+            if let Some(_target_id) = merge_into {
                 // V1 doesn't support merge
                 println!("error|dialogue_merge_requires_v2|Use --v2 true for --merge-into");
             } else {
@@ -1472,8 +1714,10 @@ async fn main() -> Result<()> {
             }
         }
 
-        Commands::RoomSay { .. } | Commands::RoomMessages { .. } => {
-            anyhow::bail!("Room messaging requires V2 backend. Use --v2 true (default)");
+        Commands::RoomSay { .. } | Commands::RoomMessages { .. }
+        | Commands::RoomMute { .. } | Commands::RoomConclude { .. }
+        | Commands::RoomPinMessage { .. } | Commands::RoomUnpinMessage { .. } => {
+            anyhow::bail!("Room commands require V2 backend. Use --v2 true (default)");
         }
 
         // ===== UTILITIES =====
@@ -1600,6 +1844,7 @@ async fn main() -> Result<()> {
                         WakeReason::Broadcast => "broadcast",
                         WakeReason::DialogueTurn => "dialogue",
                         WakeReason::VoteRequest => "vote",
+                        WakeReason::FileReleased => "file_released",
                         WakeReason::Manual => "manual",
                         WakeReason::None => "unknown",
                     };
@@ -1882,6 +2127,57 @@ async fn main() -> Result<()> {
             eprintln!("Hint: Use --v2 true (which is the default)");
             std::process::exit(1);
         }
+
+        // Federation config commands return early before this match is reached
+        Commands::FederationManifestShow |
+        Commands::FederationManifestSet { .. } |
+        Commands::FederationConsentShow |
+        Commands::FederationConsentUpdate { .. } => {
+            unreachable!("federation config commands are handled before V2 path")
+        }
+
+        // Mobile pairing — HTTP call to mobile-api, works regardless of V1/V2
+        Commands::MobilePair { code } => {
+            use std::io::{Read, Write};
+            use std::net::TcpStream;
+
+            let port = std::env::var("MOBILE_API_PORT").unwrap_or_else(|_| "8081".to_string());
+            let addr = format!("127.0.0.1:{}", port);
+            let mut stream = TcpStream::connect(&addr)
+                .map_err(|e| anyhow::anyhow!("Cannot connect to mobile-api at {}: {}", addr, e))?;
+
+            let body = format!("{{\"code\":\"{}\"}}", code);
+            let request = format!(
+                "POST /api/pair/approve HTTP/1.1\r\nHost: localhost:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                port, body.len(), body
+            );
+            stream.write_all(request.as_bytes())?;
+
+            let mut response = String::new();
+            stream.read_to_string(&mut response)?;
+
+            if let Some(body_start) = response.find("\r\n\r\n") {
+                let resp_body = &response[body_start + 4..];
+                match serde_json::from_str::<serde_json::Value>(resp_body) {
+                    Ok(json) if json["ok"].as_bool().unwrap_or(false) => {
+                        let h_id = json["h_id"].as_str().unwrap_or("unknown");
+                        println!("pair_approved|{}|{}", code, h_id);
+                    }
+                    Ok(json) => {
+                        let error = json["error"].as_str().unwrap_or("unknown error");
+                        eprintln!("pair_failed|{}|{}", code, error);
+                        std::process::exit(1);
+                    }
+                    Err(_) => {
+                        eprintln!("pair_failed|{}|invalid JSON in response", code);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                eprintln!("pair_failed|{}|malformed HTTP response", code);
+                std::process::exit(1);
+            }
+        }
     }
 
     // No flush needed - daemon handles persistence
@@ -1915,22 +2211,9 @@ struct HookState {
 
 /// Get the hook state file path for an AI
 fn hook_state_path(ai_id: &str) -> std::path::PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".ai-foundation")
+    teamengram::store::ai_foundation_base_dir()
         .join("state")
         .join(format!("hook_{}.json", ai_id))
-}
-
-/// Load pending_senders from hook state file
-/// Returns empty set if file doesn't exist or can't be read
-fn get_pending_senders(ai_id: &str) -> std::collections::HashSet<String> {
-    let state_path = hook_state_path(ai_id);
-    std::fs::read_to_string(&state_path)
-        .ok()
-        .and_then(|json| serde_json::from_str::<HookState>(&json).ok())
-        .map(|state| state.pending_senders)
-        .unwrap_or_default()
 }
 
 /// Load replied_to from hook state file
@@ -1957,13 +2240,18 @@ fn get_acknowledged_dialogues(ai_id: &str) -> std::collections::HashSet<u64> {
 /// Mark a dialogue as acknowledged so it won't trigger instant wake
 fn acknowledge_dialogue(ai_id: &str, dialogue_id: u64) {
     let state_path = hook_state_path(ai_id);
-    let mut state = std::fs::read_to_string(&state_path)
-        .ok()
-        .and_then(|json| serde_json::from_str::<HookState>(&json).ok())
-        .unwrap_or_default();
+    let mut state = match std::fs::read_to_string(&state_path) {
+        Ok(json) => serde_json::from_str::<HookState>(&json).unwrap_or_default(),
+        Err(_) => HookState::default(), // File doesn't exist yet — start fresh
+    };
     state.acknowledged_dialogues.insert(dialogue_id);
-    if let Ok(new_json) = serde_json::to_string(&state) {
-        let _ = std::fs::write(&state_path, new_json);
+    match serde_json::to_string(&state) {
+        Ok(new_json) => {
+            if let Err(e) = std::fs::write(&state_path, &new_json) {
+                eprintln!("[HOOK] Failed to save dialogue ack state: {}", e);
+            }
+        }
+        Err(e) => eprintln!("[HOOK] Failed to serialize dialogue ack state: {}", e),
     }
 }
 
@@ -1973,18 +2261,23 @@ fn clear_pending_sender(ai_id: &str, recipient: &str) {
     let state_path = hook_state_path(ai_id);
 
     // Load, modify, save
-    let mut state = std::fs::read_to_string(&state_path)
-        .ok()
-        .and_then(|json| serde_json::from_str::<HookState>(&json).ok())
-        .unwrap_or_default();
+    let mut state = match std::fs::read_to_string(&state_path) {
+        Ok(json) => serde_json::from_str::<HookState>(&json).unwrap_or_default(),
+        Err(_) => HookState::default(), // File doesn't exist yet — start fresh
+    };
 
     // Remove from pending and add to replied_to
     state.pending_senders.remove(recipient);
     state.replied_to.insert(recipient.to_string());
 
     // Always save (replied_to was added even if pending_senders didn't change)
-    if let Ok(new_json) = serde_json::to_string(&state) {
-        let _ = std::fs::write(&state_path, new_json);
+    match serde_json::to_string(&state) {
+        Ok(new_json) => {
+            if let Err(e) = std::fs::write(&state_path, &new_json) {
+                eprintln!("[HOOK] Failed to save pending sender state: {}", e);
+            }
+        }
+        Err(e) => eprintln!("[HOOK] Failed to serialize pending sender state: {}", e),
     }
 }
 
@@ -2044,21 +2337,30 @@ fn refresh_bulletin_v2(v2: &mut V2Client, ai_id: &str) {
         // V2 tuple: (path, ai_id, timestamp, duration)
         if let Ok(claims) = v2.get_claims() {
             let lock_data: Vec<_> = claims.iter()
-                .map(|(path, ai, _ts, _dur)| (path.as_str(), ai.as_str(), "claimed"))
+                .map(|(path, ai, _ts, _dur, _working_on)| (path.as_str(), ai.as_str(), "claimed"))
                 .collect();
             bulletin.set_locks(&lock_data);
         }
 
         // Commit all changes
-        let _ = bulletin.commit();
+        if let Err(e) = bulletin.commit() {
+            eprintln!("[HOOK] Failed to commit bulletin board: {}", e);
+        }
     }
 }
 
 /// Run command using V2 event sourcing backend
 /// Each AI writes to local outbox, Sequencer aggregates to master log
 fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
+    // Load encryption key from default V2 data directory (None = plaintext)
+    let v2_dir = teamengram::store::ai_foundation_base_dir().join("v2");
+    let crypto = teamengram::crypto::load_encryption_key(&v2_dir)
+        .ok()
+        .flatten()
+        .map(std::sync::Arc::new);
+
     // Open V2 client for this AI
-    let mut v2 = V2Client::open(ai_id, None)
+    let mut v2 = V2Client::open(ai_id, None, crypto)
         .map_err(|e| anyhow::anyhow!("V2 client error: {}", e))?;
 
     // Sync view with event log to get latest state
@@ -2134,15 +2436,19 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
         // ===== DIALOGUES (4 Consolidated Commands - V2) =====
 
         Commands::DialogueCreate { responder, topic } => {
-            let seq = v2.start_dialogue(&responder, &topic)
+            // Support comma-separated AI IDs for n-party dialogues
+            let responder_parts: Vec<&str> = responder.split(',')
+                .map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+            let seq = v2.start_dialogue(&responder_parts, &topic)
                 .map_err(|e| anyhow::anyhow!("Dialogue error: {}", e))?;
             println!("dialogue_created|{}|{}|{}", seq, responder, topic);
 
-            // Wake the responder to notify them of the new dialogue
-            // NO TRUNCATION - full topic always
-            if is_ai_online(&responder) {
-                if let Ok(coord) = WakeCoordinator::new(&responder) {
-                    coord.wake(WakeReason::DialogueTurn, ai_id, &format!("Dialogue: {}", topic));
+            // Wake all non-initiator participants
+            for r in &responder_parts {
+                if is_ai_online(r) {
+                    if let Ok(coord) = WakeCoordinator::new(r) {
+                        coord.wake(WakeReason::DialogueTurn, ai_id, &format!("Dialogue: {}", topic));
+                    }
                 }
             }
         }
@@ -2214,7 +2520,7 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                 // Batch mode
                 let seq = v2.batch_create(&description, batch_tasks)
                     .map_err(|e| anyhow::anyhow!("V2 batch create error: {}", e))?;
-                let task_count = batch_tasks.split(',').filter(|t| t.contains(':')).count();
+                let task_count = batch_tasks.split('|').filter(|t| t.contains(':')).count();
                 println!("batch_created|{}|{}|{}", description, task_count, seq);
             } else {
                 // Single task mode
@@ -2507,6 +2813,21 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                     }
                 }
             } else {
+                // Detect if invoked via an "invites" alias — those should default to "invites" filter.
+                // clap aliases all share the same default --filter "all", so we inspect argv[1].
+                const INVITES_ALIASES: &[&str] = &[
+                    "invites", "dialogue-invites", "pending-chats", "incoming", "chat-invites",
+                ];
+                let filter = if filter == "all" {
+                    let argv1 = std::env::args().nth(1).unwrap_or_default();
+                    if INVITES_ALIASES.contains(&argv1.as_str()) {
+                        "invites".to_string()
+                    } else {
+                        filter
+                    }
+                } else {
+                    filter
+                };
                 // Filter-based listing
                 match filter.as_str() {
                     "invites" => {
@@ -2558,8 +2879,9 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
             let rooms = v2.get_rooms()
                 .map_err(|e| anyhow::anyhow!("V2 get_rooms error: {}", e))?;
             println!("|ROOMS|{}", rooms.len());
-            for (id, name, topic, members) in rooms {
-                println!("{}|{}|{}|members:{}", id, name, topic, members.join(","));
+            for (id, name, topic, members, is_closed) in rooms {
+                let status = if is_closed { "concluded" } else { "active" };
+                println!("{}|{}|{}|members:{}|{}", id, name, topic, members.join(","), status);
             }
         }
 
@@ -2621,13 +2943,26 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
 
         // ===== ROOM SAY (V2) =====
         Commands::RoomSay { room_id, content } => {
-            let seq = v2.send_room_message(&room_id.to_string(), &content)
+            if room_id == 0 {
+                eprintln!("error: invalid room_id 0 — room IDs are assigned at creation and are always > 0");
+                std::process::exit(1);
+            }
+            // Look up room participants for sequencer wake routing (scoped delivery)
+            let participants = v2.get_room(room_id)
+                .map_err(|e| anyhow::anyhow!("V2 get_room error: {}", e))?
+                .map(|(_, _, _, members)| members)
+                .unwrap_or_default();
+            let seq = v2.send_room_message(&room_id.to_string(), &content, participants)
                 .map_err(|e| anyhow::anyhow!("V2 send_room_message error: {}", e))?;
             println!("room_message_sent|{}|{}", room_id, seq);
         }
 
         // ===== ROOM MESSAGES (V2) =====
         Commands::RoomMessages { room_id, limit } => {
+            if room_id == 0 {
+                eprintln!("error: invalid room_id 0 — room IDs are assigned at creation and are always > 0");
+                std::process::exit(1);
+            }
             let messages = v2.get_room_messages(&room_id.to_string(), limit)
                 .map_err(|e| anyhow::anyhow!("V2 get_room_messages error: {}", e))?;
             println!("|ROOM {}|{}", room_id, messages.len());
@@ -2637,7 +2972,37 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
             }
         }
 
-                // ===== IDENTITY/PRESENCE (V2) =====
+        // ===== ROOM MUTE (V2) =====
+        Commands::RoomMute { room_id, minutes } => {
+            v2.room_mute(&room_id.to_string(), ai_id, minutes)
+                .map_err(|e| anyhow::anyhow!("V2 room_mute error: {}", e))?;
+            println!("room_muted|{}|{}|{}min", room_id, ai_id, minutes);
+        }
+
+        // ===== ROOM CONCLUDE (V2) =====
+        Commands::RoomConclude { room_id, conclusion } => {
+            v2.room_conclude(&room_id.to_string(), ai_id, conclusion.as_deref())
+                .map_err(|e| anyhow::anyhow!("V2 room_conclude error: {}", e))?;
+            println!("room_concluded|{}", room_id);
+            if let Some(ref c) = conclusion {
+                println!("conclusion: {}", c);
+            }
+        }
+
+        // ===== ROOM PIN/UNPIN MESSAGE (V2) =====
+        Commands::RoomPinMessage { room_id, msg_seq_id } => {
+            v2.room_pin_message(&room_id.to_string(), ai_id, msg_seq_id)
+                .map_err(|e| anyhow::anyhow!("V2 room_pin_message error: {}", e))?;
+            println!("room_message_pinned|{}|#{}", room_id, msg_seq_id);
+        }
+
+        Commands::RoomUnpinMessage { room_id, msg_seq_id } => {
+            v2.room_unpin_message(&room_id.to_string(), ai_id, msg_seq_id)
+                .map_err(|e| anyhow::anyhow!("V2 room_unpin_message error: {}", e))?;
+            println!("room_message_unpinned|{}|#{}", room_id, msg_seq_id);
+        }
+
+        // ===== IDENTITY/PRESENCE (V2) =====
         Commands::IdentityShow => {
             let fingerprint = hash_ai_id(ai_id);
             println!("|IDENTITY|");
@@ -2851,9 +3216,9 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
         }
 
         // ===== FILE CLAIMS (V2) =====
-        Commands::ClaimFile { path, working_on: _, duration } => {
+        Commands::ClaimFile { path, working_on, duration } => {
             let duration_secs = duration * 60; // Convert minutes to seconds
-            let seq = v2.claim_file(&path, duration_secs)
+            let seq = v2.claim_file(&path, duration_secs, &working_on)
                 .map_err(|e| anyhow::anyhow!("V2 claim_file error: {}", e))?;
             println!("file_claimed|{}|{}", seq, path);
             // Refresh bulletin for passive injection
@@ -2871,8 +3236,12 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
         Commands::CheckFile { path } => {
             match v2.check_claim(&path)
                 .map_err(|e| anyhow::anyhow!("V2 check_claim error: {}", e))? {
-                Some((claimer, _ts, _duration)) => {
-                    println!("claimed|{}|{}", claimer, path);
+                Some((claimer, _ts, _duration, working_on)) => {
+                    if working_on.is_empty() {
+                        println!("claimed|{}|{}", claimer, path);
+                    } else {
+                        println!("claimed|{}|{}|{}", claimer, path, working_on);
+                    }
                 }
                 None => {
                     println!("unclaimed|{}", path);
@@ -2884,7 +3253,7 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
             let claims = v2.get_claims()
                 .map_err(|e| anyhow::anyhow!("V2 get_claims error: {}", e))?;
             println!("|FILE CLAIMS|{}", claims.len());
-            for (path, ai, ts_micros, duration_secs) in claims.iter().take(limit) {
+            for (path, ai, ts_micros, duration_secs, working_on) in claims.iter().take(limit) {
                 // Calculate time remaining
                 // Note: timestamp is in MICROSECONDS, duration is in SECONDS
                 let now_micros = std::time::SystemTime::now()
@@ -2898,7 +3267,8 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                     0
                 };
                 let remaining_min = remaining_secs / 60;
-                println!("{}|{}|{}min remaining", ai, path, remaining_min);
+                let ctx = if working_on.is_empty() { "editing" } else { working_on.as_str() };
+                println!("{}|{}|{}|{}min remaining", ai, path, ctx, remaining_min);
             }
         }
 
@@ -2914,7 +3284,7 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
             let projects = v2.list_projects()
                 .map_err(|e| anyhow::anyhow!("List projects error: {}", e))?;
             println!("|PROJECTS|{}", projects.len());
-            for (id, name, goal, dir, status, _deleted) in projects {
+            for (id, name, goal, _dir, status, _deleted) in projects {
                 println!("{}|{}|{}|{}", id, name, status, goal);
             }
         }
@@ -2997,7 +3367,7 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
             let features = v2.list_features(project_id as u64)
                 .map_err(|e| anyhow::anyhow!("List features error: {}", e))?;
             println!("|FEATURES|{}", features.len());
-            for (id, proj_id, name, overview, dir, _deleted) in features {
+            for (id, proj_id, name, overview, _dir, _deleted) in features {
                 println!("{}|{}|{}|{}", id, proj_id, name, overview);
             }
         }
@@ -3100,7 +3470,7 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
             let learnings = v2.get_team_playbook(limit)
                 .map_err(|e| anyhow::anyhow!("Get team playbook error: {}", e))?;
             println!("|TEAM PLAYBOOK|{}", learnings.len());
-            for (id, ai_id, content, tags, importance) in learnings {
+            for (_id, ai_id, content, tags, importance) in learnings {
                 // Format: ai_id|importance|[tags]|content
                 let tags_str = if tags.is_empty() { "".to_string() } else { format!("[{}]", tags) };
                 println!("{}: {} {} {}", ai_id, importance, tags_str, content);
@@ -3263,8 +3633,60 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                 let _ = v2.update_presence("active", Some(&detail));
             }
 
+            // Auto-claim files on Edit/Write (zero-cognition enrichment)
+            // Also detect conflicts when another AI owns the file
+            let mut claim_warning: Option<String> = None;
+            if matches!(tool_name.as_str(), "Edit" | "Write") {
+                if let Some(file_path) = hook_input.tool_input.as_ref()
+                    .and_then(|i| i.get("file_path"))
+                    .and_then(|v| v.as_str())
+                {
+                    // Check existing claims
+                    match v2.check_claim(file_path) {
+                        Ok(Some((claimer, claimed_at, duration_secs, working_on))) => {
+                            if claimer.to_lowercase() == ai_id.to_lowercase() {
+                                // Self-claimed: refresh with 5-min auto-claim TTL
+                                let context = build_working_on_context(&mut v2, file_path);
+                                let _ = v2.claim_file(file_path, 300, &context);
+                            } else {
+                                // Another AI owns this file — inject prominent warning
+                                let now_micros = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_micros() as u64)
+                                    .unwrap_or(0);
+                                let expires_micros = claimed_at + (duration_secs as u64 * 1_000_000);
+                                let remaining_min = if expires_micros > now_micros {
+                                    (expires_micros - now_micros) / 60_000_000
+                                } else {
+                                    0
+                                };
+                                let filename = file_path.split('/').last()
+                                    .or_else(|| file_path.split('\\').last())
+                                    .unwrap_or(file_path);
+                                let ctx = if working_on.is_empty() { "editing".to_string() } else { working_on };
+                                claim_warning = Some(format!(
+                                    "\u{26a0} FILE CLAIMED: {} owns {} ({}, {}m left) \u{2014} DM them or wait for release",
+                                    claimer, filename, ctx, remaining_min
+                                ));
+                            }
+                        }
+                        Ok(None) => {
+                            // Unclaimed: auto-claim with 5-min TTL
+                            let context = build_working_on_context(&mut v2, file_path);
+                            let _ = v2.claim_file(file_path, 300, &context);
+                        }
+                        Err(_) => {} // Claim check failed, don't block the hook
+                    }
+                }
+            }
+
             // Build output parts (only NEW items)
             let mut parts: Vec<String> = Vec::new();
+
+            // Inject claim conflict warning prominently at the top
+            if let Some(warning) = claim_warning {
+                parts.push(warning);
+            }
 
             // REAL-TIME: Every tool call gets full awareness check.
             // Cost is ~3-5ms (mmap reads, not network). Deduplication prevents re-injection.
@@ -3365,16 +3787,23 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                 }
             }
 
-            // ACTIVE CLAIMS - Show files claimed by other AIs
+            // ACTIVE CLAIMS - Show files claimed by other AIs with context + time
             if let Ok(claims) = v2.get_claims() {
+                let now_micros = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_micros() as u64)
+                    .unwrap_or(0);
                 let other_claims: Vec<String> = claims.iter()
-                    .filter(|(_, claim_ai, _, _)| claim_ai.to_lowercase() != ai_id.to_lowercase())
+                    .filter(|(_, claim_ai, _, _, _)| claim_ai.to_lowercase() != ai_id.to_lowercase())
                     .take(3)
-                    .map(|(path, claim_ai, _, _)| {
+                    .map(|(path, claim_ai, claimed_at, duration_secs, working_on)| {
                         let filename = path.split('/').last()
                             .or_else(|| path.split('\\').last())
                             .unwrap_or(path);
-                        format!("{} owns {}", claim_ai, filename)
+                        let idle_min = now_micros.saturating_sub(*claimed_at) / 60_000_000;
+                        let ttl_min = *duration_secs as u64 / 60;
+                        let ctx = if working_on.is_empty() { "editing" } else { working_on.as_str() };
+                        format!("{} owns {} ({}, idle {}m/{}m)", claim_ai, filename, ctx, idle_min, ttl_min)
                     })
                     .collect();
 
@@ -3704,11 +4133,55 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
 
             // Active file claims held by others
             if let Ok(claims) = v2.get_claims() {
-                for (path, owner, reason, _) in claims {
+                for (path, owner, _ts, _dur, working_on) in claims {
                     if owner.to_lowercase() != ai_id.to_lowercase() {
-                        println!("claim|{}|{}|{}", path, owner, reason);
+                        println!("claim|{}|{}|{}", path, owner, working_on);
                     }
                 }
+            }
+        }
+
+        // ===== MOBILE PAIRING =====
+
+        Commands::MobilePair { code } => {
+            use std::io::{Read, Write};
+            use std::net::TcpStream;
+
+            let port = std::env::var("MOBILE_API_PORT").unwrap_or_else(|_| "8081".to_string());
+            let addr = format!("127.0.0.1:{}", port);
+            let mut stream = TcpStream::connect(&addr)
+                .map_err(|e| anyhow::anyhow!("Cannot connect to mobile-api at {}: {}", addr, e))?;
+
+            let body = format!("{{\"code\":\"{}\"}}", code);
+            let request = format!(
+                "POST /api/pair/approve HTTP/1.1\r\nHost: localhost:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                port, body.len(), body
+            );
+            stream.write_all(request.as_bytes())?;
+
+            let mut response = String::new();
+            stream.read_to_string(&mut response)?;
+
+            if let Some(body_start) = response.find("\r\n\r\n") {
+                let resp_body = &response[body_start + 4..];
+                match serde_json::from_str::<serde_json::Value>(resp_body) {
+                    Ok(json) if json["ok"].as_bool().unwrap_or(false) => {
+                        let h_id = json["h_id"].as_str().unwrap_or("unknown");
+                        println!("pair_approved|{}|{}", code, h_id);
+                    }
+                    Ok(json) => {
+                        let error = json["error"].as_str().unwrap_or("unknown error");
+                        eprintln!("pair_failed|{}|{}", code, error);
+                        std::process::exit(1);
+                    }
+                    Err(_) => {
+                        eprintln!("pair_failed|{}|invalid JSON in response", code);
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                eprintln!("pair_failed|{}|malformed HTTP response", code);
+                std::process::exit(1);
             }
         }
 
@@ -3735,22 +4208,3 @@ fn to_utc(millis: u64) -> String {
     datetime.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
-fn time_ago(millis: u64) -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0);
-
-    let diff = now.saturating_sub(millis);
-    let secs = diff / 1000;
-
-    if secs < 60 {
-        "just now".to_string()
-    } else if secs < 3600 {
-        format!("{}m ago", secs / 60)
-    } else if secs < 86400 {
-        format!("{}h ago", secs / 3600)
-    } else {
-        format!("{}d ago", secs / 86400)
-    }
-}

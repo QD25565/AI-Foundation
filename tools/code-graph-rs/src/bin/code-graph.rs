@@ -11,9 +11,8 @@
 //!   code-graph stats
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use clap::{Parser, Subcommand};
-use rayon::prelude::*;
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -36,6 +35,7 @@ struct Symbol {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 enum SymbolKind {
     Function,
     Method,
@@ -470,29 +470,6 @@ fn index_file(conn: &Connection, path: &Path, lang: Language) -> Result<(usize, 
 }
 
 // ============================================================================
-// FORMATTING
-// ============================================================================
-
-fn format_relative_time(dt: &DateTime<Utc>) -> String {
-    let now = Utc::now();
-    let diff = now.signed_duration_since(*dt);
-    let minutes = diff.num_minutes();
-    let hours = diff.num_hours();
-    let days = diff.num_days();
-
-    if minutes < 1 {
-        "now".to_string()
-    } else if minutes < 60 {
-        format!("{}m ago", minutes)
-    } else if hours < 24 {
-        format!("{}h ago", hours)
-    } else if days < 7 {
-        format!("{}d ago", days)
-    } else {
-        dt.format("%b %d").to_string()
-    }
-}
-
 fn truncate_path(path: &str, max_len: usize) -> String {
     if path.len() <= max_len {
         return path.to_string();

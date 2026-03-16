@@ -5,19 +5,19 @@
 use std::collections::VecDeque;
 
 use ratatui::{
-    buffer::Buffer,
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     style::{Style, Stylize},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Widget, Wrap},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame,
 };
 
-use super::colors::{BrandColors, Gradient, LOGO, TAGLINE};
-use super::widgets::{GradientBlock, GradientText, Logo, Separator, Spinner, StatusMessage};
+use super::colors::{BrandColors, Gradient, TAGLINE};
+use super::widgets::{Logo, Spinner};
 
 /// Message role in conversation
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum Role {
     User,
     Assistant,
@@ -50,6 +50,7 @@ impl Message {
         }
     }
 
+    #[allow(dead_code)]
     pub fn system(content: impl Into<String>) -> Self {
         Self {
             role: Role::System,
@@ -274,6 +275,7 @@ impl App {
     }
 
     /// Get selected text
+    #[allow(dead_code)]
     pub fn get_selected_text(&self) -> Option<String> {
         self.selection.map(|(start, end)| {
             let (s, e) = if start <= end { (start, end) } else { (end, start) };
@@ -416,6 +418,7 @@ impl App {
     }
 
     /// Process think blocks during streaming (handles incomplete blocks)
+    #[allow(unused_assignments)]
     fn process_streaming_think(content: &str) -> String {
         // During streaming, we might have:
         // 1. Complete <think>...</think> blocks - collapse them

@@ -11,7 +11,7 @@ pub use sveltekit::SvelteKitParser;
 pub use compose::ComposeParser;
 pub use kotlin_routes::KotlinRoutesParser;
 
-use crate::parser::{Parser, ParserRegistry};
+use crate::parser::ParserRegistry;
 
 /// Create a registry with all built-in parsers
 pub fn default_registry() -> ParserRegistry {

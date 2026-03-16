@@ -1,4 +1,5 @@
 //! Common types for LLM interactions
+#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 

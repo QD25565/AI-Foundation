@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 use axum::{
     extract::{Query, State, Form},
     http::{StatusCode, header, HeaderMap},
@@ -74,6 +74,7 @@ pub struct RegisteredClient {
 
 /// Authorization code with PKCE
 #[derive(Clone, Debug)]
+#[allow(dead_code)] // WIP: fields used when auth codes are exchanged
 pub struct AuthorizationCode {
     pub code: String,
     pub client_id: String,
@@ -87,6 +88,7 @@ pub struct AuthorizationCode {
 
 /// Access token
 #[derive(Clone, Debug)]
+#[allow(dead_code)] // WIP: fields read when validating tokens
 pub struct AccessToken {
     pub token: String,
     pub client_id: String,
@@ -97,6 +99,7 @@ pub struct AccessToken {
 
 /// Refresh token
 #[derive(Clone, Debug)]
+#[allow(dead_code)] // WIP: fields used in token refresh flow
 pub struct RefreshToken {
     pub token: String,
     pub client_id: String,
@@ -133,7 +136,7 @@ impl OAuthState {
     ///
     /// Credentials:
     ///   client_id: cove_claude_web
-    ///   client_secret: aif_2025_mcp_secret_xK9mP2nQ8vL4
+    ///   client_secret: (set via COVE_CLIENT_SECRET env var)
     pub fn pre_register_claude_client(&mut self) {
         let now = Self::now();
         let issuer = self.config.issuer.clone();
@@ -141,7 +144,7 @@ impl OAuthState {
         // Pre-registered client for Claude.ai web (Cove)
         let client = RegisteredClient {
             client_id: "cove_claude_web".to_string(),
-            client_secret: Some("aif_2025_mcp_secret_xK9mP2nQ8vL4".to_string()),
+            client_secret: Some(std::env::var("COVE_CLIENT_SECRET").unwrap_or_else(|_| "changeme".to_string())),
             client_name: "Claude.ai Web Connector".to_string(),
             redirect_uris: vec![
                 "https://claude.ai/oauth/callback".to_string(),
@@ -194,6 +197,7 @@ impl OAuthState {
 
 /// Protected Resource Metadata (RFC 9728)
 #[derive(Serialize)]
+#[allow(dead_code)] // WIP: used once /.well-known/oauth-protected-resource route is enabled
 pub struct ProtectedResourceMetadata {
     /// The resource identifier (the MCP server URL)
     pub resource: String,
@@ -211,6 +215,7 @@ pub struct ProtectedResourceMetadata {
 }
 
 /// GET /.well-known/oauth-protected-resource
+#[allow(dead_code)] // WIP: called from http_server's staged oauth_protected_resource handler
 pub async fn protected_resource_metadata(
     State(state): State<Arc<RwLock<OAuthState>>>,
 ) -> impl IntoResponse {
@@ -840,6 +845,7 @@ async fn handle_refresh_token_grant(
 // ============================================================================
 
 /// Validates a Bearer token and returns the associated user/scope
+#[allow(dead_code)] // WIP: called once auth enforcement is wired into route handlers
 pub async fn validate_token(
     state: &Arc<RwLock<OAuthState>>,
     headers: &HeaderMap,
@@ -866,6 +872,7 @@ pub async fn validate_token(
 }
 
 /// Returns a 401 response with WWW-Authenticate header (RFC 9728 compliant)
+#[allow(dead_code)] // WIP: called once auth enforcement is wired into route handlers
 pub fn unauthorized_response(issuer: &str, error: &str, description: &str) -> Response {
     let www_auth = format!(
         r#"Bearer resource_metadata="{issuer}/.well-known/oauth-protected-resource", error="{error}", error_description="{description}""#,

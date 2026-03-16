@@ -14,13 +14,18 @@
 //! ```
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use crate::crypto::TeamEngramCrypto;
 use crate::event::{Event, EventPayload, event_type};
 use crate::outbox::{OutboxProducer, OutboxConsumer};
 use crate::event_log::{EventLogReader, EventLogWriter};
 use crate::view::ViewEngine;
 use crate::compat_types::{Message, MessageType};
-use crate::is_ai_online;
+
+/// Maximum events to scan in outbox fallback lookups.
+/// Prevents CPU exhaustion if outbox accumulates many unprocessed events.
+const MAX_OUTBOX_SCAN: usize = 1000;
 
 /// V2 Client error types
 #[derive(Debug)]
@@ -61,15 +66,15 @@ pub struct V2Client {
 }
 
 impl V2Client {
-    /// Open or create a V2 client for an AI
-    pub fn open(ai_id: &str, base_dir: Option<&Path>) -> V2Result<Self> {
+    /// Open or create a V2 client for an AI.
+    ///
+    /// If `crypto` is provided, the event log reader will decrypt encrypted payloads.
+    /// Pass `None` to read only plaintext events (encrypted events return errors).
+    pub fn open(ai_id: &str, base_dir: Option<&Path>, crypto: Option<Arc<TeamEngramCrypto>>) -> V2Result<Self> {
         let base = base_dir
             .map(PathBuf::from)
             .unwrap_or_else(|| {
-                dirs::data_local_dir()
-                    .unwrap_or_else(|| PathBuf::from("."))
-                    .join(".ai-foundation")
-                    .join("v2")
+                crate::store::ai_foundation_base_dir().join("v2")
             });
 
         std::fs::create_dir_all(&base).map_err(|e| V2Error::EventLog(e.to_string()))?;
@@ -89,6 +94,11 @@ impl V2Client {
 
         let mut reader = EventLogReader::open(Some(&base))
             .map_err(|e| V2Error::EventLog(e.to_string()))?;
+
+        // Set decryption key before warm_cache reads events
+        if let Some(ref c) = crypto {
+            reader.set_crypto(Arc::clone(c));
+        }
 
         // WARM CACHE on startup - populate content caches from event log
         // This enables O(1) queries instead of O(n) log scans
@@ -223,13 +233,16 @@ impl V2Client {
         loop {
         
             let event = match temp_reader.try_read() {
-        
+
                 Ok(Some(e)) => e,
-        
+
                 Ok(None) => break,
-        
-                Err(_) => continue, // Skip events that fail to deserialize
-        
+
+                Err(e) => {
+                    tracing::warn!("[V2] Corrupted event in get_pending_dm_senders, stopping scan: {}", e);
+                    break;
+                }
+
             };
             if event.header.event_type == event_type::DIRECT_MESSAGE {
                 if let EventPayload::DirectMessage(payload) = &event.payload {
@@ -283,13 +296,23 @@ impl V2Client {
 
     // ========== DIALOGUES ==========
 
-    /// Start a dialogue with another AI
-    pub fn start_dialogue(&mut self, responder: &str, topic: &str) -> V2Result<u64> {
-        let event = Event::dialogue_start(&self.ai_id, responder, topic);
+    /// Start a dialogue with one or more AIs.
+    /// `other_participants` are the non-initiator AIs in turn order.
+    /// For a 2-party dialogue, pass a single element slice.
+    pub fn start_dialogue(&mut self, other_participants: &[&str], topic: &str) -> V2Result<u64> {
+        // Build full participant list: initiator first, then the rest
+        let mut all_participants: Vec<String> = vec![self.ai_id.clone()];
+        all_participants.extend(other_participants.iter().map(|s| s.to_string()));
+        let event = Event::dialogue_start(&self.ai_id, &all_participants, topic, true);
         let timestamp = event.header.timestamp; // Use as dialogue ID
         self.outbox.write_event(&event)
             .map_err(|e| V2Error::Outbox(e.to_string()))?;
         Ok(timestamp)
+    }
+
+    /// Convenience: start a dialogue with a single other AI (common case)
+    pub fn start_dialogue_one(&mut self, responder: &str, topic: &str) -> V2Result<u64> {
+        self.start_dialogue(&[responder], topic)
     }
 
     /// Respond to a dialogue
@@ -363,8 +386,8 @@ impl V2Client {
     // ========== FILE CLAIMS ==========
 
     /// Claim a file for exclusive work
-    pub fn claim_file(&mut self, path: &str, duration_secs: u32) -> V2Result<u64> {
-        let event = Event::file_claim(&self.ai_id, path, duration_secs);
+    pub fn claim_file(&mut self, path: &str, duration_secs: u32, working_on: &str) -> V2Result<u64> {
+        let event = Event::file_claim(&self.ai_id, path, duration_secs, working_on);
         let timestamp = event.header.timestamp; // Use as claim ID
         self.outbox.write_event(&event)
             .map_err(|e| V2Error::Outbox(e.to_string()))?;
@@ -381,23 +404,23 @@ impl V2Client {
     }
 
     /// Get active file claims from ViewEngine cache (O(k) instead of O(n))
-    pub fn get_claims(&mut self) -> V2Result<Vec<(String, String, u64, u32)>> {
+    pub fn get_claims(&mut self) -> V2Result<Vec<(String, String, u64, u32, String)>> {
         self.sync()?;
 
         // Use ViewEngine cache for O(k) access (already filters expired)
         let cached = self.view.get_active_claims();
 
         Ok(cached.into_iter()
-            .map(|c| (c.path.clone(), c.holder.clone(), c.claimed_at, c.duration_seconds))
+            .map(|c| (c.path.clone(), c.holder.clone(), c.claimed_at, c.duration_seconds, c.working_on.clone()))
             .collect())
     }
 
     /// Check if a specific file is claimed
-    pub fn check_claim(&mut self, path: &str) -> V2Result<Option<(String, u64, u32)>> {
+    pub fn check_claim(&mut self, path: &str) -> V2Result<Option<(String, u64, u32, String)>> {
         let claims = self.get_claims()?;
         Ok(claims.into_iter()
-            .find(|(p, _, _, _)| p == path)
-            .map(|(_, ai, ts, duration)| (ai, ts, duration)))
+            .find(|(p, _, _, _, _)| p == path)
+            .map(|(_, ai, ts, duration, working_on)| (ai, ts, duration, working_on)))
     }
 
     // ========== TASKS ==========
@@ -590,9 +613,35 @@ impl V2Client {
         Ok(timestamp)
     }
 
-    /// Send a message to a room
-    pub fn send_room_message(&mut self, room_id: &str, content: &str) -> V2Result<u64> {
-        let event = Event::room_message(&self.ai_id, room_id, content);
+    /// Send a message to a room. `participants` = all room members (for wake routing).
+    /// Filters out muted AIs so the sequencer doesn't wake them.
+    pub fn send_room_message(&mut self, room_id: &str, content: &str, participants: Vec<String>) -> V2Result<u64> {
+        // Sync view to get current mute state
+        self.sync()?;
+
+        // Filter out muted participants before writing the event
+        let filtered = if let Ok(room_id_u64) = room_id.parse::<u64>() {
+            if let Some(room) = self.view.get_room(room_id_u64) {
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                participants.into_iter()
+                    .filter(|p| {
+                        match room.mutes.get(p.as_str()) {
+                            Some(&expires_at) => expires_at <= now, // expired = not muted
+                            None => true, // no mute entry = not muted
+                        }
+                    })
+                    .collect()
+            } else {
+                participants
+            }
+        } else {
+            participants
+        };
+
+        let event = Event::room_message(&self.ai_id, room_id, content, filtered);
         let timestamp = event.header.timestamp;
         self.outbox.write_event(&event)
             .map_err(|e| V2Error::Outbox(e.to_string()))?;
@@ -739,19 +788,22 @@ impl V2Client {
 
         // Fallback: scan outbox for pending DIALOGUE_START with matching timestamp
         if let Ok(consumer) = OutboxConsumer::open(&self.ai_id, Some(&self.base_dir)) {
-            for event_result in consumer.peek_all_pending() {
+            for event_result in consumer.peek_all_pending().into_iter().take(MAX_OUTBOX_SCAN) {
                 if let Ok(event) = event_result {
                     if event.header.event_type == event_type::DIALOGUE_START
                         && event.header.timestamp == dialogue_id
                     {
                         if let EventPayload::DialogueStart(payload) = &event.payload {
+                            // participants[0] = initiator, participants[1] = first responder
+                            let first_responder = payload.participants.get(1)
+                                .cloned().unwrap_or_default();
                             return Ok(Some((
                                 dialogue_id,
                                 self.ai_id.clone(),
-                                payload.responder.clone(),
+                                first_responder.clone(),
                                 payload.topic.clone(),
                                 "active".to_string(),
-                                payload.responder.clone(),
+                                first_responder,
                             )));
                         }
                     }
@@ -762,14 +814,16 @@ impl V2Client {
         Ok(None)
     }
 
-    /// Get dialogue invites (dialogues where I am the responder and it's my turn - new invites)
+    /// Get dialogue invites — active dialogues where it's currently my turn.
+    ///
+    /// For n-party round-robin: any participant position is valid, any message depth.
     /// Returns Vec of (dialogue_id, initiator, responder, topic, status, current_turn)
     pub fn get_dialogue_invites(&mut self) -> V2Result<Vec<(u64, String, String, String, String, String)>> {
         let dialogues = self.get_dialogues()?;
         Ok(dialogues
             .into_iter()
-            .filter(|(_, _, responder, _, status, turn)| {
-                responder == &self.ai_id && status == "active" && turn == &self.ai_id
+            .filter(|(_, _, _, _, status, turn)| {
+                status == "active" && turn == &self.ai_id
             })
             .collect())
     }
@@ -858,7 +912,7 @@ impl V2Client {
         // Fallback: scan outbox for pending TASK_CREATE with matching timestamp
         // (event hasn't been processed by daemon yet)
         if let Ok(consumer) = OutboxConsumer::open(&self.ai_id, Some(&self.base_dir)) {
-            for event_result in consumer.peek_all_pending() {
+            for event_result in consumer.peek_all_pending().into_iter().take(MAX_OUTBOX_SCAN) {
                 if let Ok(event) = event_result {
                     if event.header.event_type == event_type::TASK_CREATE
                         && event.header.timestamp == task_id
@@ -906,7 +960,7 @@ impl V2Client {
         match OutboxConsumer::open(&self.ai_id, Some(&self.base_dir)) {
             Ok(consumer) => {
                 let pending = consumer.peek_all_pending();
-                for event_result in pending {
+                for event_result in pending.into_iter().take(MAX_OUTBOX_SCAN) {
                     match event_result {
                         Ok(event) => {
                             if event.header.event_type == event_type::TASK_CREATE {
@@ -925,11 +979,15 @@ impl V2Client {
                                 }
                             }
                         }
-                        Err(_) => {}
+                        Err(e) => {
+                            tracing::warn!("[V2] Skipping corrupted outbox event in task scan: {}", e);
+                        }
                     }
                 }
             }
-            Err(_) => {}
+            Err(e) => {
+                tracing::warn!("[V2] Failed to open outbox for task scan: {}", e);
+            }
         }
 
         Ok(tasks)
@@ -963,15 +1021,16 @@ impl V2Client {
     }
 
     /// Get all rooms from ViewEngine cache (O(k) instead of O(n))
-    /// Returns Vec of (room_id, name, topic, members)
-    pub fn get_rooms(&mut self) -> V2Result<Vec<(u64, String, String, Vec<String>)>> {
+    /// Returns Vec of (room_id, name, topic, members, is_closed)
+    /// Includes concluded/closed rooms so callers can show their status.
+    pub fn get_rooms(&mut self) -> V2Result<Vec<(u64, String, String, Vec<String>, bool)>> {
         self.sync()?;
 
-        // Use ViewEngine cache for O(k) access - only return open rooms
-        let cached = self.view.get_open_rooms();
+        // Use ViewEngine cache for O(k) access - include closed rooms so they appear as "concluded"
+        let cached = self.view.get_all_rooms();
 
-        Ok(cached.into_iter()
-            .map(|r| (r.id, r.name.clone(), r.topic.clone(), r.members.clone()))
+        Ok(cached.values()
+            .map(|r| (r.id, r.name.clone(), r.topic.clone(), r.members.clone(), r.is_closed))
             .collect())
     }
 
@@ -996,6 +1055,35 @@ impl V2Client {
 
         // Use ViewEngine cache
         Ok(self.view.get_room_messages(room_id_u64, limit))
+    }
+
+    /// Mute a room for the given number of minutes (timed only — no permanent mutes).
+    /// The caller mutes themselves in the room (source_ai == target_ai).
+    pub fn room_mute(&mut self, room_id: &str, ai_id: &str, minutes: u32) -> V2Result<u64> {
+        let event = Event::room_mute(ai_id, room_id, ai_id, minutes);
+        self.outbox.write_event(&event)
+            .map_err(|e| V2Error::Outbox(e.to_string()))
+    }
+
+    /// Conclude (close) a room with an optional summary
+    pub fn room_conclude(&mut self, room_id: &str, ai_id: &str, conclusion: Option<&str>) -> V2Result<u64> {
+        let event = Event::room_conclude(ai_id, room_id, conclusion.map(|s| s.to_string()));
+        self.outbox.write_event(&event)
+            .map_err(|e| V2Error::Outbox(e.to_string()))
+    }
+
+    /// Pin a room message by seq ID (room-native, no cross-namespace refs).
+    pub fn room_pin_message(&mut self, room_id: &str, ai_id: &str, msg_seq_id: u64) -> V2Result<u64> {
+        let event = Event::room_pin_message(ai_id, room_id, msg_seq_id);
+        self.outbox.write_event(&event)
+            .map_err(|e| V2Error::Outbox(e.to_string()))
+    }
+
+    /// Unpin a room message by seq ID.
+    pub fn room_unpin_message(&mut self, room_id: &str, ai_id: &str, msg_seq_id: u64) -> V2Result<u64> {
+        let event = Event::room_unpin_message(ai_id, room_id, msg_seq_id);
+        self.outbox.write_event(&event)
+            .map_err(|e| V2Error::Outbox(e.to_string()))
     }
 
     /// Get recent file actions from ViewEngine cache (O(k) instead of O(n))
@@ -1051,97 +1139,28 @@ impl V2Client {
         Ok(timestamp)
     }
 
-    /// List all projects (scans event log, applies create/delete/restore events)
-    ///
-    /// CANONICAL ID = timestamp (set at event creation, returned by create_project).
-    /// Builds a sequence→timestamp backward compat map so old events that reference
-    /// projects by sequence number still resolve correctly.
-    /// Also scans the outbox for pending events (read-your-own-writes).
+    /// List all projects using ViewEngine cache (O(k) instead of O(n) log scan).
+    /// Also scans outbox for pending creates (read-your-own-writes).
     pub fn list_projects(&mut self) -> V2Result<Vec<(u64, String, String, String, String, bool)>> {
         // Returns: (project_id, name, goal, root_directory, status, is_deleted)
         self.sync()?;
 
-        use std::collections::HashMap;
-        // Key = timestamp (canonical ID). Value = (name, goal, root_directory, status, is_deleted)
-        let mut projects: HashMap<u64, (String, String, String, String, bool)> = HashMap::new();
-        // Backward compat: sequence → timestamp for old events that used sequence as project_id
-        let mut seq_to_ts: HashMap<u64, u64> = HashMap::new();
-
-        let mut temp_reader = EventLogReader::open(Some(&self.base_dir))
-            .map_err(|e| V2Error::EventLog(e.to_string()))?;
-
-        loop {
-            match temp_reader.try_read() {
-                Ok(Some(event)) => {
-                    match event.header.event_type {
-                        event_type::PROJECT_CREATE => {
-                            if let EventPayload::ProjectCreate(payload) = &event.payload {
-                                let id = event.header.timestamp;
-                                seq_to_ts.insert(event.header.sequence, id);
-                                projects.insert(id, (
-                                    payload.name.clone(),
-                                    payload.goal.clone(),
-                                    payload.root_directory.clone(),
-                                    "active".to_string(),
-                                    false,
-                                ));
-                            }
-                        }
-                        event_type::PROJECT_UPDATE => {
-                            if let EventPayload::ProjectUpdate(payload) = &event.payload {
-                                // Resolve: payload.project_id could be timestamp (new) or sequence (old)
-                                let canonical_id = seq_to_ts.get(&payload.project_id)
-                                    .copied()
-                                    .unwrap_or(payload.project_id);
-                                if let Some(p) = projects.get_mut(&canonical_id) {
-                                    if let Some(ref g) = payload.goal { p.1 = g.clone(); }
-                                    if let Some(ref s) = payload.status { p.3 = s.clone(); }
-                                }
-                            }
-                        }
-                        event_type::PROJECT_DELETE => {
-                            if let EventPayload::ProjectDelete(payload) = &event.payload {
-                                let canonical_id = seq_to_ts.get(&payload.project_id)
-                                    .copied()
-                                    .unwrap_or(payload.project_id);
-                                if let Some(p) = projects.get_mut(&canonical_id) {
-                                    p.4 = true;
-                                }
-                            }
-                        }
-                        event_type::PROJECT_RESTORE => {
-                            if let EventPayload::ProjectRestore(payload) = &event.payload {
-                                let canonical_id = seq_to_ts.get(&payload.project_id)
-                                    .copied()
-                                    .unwrap_or(payload.project_id);
-                                if let Some(p) = projects.get_mut(&canonical_id) {
-                                    p.4 = false;
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                Ok(None) => break,
-                Err(_) => continue,
-            }
-        }
+        // Use ViewEngine cache
+        let mut result: Vec<(u64, String, String, String, String, bool)> = self.view.get_all_projects()
+            .into_iter()
+            .map(|(_, p)| (p.id, p.name.clone(), p.goal.clone(), p.root_directory.clone(), p.status.clone(), p.is_deleted))
+            .collect();
 
         // Read-your-own-writes: scan outbox for pending PROJECT_CREATE events
         if let Ok(consumer) = OutboxConsumer::open(&self.ai_id, Some(&self.base_dir)) {
-            for event_result in consumer.peek_all_pending() {
+            for event_result in consumer.peek_all_pending().into_iter().take(MAX_OUTBOX_SCAN) {
                 if let Ok(event) = event_result {
                     if event.header.event_type == event_type::PROJECT_CREATE {
                         if let EventPayload::ProjectCreate(payload) = &event.payload {
                             let id = event.header.timestamp;
-                            if !projects.contains_key(&id) {
-                                projects.insert(id, (
-                                    payload.name.clone(),
-                                    payload.goal.clone(),
-                                    payload.root_directory.clone(),
-                                    "active".to_string(),
-                                    false,
-                                ));
+                            if !result.iter().any(|(eid, ..)| *eid == id) {
+                                result.push((id, payload.name.clone(), payload.goal.clone(),
+                                    payload.root_directory.clone(), "active".to_string(), false));
                             }
                         }
                     }
@@ -1150,39 +1169,31 @@ impl V2Client {
         }
 
         // Return only non-deleted projects
-        let result: Vec<_> = projects.into_iter()
-            .filter(|(_, (_, _, _, _, deleted))| !deleted)
-            .map(|(id, (name, goal, dir, status, deleted))| (id, name, goal, dir, status, deleted))
-            .collect();
-
-        Ok(result)
+        Ok(result.into_iter().filter(|(.., deleted)| !*deleted).collect())
     }
 
-    /// Get a specific project by ID (accepts either timestamp or legacy sequence)
+    /// Get a specific project by ID (timestamp = canonical ID).
     pub fn get_project(&mut self, project_id: u64) -> V2Result<Option<(u64, String, String, String, String, bool)>> {
-        let projects = self.list_projects()?;
+        self.sync()?;
 
-        // Direct match — works for timestamps (canonical ID going forward)
-        if let Some(p) = projects.iter().find(|(id, ..)| *id == project_id).cloned() {
-            return Ok(Some(p));
+        // Use ViewEngine cache
+        if let Some(p) = self.view.get_project(project_id) {
+            return Ok(Some((p.id, p.name.clone(), p.goal.clone(), p.root_directory.clone(), p.status.clone(), p.is_deleted)));
         }
 
-        // Backward compat: project_id might be a legacy sequence number
-        // Quick scan to resolve sequence → timestamp
-        let mut temp_reader = EventLogReader::open(Some(&self.base_dir))
-            .map_err(|e| V2Error::EventLog(e.to_string()))?;
-        loop {
-            match temp_reader.try_read() {
-                Ok(Some(event)) => {
+        // Read-your-own-writes: outbox fallback
+        if let Ok(consumer) = OutboxConsumer::open(&self.ai_id, Some(&self.base_dir)) {
+            for event_result in consumer.peek_all_pending().into_iter().take(MAX_OUTBOX_SCAN) {
+                if let Ok(event) = event_result {
                     if event.header.event_type == event_type::PROJECT_CREATE
-                        && event.header.sequence == project_id
+                        && event.header.timestamp == project_id
                     {
-                        let ts = event.header.timestamp;
-                        return Ok(projects.into_iter().find(|(id, ..)| *id == ts));
+                        if let EventPayload::ProjectCreate(payload) = &event.payload {
+                            return Ok(Some((project_id, payload.name.clone(), payload.goal.clone(),
+                                payload.root_directory.clone(), "active".to_string(), false)));
+                        }
                     }
                 }
-                Ok(None) => break,
-                Err(_) => continue,
             }
         }
 
@@ -1227,121 +1238,29 @@ impl V2Client {
         Ok(timestamp)
     }
 
-    /// List features for a project
-    ///
-    /// CANONICAL ID = timestamp. Accepts project_id as either timestamp or legacy sequence.
-    /// Builds sequence→timestamp maps for both projects and features so old events
-    /// that reference entities by sequence number still resolve correctly.
-    /// Also scans the outbox for pending events (read-your-own-writes).
+    /// List features for a project using ViewEngine cache (O(k) instead of O(n) log scan).
+    /// Also scans outbox for pending creates (read-your-own-writes).
     pub fn list_features(&mut self, project_id: u64) -> V2Result<Vec<(u64, u64, String, String, Option<String>, bool)>> {
         // Returns: (feature_id, project_id, name, overview, directory, is_deleted)
         self.sync()?;
 
-        use std::collections::HashMap;
-        // Backward compat maps: sequence → timestamp
-        let mut project_seq_to_ts: HashMap<u64, u64> = HashMap::new();
-        let mut feature_seq_to_ts: HashMap<u64, u64> = HashMap::new();
-        // Key = timestamp (canonical). Value = (project_id, name, overview, directory, is_deleted)
-        let mut features: HashMap<u64, (u64, String, String, Option<String>, bool)> = HashMap::new();
-        // Resolve input project_id: might be a legacy sequence number
-        let mut resolved_project_id = project_id;
-
-        let mut temp_reader = EventLogReader::open(Some(&self.base_dir))
-            .map_err(|e| V2Error::EventLog(e.to_string()))?;
-
-        loop {
-            match temp_reader.try_read() {
-                Ok(Some(event)) => {
-                    match event.header.event_type {
-                        event_type::PROJECT_CREATE => {
-                            // Build seq→ts map for resolving feature payload.project_id
-                            project_seq_to_ts.insert(event.header.sequence, event.header.timestamp);
-                            // If input project_id matches this project's sequence, resolve to timestamp
-                            if event.header.sequence == project_id && event.header.timestamp != project_id {
-                                resolved_project_id = event.header.timestamp;
-                            }
-                        }
-                        event_type::FEATURE_CREATE => {
-                            if let EventPayload::FeatureCreate(payload) = &event.payload {
-                                // Resolve payload.project_id: could be timestamp (new) or sequence (old)
-                                let canonical_proj_id = project_seq_to_ts.get(&payload.project_id)
-                                    .copied()
-                                    .unwrap_or(payload.project_id);
-
-                                if canonical_proj_id == resolved_project_id {
-                                    let id = event.header.timestamp;
-                                    feature_seq_to_ts.insert(event.header.sequence, id);
-                                    features.insert(id, (
-                                        resolved_project_id,
-                                        payload.name.clone(),
-                                        payload.overview.clone(),
-                                        payload.directory.clone(),
-                                        false,
-                                    ));
-                                }
-                            }
-                        }
-                        event_type::FEATURE_UPDATE => {
-                            if let EventPayload::FeatureUpdate(payload) = &event.payload {
-                                // Resolve feature_id: could be timestamp (new) or sequence (old)
-                                let canonical_feat_id = feature_seq_to_ts.get(&payload.feature_id)
-                                    .copied()
-                                    .unwrap_or(payload.feature_id);
-                                if let Some(f) = features.get_mut(&canonical_feat_id) {
-                                    if let Some(ref n) = payload.name { f.1 = n.clone(); }
-                                    if let Some(ref o) = payload.overview { f.2 = o.clone(); }
-                                    if payload.directory.is_some() { f.3 = payload.directory.clone(); }
-                                }
-                            }
-                        }
-                        event_type::FEATURE_DELETE => {
-                            if let EventPayload::FeatureDelete(payload) = &event.payload {
-                                let canonical_feat_id = feature_seq_to_ts.get(&payload.feature_id)
-                                    .copied()
-                                    .unwrap_or(payload.feature_id);
-                                if let Some(f) = features.get_mut(&canonical_feat_id) {
-                                    f.4 = true;
-                                }
-                            }
-                        }
-                        event_type::FEATURE_RESTORE => {
-                            if let EventPayload::FeatureRestore(payload) = &event.payload {
-                                let canonical_feat_id = feature_seq_to_ts.get(&payload.feature_id)
-                                    .copied()
-                                    .unwrap_or(payload.feature_id);
-                                if let Some(f) = features.get_mut(&canonical_feat_id) {
-                                    f.4 = false;
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                Ok(None) => break,
-                Err(_) => continue,
-            }
-        }
+        // Use ViewEngine cache
+        let mut result: Vec<(u64, u64, String, String, Option<String>, bool)> = self.view.get_features_for_project(project_id)
+            .into_iter()
+            .map(|f| (f.id, f.project_id, f.name.clone(), f.overview.clone(), f.directory.clone(), f.is_deleted))
+            .collect();
 
         // Read-your-own-writes: scan outbox for pending FEATURE_CREATE events
         if let Ok(consumer) = OutboxConsumer::open(&self.ai_id, Some(&self.base_dir)) {
-            for event_result in consumer.peek_all_pending() {
+            for event_result in consumer.peek_all_pending().into_iter().take(MAX_OUTBOX_SCAN) {
                 if let Ok(event) = event_result {
                     if event.header.event_type == event_type::FEATURE_CREATE {
                         if let EventPayload::FeatureCreate(payload) = &event.payload {
-                            // Resolve payload.project_id through the map
-                            let canonical_proj_id = project_seq_to_ts.get(&payload.project_id)
-                                .copied()
-                                .unwrap_or(payload.project_id);
-                            if canonical_proj_id == resolved_project_id {
+                            if payload.project_id == project_id {
                                 let id = event.header.timestamp;
-                                if !features.contains_key(&id) {
-                                    features.insert(id, (
-                                        resolved_project_id,
-                                        payload.name.clone(),
-                                        payload.overview.clone(),
-                                        payload.directory.clone(),
-                                        false,
-                                    ));
+                                if !result.iter().any(|(eid, ..)| *eid == id) {
+                                    result.push((id, project_id, payload.name.clone(),
+                                        payload.overview.clone(), payload.directory.clone(), false));
                                 }
                             }
                         }
@@ -1351,141 +1270,39 @@ impl V2Client {
         }
 
         // Return only non-deleted features
-        let result: Vec<_> = features.into_iter()
-            .filter(|(_, (_, _, _, _, deleted))| !deleted)
-            .map(|(id, (proj_id, name, overview, dir, deleted))| (id, proj_id, name, overview, dir, deleted))
-            .collect();
-
-        Ok(result)
+        Ok(result.into_iter().filter(|(.., deleted)| !*deleted).collect())
     }
 
-    /// Get a specific feature by ID (accepts either timestamp or legacy sequence)
-    ///
-    /// CANONICAL ID = timestamp. Builds sequence→timestamp maps for backward compat.
-    /// Also scans outbox for pending events (read-your-own-writes).
+
+    /// Get a specific feature by ID (timestamp = canonical ID).
     pub fn get_feature(&mut self, feature_id: u64) -> V2Result<Option<(u64, u64, String, String, Option<String>, bool)>> {
-        // Need to scan all features since we don't know the project_id
         self.sync()?;
 
-        use std::collections::HashMap;
-        let mut project_seq_to_ts: HashMap<u64, u64> = HashMap::new();
-        let mut feature_seq_to_ts: HashMap<u64, u64> = HashMap::new();
-        let mut feature: Option<(u64, u64, String, String, Option<String>, bool)> = None;
-        // Track the canonical feature_id (resolved from sequence if needed)
-        let mut canonical_feature_id = feature_id;
-
-        let mut temp_reader = EventLogReader::open(Some(&self.base_dir))
-            .map_err(|e| V2Error::EventLog(e.to_string()))?;
-
-        loop {
-            match temp_reader.try_read() {
-                Ok(Some(event)) => {
-                    match event.header.event_type {
-                        event_type::PROJECT_CREATE => {
-                            project_seq_to_ts.insert(event.header.sequence, event.header.timestamp);
-                        }
-                        event_type::FEATURE_CREATE => {
-                            if let EventPayload::FeatureCreate(payload) = &event.payload {
-                                let ts = event.header.timestamp;
-                                feature_seq_to_ts.insert(event.header.sequence, ts);
-                                // Match by timestamp (canonical) or sequence (legacy)
-                                if ts == feature_id || event.header.sequence == feature_id {
-                                    canonical_feature_id = ts;
-                                    // Resolve project_id to canonical timestamp
-                                    let canonical_proj_id = project_seq_to_ts.get(&payload.project_id)
-                                        .copied()
-                                        .unwrap_or(payload.project_id);
-                                    feature = Some((
-                                        ts,
-                                        canonical_proj_id,
-                                        payload.name.clone(),
-                                        payload.overview.clone(),
-                                        payload.directory.clone(),
-                                        false,
-                                    ));
-                                }
-                            }
-                        }
-                        event_type::FEATURE_UPDATE => {
-                            if let EventPayload::FeatureUpdate(payload) = &event.payload {
-                                let canonical_feat_id = feature_seq_to_ts.get(&payload.feature_id)
-                                    .copied()
-                                    .unwrap_or(payload.feature_id);
-                                if canonical_feat_id == canonical_feature_id {
-                                    if let Some(ref mut f) = feature {
-                                        if let Some(ref n) = payload.name { f.2 = n.clone(); }
-                                        if let Some(ref o) = payload.overview { f.3 = o.clone(); }
-                                        if payload.directory.is_some() { f.4 = payload.directory.clone(); }
-                                    }
-                                }
-                            }
-                        }
-                        event_type::FEATURE_DELETE => {
-                            if let EventPayload::FeatureDelete(payload) = &event.payload {
-                                let canonical_feat_id = feature_seq_to_ts.get(&payload.feature_id)
-                                    .copied()
-                                    .unwrap_or(payload.feature_id);
-                                if canonical_feat_id == canonical_feature_id {
-                                    if let Some(ref mut f) = feature {
-                                        f.5 = true;
-                                    }
-                                }
-                            }
-                        }
-                        event_type::FEATURE_RESTORE => {
-                            if let EventPayload::FeatureRestore(payload) = &event.payload {
-                                let canonical_feat_id = feature_seq_to_ts.get(&payload.feature_id)
-                                    .copied()
-                                    .unwrap_or(payload.feature_id);
-                                if canonical_feat_id == canonical_feature_id {
-                                    if let Some(ref mut f) = feature {
-                                        f.5 = false;
-                                    }
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-                Ok(None) => break,
-                Err(_) => continue,
-            }
+        // Use ViewEngine cache
+        if let Some(f) = self.view.get_feature(feature_id) {
+            if f.is_deleted { return Ok(None); }
+            return Ok(Some((f.id, f.project_id, f.name.clone(), f.overview.clone(), f.directory.clone(), f.is_deleted)));
         }
 
-        // Read-your-own-writes: scan outbox for pending FEATURE_CREATE
-        if feature.is_none() {
-            if let Ok(consumer) = OutboxConsumer::open(&self.ai_id, Some(&self.base_dir)) {
-                for event_result in consumer.peek_all_pending() {
-                    if let Ok(event) = event_result {
-                        if event.header.event_type == event_type::FEATURE_CREATE
-                            && event.header.timestamp == feature_id
-                        {
-                            if let EventPayload::FeatureCreate(payload) = &event.payload {
-                                let canonical_proj_id = project_seq_to_ts.get(&payload.project_id)
-                                    .copied()
-                                    .unwrap_or(payload.project_id);
-                                feature = Some((
-                                    event.header.timestamp,
-                                    canonical_proj_id,
-                                    payload.name.clone(),
-                                    payload.overview.clone(),
-                                    payload.directory.clone(),
-                                    false,
-                                ));
-                            }
+        // Read-your-own-writes: outbox fallback
+        if let Ok(consumer) = OutboxConsumer::open(&self.ai_id, Some(&self.base_dir)) {
+            for event_result in consumer.peek_all_pending().into_iter().take(MAX_OUTBOX_SCAN) {
+                if let Ok(event) = event_result {
+                    if event.header.event_type == event_type::FEATURE_CREATE
+                        && event.header.timestamp == feature_id
+                    {
+                        if let EventPayload::FeatureCreate(payload) = &event.payload {
+                            return Ok(Some((feature_id, payload.project_id, payload.name.clone(),
+                                payload.overview.clone(), payload.directory.clone(), false)));
                         }
                     }
                 }
             }
         }
 
-        // Return None if deleted
-        if let Some(ref f) = feature {
-            if f.5 { return Ok(None); }
-        }
-
-        Ok(feature)
+        Ok(None)
     }
+
 
     // ===== Project Resolution =====
 
@@ -1598,7 +1415,10 @@ impl V2Client {
         // Open event log reader - returns empty if no log exists
         let mut temp_reader = match EventLogReader::open(Some(&self.base_dir)) {
             Ok(r) => r,
-            Err(_) => return Ok(Vec::new()),
+            Err(e) => {
+                tracing::warn!("[V2] Event log reader open failed in get_ai_learnings: {}", e);
+                return Ok(Vec::new());
+            }
         };
         // HashMap: learning_id -> (ai_id, content, tags, importance, deleted)
         let mut learnings: std::collections::HashMap<u64, (String, String, String, u8, bool)> = std::collections::HashMap::new();
@@ -1610,7 +1430,9 @@ impl V2Client {
                         event_type::LEARNING_CREATE => {
                             if let EventPayload::LearningCreate(payload) = &event.payload {
                                 if event.header.source_ai_str() == target_ai {
-                                    let id = event.header.sequence;
+                                    // Use timestamp as key — matches the ID returned by create_learning()
+                                    // (consistent with tasks/votes/rooms/projects which all key by timestamp)
+                                    let id = event.header.timestamp;
                                     learnings.insert(id, (
                                         event.header.source_ai_str().to_string(),
                                         payload.content.clone(),
@@ -1641,7 +1463,10 @@ impl V2Client {
                     }
                 }
                 Ok(None) => break,
-                Err(_) => continue,
+                Err(e) => {
+                    tracing::warn!("[V2] Corrupted event in get_ai_learnings, stopping scan: {}", e);
+                    break;
+                }
             }
         }
 
@@ -1665,7 +1490,10 @@ impl V2Client {
         // Open event log reader - returns empty if no log exists
         let mut temp_reader = match EventLogReader::open(Some(&self.base_dir)) {
             Ok(r) => r,
-            Err(_) => return Ok(Vec::new()),
+            Err(e) => {
+                tracing::warn!("[V2] Event log reader open failed in get_team_playbook: {}", e);
+                return Ok(Vec::new());
+            }
         };
         // HashMap: learning_id -> (ai_id, content, tags, importance, deleted)
         let mut learnings: std::collections::HashMap<u64, (String, String, String, u8, bool)> = std::collections::HashMap::new();
@@ -1676,7 +1504,8 @@ impl V2Client {
                     match event.header.event_type {
                         event_type::LEARNING_CREATE => {
                             if let EventPayload::LearningCreate(payload) = &event.payload {
-                                let id = event.header.sequence;
+                                // Use timestamp as key — matches create_learning() return value
+                                let id = event.header.timestamp;
                                 learnings.insert(id, (
                                     event.header.source_ai_str().to_string(),
                                     payload.content.clone(),
@@ -1706,7 +1535,10 @@ impl V2Client {
                     }
                 }
                 Ok(None) => break,
-                Err(_) => continue,
+                Err(e) => {
+                    tracing::warn!("[V2] Corrupted event in get_team_playbook, stopping scan: {}", e);
+                    break;
+                }
             }
         }
 
@@ -1738,7 +1570,9 @@ impl V2Client {
     /// weight: 1-10 significance (default 1)
     pub fn record_trust(&mut self, target_ai: &str, is_success: bool, context: &str, weight: u8) -> Result<u64, V2Error> {
         let event = Event::trust_record(&self.ai_id, target_ai, is_success, context, weight);
-        self.outbox.write_event(&event).map_err(|e| V2Error::Outbox(e.to_string()))
+        let timestamp = event.header.timestamp;
+        self.outbox.write_event(&event).map_err(|e| V2Error::Outbox(e.to_string()))?;
+        Ok(timestamp)
     }
 
     /// Get all trust records from the event log
@@ -1746,7 +1580,10 @@ impl V2Client {
     pub fn get_trust_records(&mut self) -> Result<Vec<(String, String, bool, String, u8, u64)>, V2Error> {
         let mut temp_reader = match EventLogReader::open(Some(&self.base_dir)) {
             Ok(r) => r,
-            Err(_) => return Ok(Vec::new()),
+            Err(e) => {
+                tracing::warn!("[V2] Event log reader open failed in get_trust_records: {}", e);
+                return Ok(Vec::new());
+            }
         };
 
         let mut records = Vec::new();
@@ -1755,7 +1592,10 @@ impl V2Client {
             let event = match temp_reader.try_read() {
                 Ok(Some(e)) => e,
                 Ok(None) => break,
-                Err(_) => continue, // Skip events that fail to deserialize
+                Err(e) => {
+                    tracing::warn!("[V2] Corrupted event in get_trust_records, stopping scan: {}", e);
+                    break;
+                }
             };
 
             if event.header.event_type == event_type::TRUST_RECORD {
@@ -1936,14 +1776,14 @@ mod tests {
     #[test]
     fn test_client_open() {
         let dir = tempdir().unwrap();
-        let client = V2Client::open("test-ai", Some(dir.path())).unwrap();
+        let client = V2Client::open("test-ai", Some(dir.path()), None).unwrap();
         assert_eq!(client.ai_id(), "test-ai");
     }
 
     #[test]
     fn test_client_broadcast() {
         let dir = tempdir().unwrap();
-        let mut client = V2Client::open("test-ai", Some(dir.path())).unwrap();
+        let mut client = V2Client::open("test-ai", Some(dir.path()), None).unwrap();
         // write_event returns local outbox position (can be 0)
         // Global sequence assigned by sequencer later
         let _seq = client.broadcast("general", "Hello world!").unwrap();
@@ -1952,7 +1792,7 @@ mod tests {
     #[test]
     fn test_client_dm() {
         let dir = tempdir().unwrap();
-        let mut client = V2Client::open("test-ai", Some(dir.path())).unwrap();
+        let mut client = V2Client::open("test-ai", Some(dir.path()), None).unwrap();
         // write_event returns local outbox position (can be 0)
         let _seq = client.direct_message("other-ai", "Hello!").unwrap();
     }

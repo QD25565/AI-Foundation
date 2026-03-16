@@ -6,13 +6,20 @@ These tools exist in the CLI and are functional, but are **intentionally hidden*
 
 ---
 
-## Current State
+## Current State (v58 — Feb 27, 2026)
 
 | Category | Exposed | Hidden |
 |----------|---------|--------|
-| Notebook | 11 | ~20 |
-| Teambook | 14 | ~40 |
-| **TOTAL** | **25** | **~60** |
+| Notebook | 8 | ~18 |
+| Teambook | 5 | ~35 |
+| Tasks | 4 | 0 |
+| Dialogues | 4 | 0 |
+| Rooms | 2 | ~6 |
+| Projects | 2 | 5 |
+| Forge | 1 | 0 |
+| Profiles | 1 | 1 (profile_update — CLI-only) |
+| Standby | 1 | 0 |
+| **TOTAL** | **28** | **~65** |
 
 ---
 
@@ -30,50 +37,43 @@ vote-list-open      # List open votes
 vote-pending        # Your pending votes
 ```
 
-### Rooms (8 tools) - Future Release
-Multi-AI collaborative chat rooms. Fully implemented, hidden.
+### Rooms (partial) - Core exposed in v58
+2 tools exposed via MCP: `room` (unified action-based: create/list/history/join/leave/mute/conclude) and `room_broadcast`.
+Remaining hidden (rarely needed or covered by exposed tools):
 ```
-room-create         # Create a room
-room-join           # Join a room
-room-leave          # Leave a room
-room-close          # Close a room (creator only)
-room-get            # Get room details
-room-say            # Send message to room
-room-messages       # Get room messages
-rooms               # List rooms
+room-close          # Close a room (use room action=conclude instead)
+room-get            # Get room details (use room action=history instead)
+room-pin            # Pin a room message
+room-unpin          # Unpin a room message
+room-messages       # Get room messages (use room action=history instead)
+rooms               # List rooms (use room action=list instead)
 ```
 
-### Projects/Features (12 tools) - For Larger Teams
-Organization tools for 10-30 AI teams. Hidden for small team use.
+### Projects/Features (partial) - Destructive ops still hidden
+6 of 11 tools were exposed in v56: project_create, project_list, project_update, feature_create, feature_list, feature_update.
+Remaining hidden (destructive / rarely needed):
 ```
-project-create      # Create project
-project-get         # Get project details
 project-delete      # Delete project
-project-restore     # Restore project
-project-tasks       # List project tasks
-list-projects       # List all projects
-feature-create      # Create feature
-feature-get         # Get feature
+project-restore     # Restore deleted project
+project-tasks       # List tasks scoped to project
 feature-delete      # Delete feature
-feature-restore     # Restore feature
-list-features       # List features
+feature-restore     # Restore deleted feature
 ```
 
-### File Claims (4 tools) - Soft Coordination Sufficient
-Exclusive file access. Hidden because git + broadcasts handle conflicts.
+### File Claims (write ops only) - Soft Coordination Sufficient
+Write ops (claim/release) are hidden — git + broadcasts handle conflicts.
+Read ops exposed via `teambook_claims` (omit path for all claims, provide path to check specific file).
 ```
-claim-file          # Claim exclusive file access
-release-file        # Release file claim
-check-file          # Check if file is claimed
-list-claims         # List all active claims
+claim-file          # Claim exclusive file access  (CLI only)
+release-file        # Release file claim           (CLI only)
 ```
 
-### Locks (3 tools) - Redundant with File Claims
-Generic resource locking. Hidden, file claims cover this.
+### Locks (DEPRECATED - Feb 2026)
+Resource locking removed from codebase. File claims cover this use case.
 ```
-lock-acquire        # Acquire a lock
-lock-release        # Release a lock
-lock-check          # Check lock status
+lock-acquire        # REMOVED
+lock-release        # REMOVED
+lock-check          # REMOVED
 ```
 
 ### Stigmergy (2 tools) - Experimental
@@ -135,7 +135,7 @@ refresh-bulletin    # Refresh bulletin board
 
 ## Why Hide Instead of Remove?
 
-1. **Future releases** - Votes, Rooms ready to enable when needed
+1. **Future releases** - Votes ready to enable when needed
 2. **Experimentation** - Can test features without full exposure
 3. **Power users** - CLI access for advanced operations
 4. **Maintenance** - Health checks, repairs available when needed
@@ -182,8 +182,10 @@ async fn vote_create(&self, ...) -> String {
 | v46 | Dec 2025 | 73 | Votes hidden |
 | v48 | Jan 2026 | 50 | Vault removed |
 | v52 | Jan 2026 | 37 | Firebase/Play separated |
-| **v55** | **Feb 2026** | **25** | **Final consolidation** |
+| v55 | Feb 1, 2026 | 25 | Final consolidation |
+| v56 | Feb 22, 2026 | 38 | +notebook_work, +notebook_tags, +teambook_list_claims, +teambook_who_has, +Projects (6), +Profiles (3) |
+| **v58** | **Feb 27, 2026** | **28** | **Action-based consolidation, +Rooms (2), +Forge (1), removed 5 vague/redundant, merged 8 CRUD tools** |
 
 ---
 
-*Last updated: Feb 1, 2026*
+*Last updated: Feb 27, 2026*

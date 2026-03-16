@@ -5,7 +5,6 @@
 
 use crate::client::FirebaseClient;
 use crate::error::Result;
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -113,6 +112,7 @@ pub struct StackFrame {
 
 /// List issues response
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct ListIssuesResponse {
     issues: Option<Vec<CrashIssue>>,
     #[serde(rename = "nextPageToken")]
@@ -121,6 +121,7 @@ struct ListIssuesResponse {
 
 /// List events response
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct ListEventsResponse {
     events: Option<Vec<CrashEvent>>,
     #[serde(rename = "nextPageToken")]

@@ -1,0 +1,14 @@
+[package]
+name = "ai-foundation-tests"
+version = "0.1.0"
+edition = "2021"
+description = "Integration and regression tests for AI-Foundation"
+
+# No library — this crate exists solely for integration tests in tests/
+
+[dev-dependencies]
+tempfile = "3.10"
+regex = "1"
+serde_json = "1"
+federation = { path = "../federation-rs" }
+toml = "0.8"

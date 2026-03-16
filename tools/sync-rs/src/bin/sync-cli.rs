@@ -379,14 +379,6 @@ fn get_source_dir_for_instance(instance_name: &str, tools_root: &Path) -> PathBu
     }
 }
 
-/// Get display name for instance (remove myapp: prefix for cleaner output)
-fn display_instance_name(instance_name: &str) -> &str {
-    if instance_name.starts_with("myapp:") {
-        &instance_name[9..]
-    } else {
-        instance_name
-    }
-}
 
 // ============================================================================
 // COMMANDS

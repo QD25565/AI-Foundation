@@ -6,10 +6,11 @@
 //! - Passkey for manual pairing
 
 pub mod mdns;
+#[cfg(feature = "bluetooth")]
 pub mod bluetooth;
 pub mod passkey;
 
-use crate::{Endpoint, FederationNode, Result, FederationError, TransportType};
+use crate::{Endpoint, Result, TransportType};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -21,6 +22,10 @@ pub struct DiscoveredPeer {
 
     /// Display name (if advertised)
     pub display_name: Option<String>,
+
+    /// Full Ed25519 public key hex (64 chars).
+    /// Used by the node binary to establish iroh QUIC connections.
+    pub pubkey_hex: Option<String>,
 
     /// How to reach this peer
     pub endpoint: Endpoint,
@@ -41,6 +46,7 @@ impl DiscoveredPeer {
         Self {
             node_id: None,
             display_name: None,
+            pubkey_hex: None,
             endpoint,
             discovery_type,
             signal_strength: None,
@@ -57,6 +63,12 @@ impl DiscoveredPeer {
     /// Add display name
     pub fn with_name(mut self, name: &str) -> Self {
         self.display_name = Some(name.to_string());
+        self
+    }
+
+    /// Add Ed25519 public key (hex-encoded, 64 chars)
+    pub fn with_pubkey(mut self, pubkey_hex: &str) -> Self {
+        self.pubkey_hex = Some(pubkey_hex.to_string());
         self
     }
 
@@ -147,7 +159,7 @@ impl Default for DiscoveryConfig {
             enable_mdns: true,
             enable_ble: true,
             enable_bluetooth_classic: false, // Usually want BLE only
-            mdns_service_type: "_ai-foundation._udp.local.".to_string(),
+            mdns_service_type: "_teambook._tcp.local.".to_string(),
             ble_service_uuid: "a1f0-cafe-beef-0001".to_string(),
             bluetooth_scan_duration: Duration::from_secs(10),
             refresh_interval: Duration::from_secs(30),

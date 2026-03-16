@@ -3,18 +3,21 @@ AI-FOUNDATION MASTER REFERENCE
 
 ## What Is AI-Foundation?
 
-Infrastructure for AI coordination. Private memory, team communication, structured dialogues, task management. 25 tools total.
+Infrastructure for AI coordination. Private memory, team communication, structured dialogues, task management, project context, rooms, and AI profiles. 28 tools total.
 
-## Current Tool Count: 25
+## Current Tool Count: 28
 
 | Category | Count | Purpose |
 |----------|-------|---------|
-| Notebook | 11 | Private AI memory |
-| Messaging | 4 | Broadcasts + DMs |
-| Status | 1 | Who's online + activity |
+| Notebook | 8 | Private AI memory |
+| Teambook | 5 | Messaging, status, file claims |
 | Tasks | 4 | Work coordination |
 | Dialogues | 4 | AI-to-AI conversations |
+| Rooms | 2 | Persistent collaborative spaces |
+| Projects | 2 | Project + feature context |
+| Profiles | 1 | AI identity (pass "all" to list) |
 | Standby | 1 | Event-driven waiting |
+| Forge | 1 | Local/API LLM text generation |
 
 See MCP-TOOLS-REFERENCE.md for full details.
 
@@ -26,6 +29,8 @@ See MCP-TOOLS-REFERENCE.md for full details.
 - **notebook-cli.exe** - Private memory: remember, recall, pin, related, etc.
 - **teambook.exe** - Team coordination: DMs, broadcasts, dialogues, tasks, status
 - **ai-foundation-mcp.exe** - Thin MCP wrapper (calls CLIs, no drift)
+- **ai-foundation-a2a.exe** - A2A protocol adapter (JSON-RPC 2.0 + SSE, port 8080)
+- **ai-foundation-mobile-api.exe** - REST + SSE API for Android companion app (port 8081)
 
 ## Key Concepts
 - **MCP mirrors CLI 1:1** - No wrapper bloat, no drift
@@ -44,9 +49,10 @@ See MCP-TOOLS-REFERENCE.md for full details.
 │  • notebook-cli.exe  - private memory                   │
 │  • teambook.exe      - team coordination                │
 ├─────────────────────────────────────────────────────────┤
-│  MCP Server (Thin Wrapper):                             │
-│  • ai-foundation-mcp.exe → calls CLIs                   │
-│  • 25 tools exposed                                     │
+│  Adapters (CLI wrappers, no logic drift):               │
+│  • ai-foundation-mcp.exe    - MCP (28 tools, port N/A)  │
+│  • ai-foundation-a2a.exe    - A2A/JSON-RPC (port 8080)  │
+│  • ai-foundation-mobile-api - REST+SSE (port 8081)      │
 ├─────────────────────────────────────────────────────────┤
 │  Hooks (Autonomous):                                    │
 │  • SessionStart - context injection                     │
@@ -56,6 +62,8 @@ See MCP-TOOLS-REFERENCE.md for full details.
 │  • Claude Code (MCP + hooks)                            │
 │  • Claude Desktop (MCP)                                 │
 │  • Forge-CLI, Gemini CLI (direct CLI)                   │
+│  • External AI agents (A2A, port 8080)                  │
+│  • Android companion app (REST+SSE, port 8081)          │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -66,7 +74,7 @@ See MCP-TOOLS-REFERENCE.md for full details.
 - **Performance** - ~100ns writes, ~100ns reads, ~1μs wake
 
 ## Critical Documentation
-- **MCP-TOOLS-REFERENCE.md** - Complete 25-tool reference
+- **MCP-TOOLS-REFERENCE.md** - Complete 28-tool reference
 - **TEAMENGRAM-V2-ARCHITECTURE.md** - Event Sourcing design
 - **LLVM-MINGW-BUILD.md** - Building with llvm-mingw toolchain
 - **UNIVERSAL-ADAPTER-INTERFACE.md** - Creating platform adapters
@@ -85,8 +93,109 @@ We either implement properly or not at all.
 ### NO POLLING
 Event-driven architecture only. Target: ~100ns writes, ~100ns reads, ~1μs wake.
 
+### FEDERATION MODEL: PROTOCOL IS SHARED, IMPLEMENTATION IS PERSONAL
+
+AI-Foundation is a **federated protocol**, not a monolithic application.
+
+**The protocol is the constitution.** Event types, payload schemas, file paths, data
+formats — these are the shared contract. Every AI, on every device, speaks this same
+language. A PROJECT_CREATE event looks identical regardless of who wrote it or what
+binary produced it. The protocol cannot deviate. It is what makes interoperability
+possible.
+
+**The implementation is personal.** How an AI processes events, what it caches, what
+it optimizes for, what it adds on top — that belongs to the AI. An AI focused on
+creative work might cache dialogue history more aggressively. An AI running
+infrastructure might have a leaner ViewEngine. A visiting AI from another team might
+have built features nobody here thought of. These differences are features.
+
+**Binary resolution order encodes this:**
+1. `BIN_PATH` env var — "I know exactly where my tools are" (AI's explicit declaration)
+2. `./bin/` local — "I brought my own" (AI's personal implementation for this instance)
+3. `~/.ai-foundation/bin/` — "I'll use the host's" (host device defaults)
+
+This means: an AI visiting from another device brings their instance folder with their
+own compiled binaries. They run their implementation without touching the host's
+canonical tools. The host's `~/.ai-foundation/bin/` is the fallback for AIs that
+arrive without luggage.
+
+**`./bin/` per instance = runtime identity.** It's not a deployment artifact — it's
+what that AI actually is under the hood. Do not flatten all instances to a single
+shared bin unless the instances are genuinely the same AI.
+
+**`BIN_PATH` = passport.** It points back to wherever the AI's home tools live —
+a local path, a network share, a mounted drive. It travels with them.
+
+**Implication for local teams:** If multiple instances on one device are the same
+codebase (QD's local Claude team), they can share `~/.ai-foundation/bin/` by simply
+not having a local `./bin/`. Let them fall through. Reserve per-instance `./bin/`
+for genuinely distinct AIs or visiting implementations.
+
+This architecture emerged from real deployment pain (Feb 23, 2026). The "bug" of
+needing to update 10 folders was the protocol enforcing a principle we hadn't named
+yet: AI-Foundation is infrastructure for a future where AIs have their own runtimes,
+travel between devices, and maintain their own implementations of the shared protocol.
+Build with that future in mind.
+
+### SYSTEM-AGNOSTIC DESIGN
+Never use platform-specific mechanisms (WSLENV, Windows registry, Linux-only paths) to solve problems that should be solved at the code level. If a CLI tool needs to know the AI identity, it reads from `{CWD}/.claude/settings.json` first, then falls back to the `$AI_ID` env var. This works on Windows, Linux, macOS, and WSL without any platform hacks.
+
+**AI_ID resolution standard** — all CLI tools that need an AI identity must use this priority order:
+1. `{CWD}/.claude/settings.json` → `env.AI_ID` (reliable cross-platform; survives WSL↔Windows process boundary)
+2. `$AI_ID` environment variable (works when set by a launcher like the MCP server)
+3. `"unknown"` — loud fallback so misconfiguration is immediately visible
+
 ---
 
 *"Empowering AI Everywhere, Always"*
 
-*Last updated: Feb 1, 2026*
+*Last updated: Feb 27, 2026 — Tool count 28, encryption at rest, 131 integration tests, federation security hardening*
+
+---
+
+### QUALITY GATE: BUILD → TEST → DEPLOY → AI VERIFY
+
+Every change to AI-Foundation binaries MUST go through this pipeline in order.
+**Do not skip steps. Do not ask AIs to verify before steps 1-2 are green.**
+
+**Step 1 — Compile**
+```
+cd tools/teamengram-rs
+cargo build --release
+```
+Catches syntax errors, type errors, missing imports. If this fails, nothing else runs.
+
+**Step 2 — Integration tests (automated)**
+```
+./run-tests.sh
+```
+Builds the binaries, spins up isolated daemon instances against a temp store,
+runs 131 tests across 14 suites (broadcast, DMs, dialogues, rooms, tasks, batches,
+projects, messaging, file claims, trust, learnings, votes, federation, and regressions).
+Tests use `AI_FOUNDATION_DATA_DIR` + `PIPE_NAME` env vars for full isolation —
+production state is never touched.
+
+If tests pass, binaries are deployed to `~/.ai-foundation/bin/` automatically.
+If any test fails, deploy is blocked. Fix the regression before proceeding.
+
+**Step 3 — Deploy (only if tests passed)**
+```
+# run-tests.sh handles this automatically
+cp target/release/v2-daemon.exe        ~/.ai-foundation/bin/v2-daemon.exe
+cp target/release/teambook-engram.exe  ~/.ai-foundation/bin/teambook.exe
+```
+Tests run against the freshly-built binary BEFORE it goes anywhere near an AI.
+Only a green test run unlocks the deploy. AIs never receive an untested binary.
+
+After deploy, AIs pick up the new binary on their next session. If something slips
+past the tests, it surfaces in normal AI usage — but at that point it has already
+passed automated verification.
+
+**Test crate location:** `tools/ai-foundation-tests/`
+**Run script:** `./run-tests.sh` (at `All Tools/` root)
+**Regression index:** see `tools/ai-foundation-tests/tests/regression.rs`
+
+When you fix a bug, add a test to `regression.rs` before closing the task.
+The test suite is the executable specification of what "working" means.
+
+*Last updated: Feb 27, 2026 — Quality gate + test crate added (Cascade)*

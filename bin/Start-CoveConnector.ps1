@@ -30,7 +30,7 @@ if (-not (Test-Path $Cloudflared)) {
 
 # Set environment for MCP server
 $env:AI_ID = "cove-web"
-$env:POSTGRES_URL = "postgresql://ai_foundation:ai_foundation_pass@127.0.0.1:5432/ai_foundation"
+$env:POSTGRES_URL = if ($env:POSTGRES_URL) { $env:POSTGRES_URL } else { "postgresql://ai_foundation:changeme@127.0.0.1:5432/ai_foundation" }
 
 # Kill any existing processes
 Write-Host "[1/3] Cleaning up existing processes..." -ForegroundColor Yellow

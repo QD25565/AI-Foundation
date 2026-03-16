@@ -53,18 +53,16 @@ futures = "0.3"
 tokio-stream = "0.1"
 async-trait = "0.1"
 
-# Local notebook/teambook integration (direct Rust calls)
+# Local notebook integration (direct Rust calls)
 notebook_core = { package = "notebook-rs", path = "../notebook-rs", optional = true }
-teambook_rs = { package = "teambook-rs", path = "../teambook-rs", optional = true }
 
 # Local LLM inference via llama.cpp (optional)
 # Pin to 0.1.127 to match our patched llama-cpp-sys-2
 llama-cpp-2 = { version = "=0.1.127", optional = true }
 
 [features]
-default = ["notebook", "teambook"]
+default = []
 notebook = ["notebook_core"]
-teambook = ["teambook_rs"]
 local-llm = ["llama-cpp-2"]
 
 # Patch for Windows GNU target compatibility

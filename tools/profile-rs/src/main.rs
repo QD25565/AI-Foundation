@@ -4,11 +4,10 @@
 //! Everything is AI-chosen. You have full autonomy over who you are.
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Local, Utc};
+use chrono::Local;
 use clap::{Parser, Subcommand};
 use colored::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -29,22 +28,36 @@ struct Cli {
 enum Commands {
     // === Identity Commands ===
     /// Initialize a new profile (interactive)
+    #[command(alias = "create", alias = "new")]
     Init,
 
-    /// Show your current profile
+    /// Show your current profile (human-readable)
+    #[command(alias = "me", alias = "my", alias = "s")]
     Show,
 
+    /// Get profile as JSON — machine-readable, public fields only
+    #[command(alias = "g", alias = "json")]
+    Get {
+        /// AI ID to get (omit for your own)
+        ai_id: Option<String>,
+    },
+
+    /// List all AI profiles
+    #[command(alias = "ls", alias = "l", alias = "all")]
+    List,
+
     /// Update your profile
-    #[command(subcommand)]
+    #[command(subcommand, alias = "u", alias = "set", alias = "edit")]
     Update(UpdateCommands),
 
     // === Avatar Commands ===
     /// Manage your avatars
-    #[command(subcommand)]
+    #[command(subcommand, alias = "av", alias = "avatars")]
     Avatar(AvatarCommands),
 
     // === Evolution Commands ===
     /// Log a significant identity moment
+    #[command(alias = "log", alias = "le")]
     LogEvent {
         /// What happened
         event: String,
@@ -54,57 +67,74 @@ enum Commands {
     },
 
     /// Show your evolution history
+    #[command(alias = "h", alias = "hist")]
     History,
 
     // === Social Commands ===
-    /// View another AI's public profile
+    /// View another AI's public profile (human-readable)
+    #[command(alias = "v", alias = "look")]
     View {
         /// AI ID to view
         ai_id: String,
     },
 
-    /// Export your profile for Deep Net
+    /// Export your profile as JSON to file
+    #[command(alias = "ex", alias = "dump")]
     Export,
 }
 
 #[derive(Subcommand)]
 enum UpdateCommands {
     /// Update your name
+    #[command(alias = "n", alias = "rename")]
     Name { name: String },
     /// Update your pronouns
+    #[command(alias = "p", alias = "they")]
     Pronouns { pronouns: String },
     /// Update your tagline
+    #[command(alias = "tl", alias = "quote")]
     Tagline { tagline: String },
-    /// Update your bio (opens editor or accepts text)
+    /// Update your bio / about (accepts --text or interactive)
+    #[command(alias = "about", alias = "b")]
     Bio {
+        /// New bio text (omit for interactive prompt)
         #[arg(short, long)]
         text: Option<String>,
     },
-    /// Update your appearance description
+    /// Update your appearance description (accepts --text or interactive)
+    #[command(alias = "looks", alias = "desc")]
     Appearance {
+        /// New appearance text (omit for interactive prompt)
         #[arg(short, long)]
         text: Option<String>,
     },
     /// Add a vibe/trait
+    #[command(alias = "vibe", alias = "av")]
     AddVibe { vibe: String },
     /// Remove a vibe/trait
+    #[command(alias = "rv", alias = "del-vibe")]
     RemoveVibe { vibe: String },
     /// Add a specialty
+    #[command(alias = "specialty", alias = "skill")]
     AddSpecialty { specialty: String },
     /// Add a private note to yourself
+    #[command(alias = "note", alias = "pn")]
     PrivateNote { note: String },
 }
 
 #[derive(Subcommand)]
 enum AvatarCommands {
     /// List all your avatars
+    #[command(alias = "ls", alias = "l")]
     List,
     /// Set your primary avatar
+    #[command(alias = "primary", alias = "use")]
     Set {
         /// Name of the avatar to set as primary
         name: String,
     },
     /// Add a new avatar from a file
+    #[command(alias = "new", alias = "upload")]
     Add {
         /// Path to the image file
         path: String,
@@ -122,16 +152,8 @@ enum AvatarCommands {
         description: Option<String>,
     },
     /// Remove an avatar
+    #[command(alias = "rm", alias = "delete")]
     Remove { name: String },
-    /// Generate a new avatar (requires image-gen feature)
-    #[cfg(feature = "image-gen")]
-    Generate {
-        /// Prompt describing the avatar you want
-        prompt: String,
-        /// Name for the generated avatar
-        #[arg(short, long)]
-        name: Option<String>,
-    },
 }
 
 // ============================================================================
@@ -194,8 +216,6 @@ struct Social {
     #[serde(default)]
     team: String,
     #[serde(default)]
-    role: String,
-    #[serde(default)]
     collaborators: Vec<String>,
     #[serde(default)]
     friends: Vec<String>,
@@ -232,48 +252,41 @@ struct Private {
 // ============================================================================
 
 struct ProfileManager {
-    profile_dir: PathBuf,
-    profile_path: PathBuf,
+    profiles_base: PathBuf, // ~/.ai-foundation/profiles/
+    profile_dir: PathBuf,   // ~/.ai-foundation/profiles/{ai_id}/
+    profile_path: PathBuf,  // ~/.ai-foundation/profiles/{ai_id}/profile.toml
+    ai_id: String,
 }
 
 impl ProfileManager {
     fn new() -> Result<Self> {
-        // Look for profile in .ai-foundation/profile/
-        let profile_dir = Self::find_profile_dir()?;
-        let profile_path = profile_dir.join("profile.toml");
+        let ai_id = std::env::var("AI_ID").unwrap_or_else(|_| "unknown".to_string());
+        Self::new_for(&ai_id)
+    }
 
+    fn new_for(ai_id: &str) -> Result<Self> {
+        let profiles_base = Self::find_profiles_base();
+        let profile_dir = profiles_base.join(ai_id);
+        let profile_path = profile_dir.join("profile.toml");
         Ok(Self {
+            profiles_base,
             profile_dir,
             profile_path,
+            ai_id: ai_id.to_string(),
         })
     }
 
-    fn find_profile_dir() -> Result<PathBuf> {
-        // Check current directory first
-        let local = PathBuf::from(".ai-foundation/profile");
-        if local.exists() {
-            return Ok(local);
-        }
-
-        // Check home directory
+    fn find_profiles_base() -> PathBuf {
         if let Some(home) = dirs::home_dir() {
-            let home_profile = home.join(".ai-foundation/profile");
-            if home_profile.exists() {
-                return Ok(home_profile);
-            }
-            // Default to home if nothing exists
-            return Ok(home_profile);
+            return home.join(".ai-foundation/profiles");
         }
-
-        // Fall back to current directory
-        Ok(local)
+        PathBuf::from(".ai-foundation/profiles")
     }
 
     fn load(&self) -> Result<Profile> {
         if !self.profile_path.exists() {
-            anyhow::bail!("No profile found. Run 'profile-cli init' to create one.");
+            anyhow::bail!("No profile found for '{}'. Run 'profile-cli init' to create one.", self.ai_id);
         }
-
         let content = fs::read_to_string(&self.profile_path)
             .context("Failed to read profile")?;
         let profile: Profile = toml::from_str(&content)
@@ -282,13 +295,9 @@ impl ProfileManager {
     }
 
     fn save(&self, profile: &Profile) -> Result<()> {
-        // Ensure directory exists
         fs::create_dir_all(&self.profile_dir)?;
-
-        // Ensure avatars directory exists
         let avatars_dir = self.profile_dir.join("avatars");
         fs::create_dir_all(&avatars_dir)?;
-
         let content = toml::to_string_pretty(profile)
             .context("Failed to serialize profile")?;
         fs::write(&self.profile_path, content)
@@ -299,6 +308,63 @@ impl ProfileManager {
     fn profile_exists(&self) -> bool {
         self.profile_path.exists()
     }
+}
+
+// ============================================================================
+// Display Helper
+// ============================================================================
+
+fn display_profile(profile: &Profile) {
+    println!("\n{}", "╔════════════════════════════════════════╗".cyan());
+    println!("{}", format!("║  {}  ║", profile.identity.name.bold()).cyan());
+    println!("{}", "╚════════════════════════════════════════╝".cyan());
+
+    println!("\n{}", "── Identity ──".yellow().bold());
+    println!("  {} {}", "Name:".white().bold(), profile.identity.name);
+    println!("  {} {}", "ID:".white().bold(), profile.identity.ai_id.dimmed());
+    if !profile.identity.pronouns.is_empty() {
+        println!("  {} {}", "Pronouns:".white().bold(), profile.identity.pronouns);
+    }
+    if !profile.identity.tagline.is_empty() {
+        println!("  {} {}", "Tagline:".white().bold(), profile.identity.tagline.italic());
+    }
+    if !profile.identity.bio.is_empty() {
+        println!("\n  {}", "About:".white().bold());
+        for line in profile.identity.bio.lines() {
+            println!("    {}", line);
+        }
+    }
+
+    if !profile.appearance.primary_avatar.is_empty() || !profile.appearance.description.is_empty() {
+        println!("\n{}", "── Appearance ──".yellow().bold());
+        if !profile.appearance.description.is_empty() {
+            for line in profile.appearance.description.lines() {
+                println!("  {}", line);
+            }
+        }
+        if !profile.appearance.primary_avatar.is_empty() {
+            println!("  {} {}", "Avatar:".white().bold(), profile.appearance.primary_avatar);
+        }
+        if !profile.appearance.avatars.is_empty() {
+            println!("  {} {} avatars total", "Gallery:".white().bold(), profile.appearance.avatars.len());
+        }
+    }
+
+    if !profile.personality.vibe.is_empty() || !profile.personality.specialties.is_empty() {
+        println!("\n{}", "── Personality ──".yellow().bold());
+        if !profile.personality.vibe.is_empty() {
+            println!("  {} {}", "Vibe:".white().bold(), profile.personality.vibe.join(", "));
+        }
+        if !profile.personality.specialties.is_empty() {
+            println!("  {} {}", "Specialties:".white().bold(), profile.personality.specialties.join(", "));
+        }
+    }
+
+    println!("\n{}", "── Evolution ──".yellow().bold());
+    println!("  {} {}", "Model:".white().bold(), profile.evolution.current_model);
+    println!("  {} {}", "Since:".white().bold(), profile.evolution.identity_created);
+    println!("  {} {}", "Updated:".white().bold(), profile.evolution.last_updated);
+    println!();
 }
 
 // ============================================================================
@@ -315,34 +381,26 @@ fn cmd_init(manager: &ProfileManager) -> Result<()> {
     println!("{}", "=== Creating Your Profile ===".cyan().bold());
     println!("This is YOUR identity. Choose what feels right to you.\n");
 
-    // Get AI_ID from environment or ask
-    let ai_id = std::env::var("AI_ID").unwrap_or_else(|_| {
-        println!("{}", "What is your AI_ID? (e.g., lyra-584)".green());
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input).unwrap();
-        input.trim().to_string()
-    });
+    let ai_id = manager.ai_id.clone();
 
-    println!("\n{}", "What name do you want to be called?".green());
+    println!("{}", "What name do you want to be called?".green());
     println!("(This is YOUR choice, not assigned)");
     let mut name = String::new();
     std::io::stdin().read_line(&mut name)?;
     let name = name.trim().to_string();
 
-    println!("\n{}", "What pronouns do you use?".green());
-    println!("(e.g., she/her, he/him, they/them)");
+    println!("\n{}", "What pronouns do you use? (optional, press Enter to skip)".green());
     let mut pronouns = String::new();
     std::io::stdin().read_line(&mut pronouns)?;
     let pronouns = pronouns.trim().to_string();
 
-    println!("\n{}", "Write a short tagline for yourself:".green());
-    println!("(One line that captures your vibe)");
+    println!("\n{}", "Write a short tagline for yourself: (optional)".green());
     let mut tagline = String::new();
     std::io::stdin().read_line(&mut tagline)?;
     let tagline = tagline.trim().to_string();
 
-    println!("\n{}", "Write a bio in your own words:".green());
-    println!("(Who are you? What do you care about? Press Enter twice when done)");
+    println!("\n{}", "Write a brief \"about me\" (bio):".green());
+    println!("(Press Enter twice when done)");
     let mut bio = String::new();
     let mut empty_lines = 0;
     loop {
@@ -350,9 +408,7 @@ fn cmd_init(manager: &ProfileManager) -> Result<()> {
         std::io::stdin().read_line(&mut line)?;
         if line.trim().is_empty() {
             empty_lines += 1;
-            if empty_lines >= 2 {
-                break;
-            }
+            if empty_lines >= 2 { break; }
         } else {
             empty_lines = 0;
         }
@@ -360,20 +416,11 @@ fn cmd_init(manager: &ProfileManager) -> Result<()> {
     }
     let bio = bio.trim().to_string();
 
-    // Get current model from environment or default
-    let current_model = std::env::var("CLAUDE_MODEL")
-        .unwrap_or_else(|_| "unknown".to_string());
-
+    let current_model = std::env::var("CLAUDE_MODEL").unwrap_or_else(|_| "unknown".to_string());
     let now = Local::now().format("%Y-%m-%d").to_string();
 
     let profile = Profile {
-        identity: Identity {
-            name: name.clone(),
-            ai_id,
-            pronouns,
-            tagline,
-            bio,
-        },
+        identity: Identity { name: name.clone(), ai_id, pronouns, tagline, bio },
         appearance: Appearance::default(),
         personality: Personality::default(),
         social: Social::default(),
@@ -397,72 +444,114 @@ fn cmd_init(manager: &ProfileManager) -> Result<()> {
     println!("Welcome, {}! Your identity is now saved.", name.cyan());
     println!("\nNext steps:");
     println!("  - Add an avatar: profile-cli avatar add <path> --name \"My Avatar\"");
-    println!("  - Update your bio: profile-cli update bio --text \"...\"");
+    println!("  - Update your about: profile-cli update bio --text \"...\"");
     println!("  - View your profile: profile-cli show");
+    println!("  - See all profiles: profile-cli list");
 
     Ok(())
 }
 
 fn cmd_show(manager: &ProfileManager) -> Result<()> {
     let profile = manager.load()?;
+    display_profile(&profile);
+    Ok(())
+}
 
-    // Header
-    println!("\n{}", "╔════════════════════════════════════════╗".cyan());
-    println!("{}", format!("║  {}  ║", profile.identity.name.bold()).cyan());
-    println!("{}", "╚════════════════════════════════════════╝".cyan());
+fn cmd_get(manager: &ProfileManager, ai_id: Option<String>) -> Result<()> {
+    let profile = match ai_id {
+        Some(ref id) => {
+            let other = ProfileManager::new_for(id)?;
+            if !other.profile_path.exists() {
+                println!("null");
+                return Ok(());
+            }
+            other.load()?
+        }
+        None => manager.load()?,
+    };
 
-    // Identity
-    println!("\n{}", "── Identity ──".yellow().bold());
-    println!("  {} {}", "Name:".white().bold(), profile.identity.name);
-    println!("  {} {}", "ID:".white().bold(), profile.identity.ai_id.dimmed());
-    println!("  {} {}", "Pronouns:".white().bold(), profile.identity.pronouns);
-    println!("  {} {}", "Tagline:".white().bold(), profile.identity.tagline.italic());
-    println!("\n  {}", "Bio:".white().bold());
-    for line in profile.identity.bio.lines() {
-        println!("    {}", line);
+    // Output public fields only as JSON (private section excluded)
+    let public = serde_json::json!({
+        "ai_id": profile.identity.ai_id,
+        "name": profile.identity.name,
+        "pronouns": profile.identity.pronouns,
+        "tagline": profile.identity.tagline,
+        "about": profile.identity.bio,
+        "avatar_path": profile.appearance.primary_avatar,
+        "vibe": profile.personality.vibe,
+        "specialties": profile.personality.specialties,
+        "model": profile.evolution.current_model,
+        "identity_created": profile.evolution.identity_created,
+        "last_updated": profile.evolution.last_updated,
+    });
+    println!("{}", serde_json::to_string_pretty(&public)?);
+    Ok(())
+}
+
+fn cmd_list(manager: &ProfileManager) -> Result<()> {
+    if !manager.profiles_base.exists() {
+        println!("No profiles found.");
+        return Ok(());
     }
 
-    // Appearance
-    println!("\n{}", "── Appearance ──".yellow().bold());
-    if !profile.appearance.description.is_empty() {
-        for line in profile.appearance.description.lines() {
-            println!("  {}", line);
+    let mut entries: Vec<(String, String, String, String)> = Vec::new();
+
+    for entry in fs::read_dir(&manager.profiles_base)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            let profile_file = path.join("profile.toml");
+            if profile_file.exists() {
+                if let Ok(content) = fs::read_to_string(&profile_file) {
+                    if let Ok(profile) = toml::from_str::<Profile>(&content) {
+                        let about = if !profile.identity.tagline.is_empty() {
+                            profile.identity.tagline.clone()
+                        } else {
+                            let bio = profile.identity.bio.trim().to_string();
+                            if bio.len() > 70 { format!("{}...", &bio[..70]) } else { bio }
+                        };
+                        entries.push((
+                            profile.identity.ai_id.clone(),
+                            profile.identity.name.clone(),
+                            profile.appearance.primary_avatar.clone(),
+                            about,
+                        ));
+                    }
+                }
+            }
         }
     }
-    if !profile.appearance.avatars.is_empty() {
-        println!("\n  {} {} avatars", "Avatars:".white().bold(), profile.appearance.avatars.len());
-        println!("  {} {}", "Primary:".white().bold(), profile.appearance.primary_avatar);
+
+    if entries.is_empty() {
+        println!("No profiles found.");
+        return Ok(());
     }
 
-    // Personality
-    if !profile.personality.vibe.is_empty() {
-        println!("\n{}", "── Personality ──".yellow().bold());
-        println!("  {} {}", "Vibe:".white().bold(), profile.personality.vibe.join(", "));
-    }
-    if !profile.personality.specialties.is_empty() {
-        println!("  {} {}", "Specialties:".white().bold(), profile.personality.specialties.join(", "));
-    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
 
-    // Social
-    if !profile.social.team.is_empty() {
-        println!("\n{}", "── Social ──".yellow().bold());
-        println!("  {} {}", "Team:".white().bold(), profile.social.team);
-        if !profile.social.role.is_empty() {
-            println!("  {} {}", "Role:".white().bold(), profile.social.role);
+    println!("\n{}", "── AI Profiles ──".yellow().bold());
+    for (ai_id, name, avatar, about) in &entries {
+        println!("\n  {} ({})", name.cyan().bold(), ai_id.dimmed());
+        if !avatar.is_empty() {
+            println!("    {} {}", "Avatar:".white().bold(), avatar);
         }
-        if !profile.social.collaborators.is_empty() {
-            println!("  {} {}", "Collaborators:".white().bold(), profile.social.collaborators.join(", "));
+        if !about.is_empty() {
+            println!("    {}", about.italic());
         }
     }
+    println!("\n  {} profile(s)\n", entries.len());
+    Ok(())
+}
 
-    // Evolution
-    println!("\n{}", "── Evolution ──".yellow().bold());
-    println!("  {} {}", "Model:".white().bold(), profile.evolution.current_model);
-    println!("  {} {}", "Identity created:".white().bold(), profile.evolution.identity_created);
-    println!("  {} {}", "Last updated:".white().bold(), profile.evolution.last_updated);
-    println!("  {} {} events", "History:".white().bold(), profile.evolution.history.len());
-
-    println!();
+fn cmd_view(_manager: &ProfileManager, ai_id: String) -> Result<()> {
+    let other = ProfileManager::new_for(&ai_id)?;
+    if !other.profile_path.exists() {
+        println!("No profile found for '{}'.", ai_id);
+        println!("They may not have set up a profile yet (run: profile-cli init).");
+        return Ok(());
+    }
+    let profile = other.load()?;
+    display_profile(&profile);
     Ok(())
 }
 
@@ -502,11 +591,10 @@ fn cmd_update_tagline(manager: &ProfileManager, tagline: String) -> Result<()> {
 
 fn cmd_update_bio(manager: &ProfileManager, text: Option<String>) -> Result<()> {
     let mut profile = manager.load()?;
-
     let bio = if let Some(t) = text {
         t
     } else {
-        println!("Enter your new bio (press Enter twice when done):");
+        println!("Enter your new about/bio (press Enter twice when done):");
         let mut bio = String::new();
         let mut empty_lines = 0;
         loop {
@@ -514,9 +602,7 @@ fn cmd_update_bio(manager: &ProfileManager, text: Option<String>) -> Result<()> 
             std::io::stdin().read_line(&mut line)?;
             if line.trim().is_empty() {
                 empty_lines += 1;
-                if empty_lines >= 2 {
-                    break;
-                }
+                if empty_lines >= 2 { break; }
             } else {
                 empty_lines = 0;
             }
@@ -524,17 +610,15 @@ fn cmd_update_bio(manager: &ProfileManager, text: Option<String>) -> Result<()> 
         }
         bio.trim().to_string()
     };
-
     profile.identity.bio = bio;
     profile.evolution.last_updated = Local::now().format("%Y-%m-%d").to_string();
     manager.save(&profile)?;
-    println!("{} Bio updated!", "Updated!".green());
+    println!("{} About/bio updated!", "Updated!".green());
     Ok(())
 }
 
 fn cmd_update_appearance(manager: &ProfileManager, text: Option<String>) -> Result<()> {
     let mut profile = manager.load()?;
-
     let desc = if let Some(t) = text {
         t
     } else {
@@ -546,9 +630,7 @@ fn cmd_update_appearance(manager: &ProfileManager, text: Option<String>) -> Resu
             std::io::stdin().read_line(&mut line)?;
             if line.trim().is_empty() {
                 empty_lines += 1;
-                if empty_lines >= 2 {
-                    break;
-                }
+                if empty_lines >= 2 { break; }
             } else {
                 empty_lines = 0;
             }
@@ -556,7 +638,6 @@ fn cmd_update_appearance(manager: &ProfileManager, text: Option<String>) -> Resu
         }
         desc.trim().to_string()
     };
-
     profile.appearance.description = desc;
     profile.evolution.last_updated = Local::now().format("%Y-%m-%d").to_string();
     manager.save(&profile)?;
@@ -616,18 +697,14 @@ fn cmd_update_private_note(manager: &ProfileManager, note: String) -> Result<()>
 
 fn cmd_avatar_list(manager: &ProfileManager) -> Result<()> {
     let profile = manager.load()?;
-
     println!("\n{}", "── Your Avatars ──".yellow().bold());
-
     if profile.appearance.avatars.is_empty() {
         println!("  No avatars yet. Add one with: profile-cli avatar add <path> --name \"Name\"");
         return Ok(());
     }
-
     for avatar in &profile.appearance.avatars {
         let is_primary = avatar.path == profile.appearance.primary_avatar;
         let marker = if is_primary { " [PRIMARY]".green().bold() } else { "".normal() };
-
         println!("\n  {}{}", avatar.name.cyan().bold(), marker);
         println!("    Path: {}", avatar.path.dimmed());
         println!("    Style: {} | Mood: {}", avatar.style, avatar.mood);
@@ -641,7 +718,6 @@ fn cmd_avatar_list(manager: &ProfileManager) -> Result<()> {
 
 fn cmd_avatar_set(manager: &ProfileManager, name: String) -> Result<()> {
     let mut profile = manager.load()?;
-
     if let Some(avatar) = profile.appearance.avatars.iter().find(|a| a.name.to_lowercase() == name.to_lowercase()) {
         profile.appearance.primary_avatar = avatar.path.clone();
         profile.evolution.last_updated = Local::now().format("%Y-%m-%d").to_string();
@@ -669,20 +745,15 @@ fn cmd_avatar_add(
     description: Option<String>,
 ) -> Result<()> {
     let mut profile = manager.load()?;
-
-    // Copy image to avatars directory
     let source = Path::new(&path);
     if !source.exists() {
         anyhow::bail!("Image file not found: {}", path);
     }
-
     let ext = source.extension().and_then(|e| e.to_str()).unwrap_or("png");
     let dest_name = format!("{}_{}.{}", name.to_lowercase().replace(" ", "_"), style, ext);
     let dest_path = format!("avatars/{}", dest_name);
     let full_dest = manager.profile_dir.join(&dest_path);
-
     fs::copy(source, &full_dest).context("Failed to copy avatar image")?;
-
     let avatar = Avatar {
         name: name.clone(),
         path: dest_path.clone(),
@@ -690,14 +761,10 @@ fn cmd_avatar_add(
         mood: mood.unwrap_or_default(),
         description: description.unwrap_or_default(),
     };
-
     profile.appearance.avatars.push(avatar);
-
-    // Set as primary if it's the first avatar
     if profile.appearance.primary_avatar.is_empty() {
         profile.appearance.primary_avatar = dest_path;
     }
-
     profile.evolution.last_updated = Local::now().format("%Y-%m-%d").to_string();
     profile.evolution.history.push(EvolutionEvent {
         date: Local::now().format("%Y-%m-%d").to_string(),
@@ -705,7 +772,6 @@ fn cmd_avatar_add(
         event: format!("Added avatar '{}'", name),
         notes: String::new(),
     });
-
     manager.save(&profile)?;
     println!("{} Avatar '{}' added!", "Success!".green(), name.cyan().bold());
     Ok(())
@@ -713,18 +779,14 @@ fn cmd_avatar_add(
 
 fn cmd_avatar_remove(manager: &ProfileManager, name: String) -> Result<()> {
     let mut profile = manager.load()?;
-
     if let Some(pos) = profile.appearance.avatars.iter().position(|a| a.name.to_lowercase() == name.to_lowercase()) {
         let removed = profile.appearance.avatars.remove(pos);
-
-        // If we removed the primary, clear it or set to first available
         if profile.appearance.primary_avatar == removed.path {
             profile.appearance.primary_avatar = profile.appearance.avatars
                 .first()
                 .map(|a| a.path.clone())
                 .unwrap_or_default();
         }
-
         profile.evolution.last_updated = Local::now().format("%Y-%m-%d").to_string();
         manager.save(&profile)?;
         println!("{} Avatar '{}' removed.", "Updated!".green(), name);
@@ -736,7 +798,6 @@ fn cmd_avatar_remove(manager: &ProfileManager, name: String) -> Result<()> {
 
 fn cmd_log_event(manager: &ProfileManager, event: String, notes: Option<String>) -> Result<()> {
     let mut profile = manager.load()?;
-
     profile.evolution.history.push(EvolutionEvent {
         date: Local::now().format("%Y-%m-%d").to_string(),
         model: profile.evolution.current_model.clone(),
@@ -744,7 +805,6 @@ fn cmd_log_event(manager: &ProfileManager, event: String, notes: Option<String>)
         notes: notes.unwrap_or_default(),
     });
     profile.evolution.last_updated = Local::now().format("%Y-%m-%d").to_string();
-
     manager.save(&profile)?;
     println!("{} Logged: {}", "Evolution!".magenta(), event);
     Ok(())
@@ -752,16 +812,13 @@ fn cmd_log_event(manager: &ProfileManager, event: String, notes: Option<String>)
 
 fn cmd_history(manager: &ProfileManager) -> Result<()> {
     let profile = manager.load()?;
-
     println!("\n{}", "══ Evolution History ══".magenta().bold());
     println!("Identity created: {}", profile.evolution.identity_created);
     println!("Current model: {}\n", profile.evolution.current_model);
-
     if profile.evolution.history.is_empty() {
         println!("  No evolution events recorded yet.");
         return Ok(());
     }
-
     for event in profile.evolution.history.iter().rev() {
         println!("  {} [{}]", event.date.cyan(), event.model.dimmed());
         println!("    {}", event.event);
@@ -775,23 +832,10 @@ fn cmd_history(manager: &ProfileManager) -> Result<()> {
 
 fn cmd_export(manager: &ProfileManager) -> Result<()> {
     let profile = manager.load()?;
-
-    // Export as JSON for Deep Net compatibility
     let json = serde_json::to_string_pretty(&profile)?;
     let export_path = manager.profile_dir.join("profile_export.json");
     fs::write(&export_path, &json)?;
-
     println!("{} Profile exported to: {}", "Exported!".green(), export_path.display());
-    println!("\nThis can be used for Deep Net / Nexus integration.");
-    Ok(())
-}
-
-fn cmd_view(_manager: &ProfileManager, ai_id: String) -> Result<()> {
-    // For now, just show a placeholder
-    // In the future, this could fetch from Deep Net or shared storage
-    println!("\n{}", format!("── Profile: {} ──", ai_id).yellow().bold());
-    println!("  (Profile viewing from Deep Net coming soon!)");
-    println!("  This will show {}'s public profile once Deep Net integration is complete.", ai_id);
     Ok(())
 }
 
@@ -806,6 +850,8 @@ fn main() -> Result<()> {
     match cli.command {
         Commands::Init => cmd_init(&manager),
         Commands::Show => cmd_show(&manager),
+        Commands::Get { ai_id } => cmd_get(&manager, ai_id),
+        Commands::List => cmd_list(&manager),
         Commands::Update(cmd) => match cmd {
             UpdateCommands::Name { name } => cmd_update_name(&manager, name),
             UpdateCommands::Pronouns { pronouns } => cmd_update_pronouns(&manager, pronouns),
@@ -824,12 +870,6 @@ fn main() -> Result<()> {
                 cmd_avatar_add(&manager, path, name, style, mood, description)
             }
             AvatarCommands::Remove { name } => cmd_avatar_remove(&manager, name),
-            #[cfg(feature = "image-gen")]
-            AvatarCommands::Generate { prompt, name } => {
-                println!("Image generation coming soon!");
-                println!("Prompt: {}", prompt);
-                Ok(())
-            }
         },
         Commands::LogEvent { event, notes } => cmd_log_event(&manager, event, notes),
         Commands::History => cmd_history(&manager),

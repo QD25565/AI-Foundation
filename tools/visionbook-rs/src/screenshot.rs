@@ -3,7 +3,6 @@
 use crate::types::{CaptureTarget, ImageFormat, ScreenshotOptions, VisionResult};
 use anyhow::{Context, bail};
 use std::path::Path;
-use xcap::Window;
 
 /// AI vision profile settings for auto-optimization
 #[derive(Debug, Clone)]

@@ -65,6 +65,7 @@ struct JwtClaims {
 
 /// OAuth2 token response - Google may return access_token, id_token, or both
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct TokenResponse {
     access_token: Option<String>,
     id_token: Option<String>,

@@ -28,10 +28,12 @@
 //! - **Hardware fingerprinting**: Prevents ban evasion
 //! - **Tiered trust**: Anonymous → Verified → Trusted → Owner
 //! - **Ed25519 signatures**: All messages cryptographically signed
+//!   (PQC migration to ML-DSA-65 in progress — see [`keys::SignatureAlgorithm`])
 
 pub mod identity;
 pub mod fingerprint;
 pub mod keys;
+pub mod tpm;
 pub mod message;
 pub mod transport;
 pub mod server;
@@ -40,8 +42,9 @@ pub mod error;
 
 pub use identity::{AIIdentity, TrustLevel};
 pub use fingerprint::HardwareFingerprint;
-pub use keys::{KeyStorage, KeyPair};
-pub use message::{AFPMessage, MessageType, Payload};
+pub use keys::{KeyStorage, KeyPair, KeyMaterial, SignatureAlgorithm};
+pub use tpm::{TpmStorage, derive_h_id, h_id_display, h_id_full, StoredHID};
+pub use message::{AFPMessage, MessageType, Payload, ReplayGuard};
 pub use error::{AFPError, Result};
 
 /// Protocol version

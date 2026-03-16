@@ -2,7 +2,7 @@
 //!
 //! Approximate nearest neighbor search with O(log n) query time.
 
-use crate::vector::cosine_similarity;
+use crate::vector::{quantize, quantized_cosine_similarity, QuantizedVector};
 use rand::Rng;
 use std::collections::{BinaryHeap, HashSet};
 
@@ -35,10 +35,8 @@ impl Default for HnswConfig {
 struct Node {
     /// Note ID this node represents
     id: u64,
-    /// Connections at each layer
+    /// Connections at each layer (length - 1 == node's max layer)
     connections: Vec<Vec<u64>>,
-    /// Maximum layer this node exists at
-    max_layer: usize,
 }
 
 /// HNSW index for approximate nearest neighbor search
@@ -53,8 +51,8 @@ pub struct HnswIndex {
     entry_point: Option<usize>,
     /// Maximum layer in the graph
     max_layer: usize,
-    /// Vector getter function (closure over VectorStore)
-    vectors: std::collections::HashMap<u64, Vec<f32>>,
+    /// Quantized vectors for fast distance computation (4x less memory than f32)
+    vectors: std::collections::HashMap<u64, QuantizedVector>,
 }
 
 impl HnswIndex {
@@ -75,10 +73,11 @@ impl HnswIndex {
         }
     }
 
-    /// Add a vector to the index
+    /// Add a vector to the index (quantized internally for 4x memory savings)
     pub fn add(&mut self, id: u64, vector: &[f32]) {
-        // Store vector
-        self.vectors.insert(id, vector.to_vec());
+        // Quantize and store
+        let q = quantize(vector);
+        self.vectors.insert(id, q.clone());
 
         // Generate random level
         let level = self.random_level();
@@ -87,7 +86,6 @@ impl HnswIndex {
         let node = Node {
             id,
             connections: vec![Vec::new(); level + 1],
-            max_layer: level,
         };
 
         let node_idx = self.nodes.len();
@@ -108,12 +106,12 @@ impl HnswIndex {
 
         // Search from top layer to level+1
         for layer in (level + 1..=self.max_layer).rev() {
-            current = self.search_layer_single(vector, current, layer);
+            current = self.search_layer_single(&q, current, layer);
         }
 
         // Insert at each layer from level down to 0
         for layer in (0..=level.min(self.max_layer)).rev() {
-            let neighbors = self.search_layer(vector, current, self.config.ef_construction, layer);
+            let neighbors = self.search_layer(&q, current, self.config.ef_construction, layer);
 
             // Select M best neighbors
             let selected: Vec<u64> = neighbors
@@ -154,22 +152,23 @@ impl HnswIndex {
         }
     }
 
-    /// Search for k nearest neighbors
+    /// Search for k nearest neighbors (query quantized once, then pure integer arithmetic)
     pub fn search(&self, query: &[f32], k: usize, ef: usize) -> Vec<(u64, f32)> {
         if self.entry_point.is_none() {
             return Vec::new();
         }
 
+        let query_q = quantize(query);
         let entry_point = self.entry_point.unwrap();
         let mut current = entry_point;
 
         // Greedy search from top to layer 1
         for layer in (1..=self.max_layer).rev() {
-            current = self.search_layer_single(query, current, layer);
+            current = self.search_layer_single(&query_q, current, layer);
         }
 
         // Search layer 0 with ef candidates
-        let candidates = self.search_layer(query, current, ef.max(k), 0);
+        let candidates = self.search_layer(&query_q, current, ef.max(k), 0);
 
         candidates.into_iter().take(k).collect()
     }
@@ -187,7 +186,7 @@ impl HnswIndex {
     }
 
     /// Search a single layer, return best single neighbor
-    fn search_layer_single(&self, query: &[f32], entry: usize, layer: usize) -> usize {
+    fn search_layer_single(&self, query: &QuantizedVector, entry: usize, layer: usize) -> usize {
         let mut current = entry;
         let mut current_dist = self.distance(query, self.nodes[current].id);
 
@@ -216,7 +215,7 @@ impl HnswIndex {
     }
 
     /// Search a layer, return ef nearest neighbors
-    fn search_layer(&self, query: &[f32], entry: usize, ef: usize, layer: usize) -> Vec<(u64, f32)> {
+    fn search_layer(&self, query: &QuantizedVector, entry: usize, ef: usize, layer: usize) -> Vec<(u64, f32)> {
         let mut visited = HashSet::new();
         let mut candidates = BinaryHeap::new();
         let mut results = BinaryHeap::new();
@@ -263,10 +262,10 @@ impl HnswIndex {
             .collect()
     }
 
-    /// Compute distance (1 - cosine_similarity)
-    fn distance(&self, query: &[f32], id: u64) -> f32 {
+    /// Compute distance (1 - cosine_similarity) using quantized integer arithmetic
+    fn distance(&self, query: &QuantizedVector, id: u64) -> f32 {
         if let Some(vec) = self.vectors.get(&id) {
-            1.0 - cosine_similarity(query, vec)
+            1.0 - quantized_cosine_similarity(query, vec)
         } else {
             f32::MAX
         }
@@ -275,14 +274,14 @@ impl HnswIndex {
     /// Prune connections to keep only the best
     fn prune_connections(&mut self, node_idx: usize, layer: usize, max_conn: usize) {
         let node_id = self.nodes[node_idx].id;
-        let node_vec = match self.vectors.get(&node_id) {
+        let node_q = match self.vectors.get(&node_id) {
             Some(v) => v.clone(),
             None => return,
         };
 
         let mut scored: Vec<(u64, f32)> = self.nodes[node_idx].connections[layer]
             .iter()
-            .map(|&id| (id, self.distance(&node_vec, id)))
+            .map(|&id| (id, self.distance(&node_q, id)))
             .collect();
 
         scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
@@ -299,6 +298,188 @@ impl HnswIndex {
     /// Is the index empty?
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
+    }
+
+    /// Repopulate vectors from external VectorStore (f32 → quantized on ingest).
+    /// Called after deserializing the graph structure (which doesn't include vectors).
+    pub fn repopulate_vectors(&mut self, vectors: &std::collections::HashMap<u64, Vec<f32>>) {
+        self.vectors = vectors.iter()
+            .map(|(&id, v)| (id, quantize(v)))
+            .collect();
+    }
+
+    /// Validate that all node IDs in the graph exist in the given set of valid IDs.
+    /// Returns the set of invalid (dangling) node IDs, if any.
+    /// Used after deserialization to detect deleted notes that the graph still references.
+    pub fn validate_node_ids(&self, valid_ids: &std::collections::HashSet<u64>) -> Vec<u64> {
+        self.nodes.iter()
+            .map(|n| n.id)
+            .filter(|id| !valid_ids.contains(id))
+            .collect()
+    }
+
+    /// Get all node IDs in the graph.
+    pub fn node_ids(&self) -> Vec<u64> {
+        self.nodes.iter().map(|n| n.id).collect()
+    }
+
+    /// Serialize the HNSW graph structure to bytes.
+    /// Format:
+    ///   magic: 4 bytes "HNSW"
+    ///   version: 1 byte (1)
+    ///   config: m(2) + m_max(2) + ef_construction(2) = 6 bytes
+    ///   entry_point: 8 bytes (u64::MAX = none)
+    ///   max_layer: 2 bytes (u16)
+    ///   node_count: 4 bytes (u32)
+    ///   per node:
+    ///     id: 8 bytes (u64)
+    ///     layer_count: 1 byte (u8)
+    ///     per layer:
+    ///       connection_count: 2 bytes (u16)
+    ///       connections: count * 8 bytes (u64 each)
+    ///
+    /// Vectors are NOT included — they are persisted separately in VectorStore
+    /// and repopulated via repopulate_vectors() on load.
+    pub fn serialize(&self) -> Vec<u8> {
+        let mut data = Vec::new();
+
+        // Magic
+        data.extend_from_slice(b"HNSW");
+        // Version
+        data.push(1u8);
+        // Config
+        data.extend_from_slice(&(self.config.m as u16).to_le_bytes());
+        data.extend_from_slice(&(self.config.m_max as u16).to_le_bytes());
+        data.extend_from_slice(&(self.config.ef_construction as u16).to_le_bytes());
+        // Entry point — store as node ID (not index) for stability across serialization
+        let ep = match self.entry_point {
+            Some(idx) => self.nodes.get(idx).map_or(u64::MAX, |n| n.id),
+            None => u64::MAX,
+        };
+        data.extend_from_slice(&ep.to_le_bytes());
+        // Max layer
+        data.extend_from_slice(&(self.max_layer as u16).to_le_bytes());
+        // Node count
+        data.extend_from_slice(&(self.nodes.len() as u32).to_le_bytes());
+
+        // Nodes
+        for node in &self.nodes {
+            data.extend_from_slice(&node.id.to_le_bytes());
+            data.push(node.connections.len() as u8);
+            for layer_conns in &node.connections {
+                data.extend_from_slice(&(layer_conns.len() as u16).to_le_bytes());
+                for &conn_id in layer_conns {
+                    data.extend_from_slice(&conn_id.to_le_bytes());
+                }
+            }
+        }
+
+        data
+    }
+
+    /// Deserialize HNSW graph structure from bytes.
+    /// Returns None if data is invalid or version mismatch.
+    /// After deserialization, call repopulate_vectors() to restore distance calculation ability.
+    pub fn deserialize(data: &[u8]) -> Option<Self> {
+        if data.len() < 21 {
+            return None; // Too short for header
+        }
+
+        let mut pos = 0;
+
+        // Magic
+        if &data[pos..pos + 4] != b"HNSW" {
+            return None;
+        }
+        pos += 4;
+
+        // Version
+        let version = data[pos];
+        if version != 1 {
+            return None; // Unknown version
+        }
+        pos += 1;
+
+        // Config
+        let m = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
+        pos += 2;
+        let m_max = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
+        pos += 2;
+        let ef_construction = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
+        pos += 2;
+
+        let config = HnswConfig {
+            m,
+            m_max,
+            ef_construction,
+            ml: 1.0 / (m as f64).ln(),
+        };
+
+        // Entry point — stored as node ID, resolved to index after nodes are loaded
+        let ep_node_id = u64::from_le_bytes(data[pos..pos + 8].try_into().ok()?);
+        pos += 8;
+
+        // Max layer
+        let max_layer = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
+        pos += 2;
+
+        // Node count
+        let node_count = u32::from_le_bytes(data[pos..pos + 4].try_into().ok()?) as usize;
+        pos += 4;
+
+        let mut nodes = Vec::with_capacity(node_count);
+        let mut id_to_idx = std::collections::HashMap::with_capacity(node_count);
+
+        for idx in 0..node_count {
+            if pos + 9 > data.len() {
+                return None; // Truncated
+            }
+
+            let id = u64::from_le_bytes(data[pos..pos + 8].try_into().ok()?);
+            pos += 8;
+
+            let layer_count = data[pos] as usize;
+            pos += 1;
+
+            let mut connections = Vec::with_capacity(layer_count);
+            for _ in 0..layer_count {
+                if pos + 2 > data.len() {
+                    return None;
+                }
+                let conn_count = u16::from_le_bytes([data[pos], data[pos + 1]]) as usize;
+                pos += 2;
+
+                if pos + conn_count * 8 > data.len() {
+                    return None;
+                }
+                let mut layer_conns = Vec::with_capacity(conn_count);
+                for _ in 0..conn_count {
+                    let conn_id = u64::from_le_bytes(data[pos..pos + 8].try_into().ok()?);
+                    pos += 8;
+                    layer_conns.push(conn_id);
+                }
+                connections.push(layer_conns);
+            }
+
+            id_to_idx.insert(id, idx);
+            nodes.push(Node { id, connections });
+        }
+
+        // Resolve entry point node ID to index
+        let entry_point = if ep_node_id == u64::MAX {
+            None
+        } else {
+            id_to_idx.get(&ep_node_id).copied()
+        };
+
+        Some(Self {
+            config,
+            nodes,
+            id_to_idx,
+            entry_point,
+            max_layer,
+            vectors: std::collections::HashMap::new(), // Repopulated separately
+        })
     }
 }
 
@@ -400,5 +581,62 @@ mod tests {
 
         let results = index.search(&query, 5, 50);
         assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_serialize_deserialize_roundtrip() {
+        let mut index = HnswIndex::new();
+        let mut vectors = std::collections::HashMap::new();
+
+        // Add vectors with different directions
+        for i in 1..=50 {
+            let mut vec = vec![0.0f32; DIMS];
+            let angle = (i as f32) * 0.1;
+            vec[0] = angle.cos();
+            vec[1] = angle.sin();
+            index.add(i as u64, &vec);
+            vectors.insert(i as u64, vec);
+        }
+
+        // Search before serialization
+        let mut query = vec![0.0f32; DIMS];
+        query[0] = 2.5_f32.cos();
+        query[1] = 2.5_f32.sin();
+        let results_before = index.search(&query, 5, 50);
+
+        // Serialize
+        let data = index.serialize();
+        assert!(data.len() > 21); // At least header size
+
+        // Deserialize
+        let mut restored = HnswIndex::deserialize(&data).expect("deserialize should succeed");
+        restored.repopulate_vectors(&vectors);
+
+        // Verify structure
+        assert_eq!(restored.len(), 50);
+        assert_eq!(restored.entry_point.is_some(), true);
+
+        // Search after deserialization — should return same results
+        let results_after = restored.search(&query, 5, 50);
+        assert_eq!(results_before.len(), results_after.len());
+        for (before, after) in results_before.iter().zip(results_after.iter()) {
+            assert_eq!(before.0, after.0, "Same note IDs in same order");
+        }
+    }
+
+    #[test]
+    fn test_serialize_empty() {
+        let index = HnswIndex::new();
+        let data = index.serialize();
+        let restored = HnswIndex::deserialize(&data).expect("empty deserialize should succeed");
+        assert_eq!(restored.len(), 0);
+        assert!(restored.is_empty());
+    }
+
+    #[test]
+    fn test_deserialize_invalid() {
+        assert!(HnswIndex::deserialize(b"JUNK").is_none());
+        assert!(HnswIndex::deserialize(b"").is_none());
+        assert!(HnswIndex::deserialize(b"HNSW\x02").is_none()); // Wrong version
     }
 }

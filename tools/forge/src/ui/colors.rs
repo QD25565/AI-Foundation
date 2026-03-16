@@ -2,6 +2,7 @@
 //!
 //! Beautiful per-character gradient rendering from Battleship Grey to Asparagus Green.
 //! Ported from the Python installer's GradientColors class.
+#![allow(dead_code)]
 
 use ratatui::style::Color;
 

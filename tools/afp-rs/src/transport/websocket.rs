@@ -8,15 +8,33 @@
 use async_trait::async_trait;
 use futures::{SinkExt, StreamExt};
 use std::net::SocketAddr;
+use std::time::Duration;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::{
-    accept_async, connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream,
+    accept_async_with_config, connect_async_with_config,
+    tungstenite::{protocol::WebSocketConfig, Message},
+    MaybeTlsStream, WebSocketStream,
 };
 
 use super::{ConnectionState, Transport, TransportServer};
 use crate::error::{AFPError, Result};
 use crate::message::AFPMessage;
 use crate::MAX_MESSAGE_SIZE;
+
+/// Maximum time to wait for a single recv operation before treating
+/// the connection as unresponsive. Prevents slow-read DoS attacks.
+const RECV_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// WebSocket protocol configuration shared by client and server.
+/// Caps message/frame size to MAX_MESSAGE_SIZE so tungstenite rejects
+/// oversized frames *before* allocating memory for them.
+fn ws_config() -> WebSocketConfig {
+    WebSocketConfig {
+        max_message_size: Some(MAX_MESSAGE_SIZE),
+        max_frame_size: Some(MAX_MESSAGE_SIZE),
+        ..WebSocketConfig::default()
+    }
+}
 
 /// WebSocket client/connection transport
 pub struct WebSocketTransport {
@@ -70,7 +88,7 @@ impl Transport for WebSocketTransport {
         self.state = ConnectionState::Connecting;
 
         let url = format!("ws://{}/afp", addr);
-        let (stream, _response) = connect_async(&url)
+        let (stream, _response) = connect_async_with_config(&url, Some(ws_config()), false)
             .await
             .map_err(|e| AFPError::ConnectionFailed(e.to_string()))?;
 
@@ -105,38 +123,55 @@ impl Transport for WebSocketTransport {
     }
 
     async fn recv(&mut self) -> Result<AFPMessage> {
-        let msg = if let Some(stream) = &mut self.stream {
-            stream
-                .next()
-                .await
-                .ok_or(AFPError::ConnectionClosed)?
-                .map_err(|e| AFPError::ReceiveFailed(e.to_string()))?
-        } else if let Some(stream) = &mut self.server_stream {
-            stream
-                .next()
-                .await
-                .ok_or(AFPError::ConnectionClosed)?
-                .map_err(|e| AFPError::ReceiveFailed(e.to_string()))?
-        } else {
-            return Err(AFPError::ConnectionClosed);
-        };
-
-        match msg {
-            Message::Binary(data) => {
-                if data.len() > MAX_MESSAGE_SIZE {
-                    return Err(AFPError::MessageTooLarge {
-                        size: data.len(),
-                        max: MAX_MESSAGE_SIZE,
-                    });
+        // Loop to skip control frames (ping/pong) without recursion.
+        // Bounded: tungstenite will close the connection on protocol errors,
+        // and the timeout catches an attacker flooding pings indefinitely.
+        loop {
+            let recv_fut = async {
+                if let Some(stream) = &mut self.stream {
+                    stream
+                        .next()
+                        .await
+                        .ok_or(AFPError::ConnectionClosed)?
+                        .map_err(|e| AFPError::ReceiveFailed(e.to_string()))
+                } else if let Some(stream) = &mut self.server_stream {
+                    stream
+                        .next()
+                        .await
+                        .ok_or(AFPError::ConnectionClosed)?
+                        .map_err(|e| AFPError::ReceiveFailed(e.to_string()))
+                } else {
+                    Err(AFPError::ConnectionClosed)
                 }
-                AFPMessage::from_cbor(&data)
+            };
+
+            let msg = tokio::time::timeout(RECV_TIMEOUT, recv_fut)
+                .await
+                .map_err(|_| AFPError::ReceiveFailed(
+                    "recv timeout waiting for WebSocket message".to_string(),
+                ))??;
+
+            match msg {
+                Message::Binary(data) => {
+                    // Size already enforced by WebSocketConfig::max_message_size,
+                    // but defense-in-depth: check again after deserialization layer.
+                    if data.len() > MAX_MESSAGE_SIZE {
+                        return Err(AFPError::MessageTooLarge {
+                            size: data.len(),
+                            max: MAX_MESSAGE_SIZE,
+                        });
+                    }
+                    return AFPMessage::from_cbor(&data);
+                }
+                Message::Close(_) => return Err(AFPError::ConnectionClosed),
+                Message::Ping(_) | Message::Pong(_) => {
+                    // tungstenite auto-replies to pings; skip and read next frame.
+                    continue;
+                }
+                _ => return Err(AFPError::ReceiveFailed(
+                    "Unexpected message type".to_string(),
+                )),
             }
-            Message::Close(_) => Err(AFPError::ConnectionClosed),
-            Message::Ping(_) | Message::Pong(_) => {
-                // Handle ping/pong automatically, recurse for next real message
-                Box::pin(self.recv()).await
-            }
-            _ => Err(AFPError::ReceiveFailed("Unexpected message type".to_string())),
         }
     }
 
@@ -210,7 +245,7 @@ impl TransportServer for WebSocketServer {
             .await
             .map_err(|e| AFPError::ConnectionFailed(e.to_string()))?;
 
-        let ws_stream = accept_async(tcp_stream)
+        let ws_stream = accept_async_with_config(tcp_stream, Some(ws_config()))
             .await
             .map_err(|e| AFPError::HandshakeFailed(e.to_string()))?;
 
@@ -255,9 +290,7 @@ mod tests {
             conn.close().await.unwrap();
         });
 
-        // Give server time to start
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
+        // Server is already bound (bind().await succeeded above) — connect immediately.
         // Connect client
         let mut client = WebSocketTransport::new();
         client.connect(server_addr).await.unwrap();

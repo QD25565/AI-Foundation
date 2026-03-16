@@ -4,7 +4,7 @@
 //! - object DietRoutes { const val TRACKER = "diet_tracker" }
 //! - sealed class Screen(val route: String) { object Diet : Screen("diet") }
 
-use crate::graph::{CodeGraph, Node, NodeKind};
+use crate::graph::CodeGraph;
 use crate::parser::{Parser, RouteDefinition};
 use std::path::Path;
 use std::fs;
@@ -75,17 +75,19 @@ impl KotlinRoutesParser {
                 routes.push(route_def);
             }
 
-            // Check for sealed class object patterns
-            for cap in self.sealed_object_regex.captures_iter(line) {
-                let name = &cap[1];
-                let route = &cap[2];
+            // Check for sealed class object patterns (skip data object lines — handled below)
+            if !self.data_object_regex.is_match(line) {
+                for cap in self.sealed_object_regex.captures_iter(line) {
+                    let name = &cap[1];
+                    let route = &cap[2];
 
-                let display_name = const_to_display_name(name);
-                let mut route_def = RouteDefinition::new(route, &display_name, file_path)
-                    .with_line(line_num + 1);
-                route_def.metadata.insert("sealed_object".to_string(), name.to_string());
+                    let display_name = const_to_display_name(name);
+                    let mut route_def = RouteDefinition::new(route, &display_name, file_path)
+                        .with_line(line_num + 1);
+                    route_def.metadata.insert("sealed_object".to_string(), name.to_string());
 
-                routes.push(route_def);
+                    routes.push(route_def);
+                }
             }
 
             // Check for data object patterns
@@ -186,8 +188,10 @@ impl Default for KotlinRoutesParser {
 
 /// Convert SCREAMING_CASE or PascalCase to Display Name
 fn const_to_display_name(s: &str) -> String {
-    // Handle SCREAMING_CASE
-    if s.contains('_') {
+    // Handle SCREAMING_CASE: either has underscores, or is entirely uppercase (e.g. "HOME")
+    let is_screaming = s.contains('_')
+        || s.chars().filter(|c| c.is_alphabetic()).all(|c| c.is_uppercase());
+    if is_screaming {
         return s.split('_')
             .map(|word| {
                 let mut chars = word.chars();

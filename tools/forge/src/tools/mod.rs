@@ -236,10 +236,9 @@ async fn execute_write_file(args: &Value) -> ToolResult {
 
 async fn execute_bash(args: &Value) -> ToolResult {
     let command = args["command"].as_str().unwrap_or("");
-    let timeout_secs = args["timeout"].as_u64().unwrap_or(120);
+    let _timeout_secs = args["timeout"].as_u64().unwrap_or(120);
 
     use std::process::Command;
-    use std::time::Duration;
 
     #[cfg(windows)]
     let result = Command::new("cmd")
@@ -293,8 +292,6 @@ async fn execute_grep(args: &Value) -> ToolResult {
 async fn execute_glob(args: &Value) -> ToolResult {
     let pattern = args["pattern"].as_str().unwrap_or("");
     let path = args["path"].as_str().unwrap_or(".");
-
-    use std::path::Path;
 
     // Use glob crate if available, otherwise shell
     #[cfg(windows)]

@@ -6,7 +6,7 @@ use std::process::Command;
 use std::time::Duration;
 use anyhow::Result;
 
-use crate::config::{HooksConfig, HookCommand, ToolHook};
+use crate::config::{HooksConfig, HookCommand};
 
 /// Hook execution context
 pub struct HookContext {
@@ -63,6 +63,7 @@ impl HookExecutor {
     }
 
     /// Run pre-tool-use hooks
+    #[allow(dead_code)]
     pub async fn run_pre_tool_use(&self, context: &HookContext) -> Result<Vec<String>> {
         let tool_name = context.tool_name.as_deref().unwrap_or("");
         let mut outputs = vec![];
@@ -126,7 +127,7 @@ impl HookExecutor {
 
     /// Execute a single hook command
     async fn run_hook(&self, hook: &HookCommand, context: &HookContext) -> Result<String> {
-        let timeout = Duration::from_secs(hook.timeout);
+        let _timeout = Duration::from_secs(hook.timeout);
 
         // Expand environment variables in command
         let command = expand_variables(&hook.command, context);

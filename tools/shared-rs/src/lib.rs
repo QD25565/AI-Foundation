@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use ed25519_dalek::{Signer, SigningKey, VerifyingKey, Signature, SecretKey};
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey, Signature};
 use sha3::{Sha3_256, Digest};
 use once_cell::sync::Lazy;
 use std::sync::Mutex;

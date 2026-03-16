@@ -28,9 +28,9 @@ fn draw_sky_gradient(player_pos: Vec3) {
         let color = Color::new(r, g, b, alpha);
 
         let y1 = 20.0 + t * 80.0;
-        let y2 = 20.0 + next_t * 80.0;
+        let _y2 = 20.0 + next_t * 80.0;
         let r1 = radius * (1.0 - t * 0.3);
-        let r2 = radius * (1.0 - next_t * 0.3);
+        let _r2 = radius * (1.0 - next_t * 0.3);
 
         // Draw circular bands
         let segments = 16;
@@ -323,6 +323,7 @@ impl Player {
 
 #[derive(Clone)]
 struct Entity {
+    #[allow(dead_code)]
     id: String,
     pos: Vec3,
     avatar: Avatar,

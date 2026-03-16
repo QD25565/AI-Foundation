@@ -1,0 +1,54 @@
+[package]
+name = "ai-foundation-a2a"
+version = "0.1.0"
+edition = "2021"
+description = "A2A protocol adapter for AI-Foundation — exposes teambook + notebook to any A2A-compatible AI agent"
+
+# Thin adapter layer: CLIs are the source of truth, this is just the A2A door.
+# Architecture: HTTP + JSON-RPC 2.0 → cli_wrapper → teambook.exe / notebook-cli.exe
+
+[[bin]]
+name = "ai-foundation-a2a"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP server
+axum            = { version = "0.7", features = ["macros"] }
+tower-http      = { version = "0.5", features = ["cors", "trace"] }
+
+# Async runtime + streaming
+tokio           = { version = "1", features = ["full"] }
+tokio-stream    = "0.1"
+tokio-util      = { version = "0.7", features = ["rt"] }
+futures         = "0.3"
+
+# Serialisation
+serde           = { version = "1", features = ["derive"] }
+serde_json      = "1"
+
+# Task IDs
+uuid            = { version = "1", features = ["v4", "serde"] }
+
+# Concurrent task registry (lock-free HashMap)
+dashmap         = "6"
+
+# Logging
+tracing             = "0.1"
+tracing-subscriber  = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1.0"
+
+# Bin dir resolution (mirrors mcp-server-rs)
+dirs = "5"
+
+# ISO8601 timestamps in task status
+chrono = { version = "0.4", features = ["serde"] }
+
+
+[profile.release]
+opt-level     = "z"
+lto           = true
+codegen-units = 1
+strip         = true
+panic         = "abort"

@@ -152,7 +152,7 @@ impl EmbeddingGenerator {
 
         for path_opt in search_paths.iter() {
             if let Some(path) = path_opt {
-                if path.exists() {
+                if path.is_file() {
                     return Some(path.clone());
                 }
             }
@@ -180,8 +180,17 @@ impl EmbeddingGenerator {
         let tokens = self.model.str_to_token(text, AddBos::Always)
             .map_err(|e| EngramError::EmbeddingError(format!("Failed to tokenize: {}", e)))?;
 
+        // Truncate to context_size if needed. EmbeddingGemma's context is 8192 tokens
+        // (~30k chars typical). Very long notes are truncated rather than erroring.
+        let max_tokens = self.config.context_size as usize;
+        let tokens = if tokens.len() > max_tokens {
+            &tokens[..max_tokens]
+        } else {
+            &tokens[..]
+        };
+
         // Create batch and process
-        let mut batch = llama_cpp_2::llama_batch::LlamaBatch::new(self.config.context_size as usize, 1);
+        let mut batch = llama_cpp_2::llama_batch::LlamaBatch::new(max_tokens, 1);
         for (i, token) in tokens.iter().enumerate() {
             batch.add(*token, i as i32, &[0], i == tokens.len() - 1)
                 .map_err(|e| EngramError::EmbeddingError(format!("Failed to add token: {}", e)))?;

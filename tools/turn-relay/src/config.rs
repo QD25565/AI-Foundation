@@ -63,6 +63,7 @@ impl TurnConfig {
     }
 
     /// Save configuration to TOML file
+    #[allow(dead_code)]
     pub fn to_file(&self, path: &Path) -> anyhow::Result<()> {
         let content = toml::to_string_pretty(self)?;
         std::fs::write(path, content)?;
@@ -71,6 +72,7 @@ impl TurnConfig {
 }
 
 /// Example configuration file content
+#[allow(dead_code)]
 pub fn example_config() -> &'static str {
     r#"# AI-Foundation TURN Relay Configuration
 

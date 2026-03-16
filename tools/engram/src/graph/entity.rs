@@ -13,6 +13,18 @@ use std::collections::{HashMap, HashSet};
 use regex::Regex;
 use super::types::{Edge, EdgeType, SemanticEdge};
 
+/// Maximum input length for entity extraction (64 KiB).
+///
+/// Text longer than this is truncated at a valid UTF-8 character boundary
+/// before any pattern matching. This bounds:
+/// - 12 sequential regex `find_iter` scans across the full text
+/// - `full_text.matches(entity).count()` called once per extracted entity (O(n×m))
+/// - `full_text.contains(indicator)` called ×10 per technical/code entity
+///
+/// Notes longer than 64 KiB are rare in practice; entities meaningful for
+/// graph linking almost always appear early in the content.
+const MAX_EXTRACT_BYTES: usize = 64 * 1024;
+
 // ============================================================================
 // Entity Types
 // ============================================================================
@@ -192,6 +204,20 @@ impl EntityExtractor {
 
     /// Extract entities from text
     pub fn extract(&self, text: &str) -> Vec<Entity> {
+        // Bound input size before any regex scanning or per-entity confidence
+        // adjustments. All three cost centres (12 regex find_iters, the
+        // matches().count() O(n×m) call, and the contains() indicator loop)
+        // operate on this slice, so a single guard here covers everything.
+        let text = if text.len() > MAX_EXTRACT_BYTES {
+            let mut boundary = MAX_EXTRACT_BYTES;
+            while boundary > 0 && !text.is_char_boundary(boundary) {
+                boundary -= 1;
+            }
+            &text[..boundary]
+        } else {
+            text
+        };
+
         let mut entities = Vec::new();
         let mut seen_spans: HashSet<(usize, usize)> = HashSet::new();
 
@@ -533,30 +559,43 @@ impl AutoLinker {
             .filter(|e| e.confidence >= self.min_entity_confidence)
             .collect();
 
-        // Find related notes before adding this one
-        let mut edges = Vec::new();
+        // Accumulate shared entity count and best weight per related note.
+        // An edge is only emitted when the shared count reaches min_shared_entities,
+        // making with_thresholds() truthful. Default threshold is 1, so existing
+        // behaviour (any single shared entity → edge) is unchanged.
+        let mut shared_counts: HashMap<u64, usize> = HashMap::new();
+        let mut best_weights: HashMap<u64, f32> = HashMap::new();
 
         for entity in &entities {
             let related_notes = self.index.notes_with_entity(&entity.text);
             for related_id in related_notes {
                 if related_id != note_id {
-                    // Create RelatedTo edge based on shared entity
+                    *shared_counts.entry(related_id).or_insert(0) += 1;
                     let weight = self.calculate_link_weight(note_id, related_id, &entity.text);
-                    edges.push(Edge::new(
-                        note_id,
-                        related_id,
-                        EdgeType::Semantic(SemanticEdge::RelatedTo),
-                        weight,
-                    ));
+                    let best = best_weights.entry(related_id).or_insert(0.0_f32);
+                    if weight > *best {
+                        *best = weight;
+                    }
                 }
             }
         }
 
-        // Add note to index
+        // Add note to index before building the edge list
         self.index.add_note(note_id, entities);
 
-        // Deduplicate edges (keep highest weight for each pair)
-        self.deduplicate_edges(edges)
+        // Emit one edge per qualifying related note (already one-per-pair, no dedup needed)
+        shared_counts
+            .into_iter()
+            .filter(|(_, count)| *count >= self.min_shared_entities)
+            .map(|(related_id, _)| {
+                Edge::new(
+                    note_id,
+                    related_id,
+                    EdgeType::Semantic(SemanticEdge::RelatedTo),
+                    best_weights[&related_id],
+                )
+            })
+            .collect()
     }
 
     /// Calculate link weight based on shared entity importance
@@ -573,28 +612,6 @@ impl AutoLinker {
         } else {
             0.3 // Very common entity = weak link
         }
-    }
-
-    /// Deduplicate edges between same pairs
-    fn deduplicate_edges(&self, mut edges: Vec<Edge>) -> Vec<Edge> {
-        let mut seen: HashMap<(u64, u64), usize> = HashMap::new();
-        let mut result: Vec<Edge> = Vec::new();
-
-        for edge in edges.drain(..) {
-            let key = (edge.source.min(edge.target), edge.source.max(edge.target));
-
-            if let Some(&idx) = seen.get(&key) {
-                // Keep higher weight
-                if edge.weight > result[idx].weight {
-                    result[idx] = edge;
-                }
-            } else {
-                seen.insert(key, result.len());
-                result.push(edge);
-            }
-        }
-
-        result
     }
 
     /// Remove a note from the index
@@ -815,6 +832,81 @@ mod tests {
         assert_eq!(Entity::normalize("EntityExtractor"), "entityextractor");
         assert_eq!(Entity::normalize("snake_case"), "snake case");
         assert_eq!(Entity::normalize("  Multiple   Spaces  "), "multiple spaces");
+    }
+
+    #[test]
+    fn test_auto_linker_min_shared_entities_threshold() {
+        // with_thresholds(2, …) must require 2 shared entities before emitting an edge.
+        let mut linker = AutoLinker::with_thresholds(2, 0.5);
+
+        // Note 1 — two high-confidence entities: @alice and @bob
+        linker.process_note(1, "Message from @alice and @bob.");
+
+        // Note 2 shares only @alice (1 shared entity — below threshold of 2)
+        let edges_one_shared = linker.process_note(2, "Reply to @alice only.");
+        assert!(
+            edges_one_shared.is_empty(),
+            "one shared entity must not create an edge when threshold is 2"
+        );
+
+        // Note 3 shares both @alice and @bob (2 shared entities — meets threshold)
+        let edges_two_shared = linker.process_note(3, "Talking to @alice and @bob again.");
+        assert!(
+            !edges_two_shared.is_empty(),
+            "two shared entities must create an edge when threshold is 2"
+        );
+        assert!(
+            edges_two_shared.iter().any(|e| {
+                (e.source == 1 && e.target == 3) || (e.source == 3 && e.target == 1)
+            }),
+            "edge must connect note 1 and note 3"
+        );
+    }
+
+    #[test]
+    fn test_large_input_truncated() {
+        let extractor = EntityExtractor::new();
+
+        // Entity at the start, followed by > MAX_EXTRACT_BYTES of filler.
+        let prefix = "@alice needs to review this. ";
+        // ~100 KiB filler — well beyond the 64 KiB cap.
+        let filler = "word ".repeat(25_000);
+        let text = format!("{}{}", prefix, filler);
+        assert!(
+            text.len() > MAX_EXTRACT_BYTES,
+            "test input must exceed MAX_EXTRACT_BYTES"
+        );
+
+        // Must still extract the entity from within the first 64 KiB.
+        let entities = extractor.extract(&text);
+        assert!(
+            entities.iter().any(|e| e.original == "@alice"),
+            "entity before truncation point must be extracted"
+        );
+    }
+
+    #[test]
+    fn test_large_input_entity_beyond_truncation_not_extracted() {
+        let extractor = EntityExtractor::new();
+
+        // Push @bob past the 64 KiB boundary.
+        let filler = "word ".repeat(15_000); // ~75 KiB
+        let text = format!("{}@bob is here", filler);
+        assert!(
+            text.len() > MAX_EXTRACT_BYTES,
+            "test input must exceed MAX_EXTRACT_BYTES"
+        );
+        assert!(
+            filler.len() > MAX_EXTRACT_BYTES,
+            "@bob must be beyond the truncation point"
+        );
+
+        // @bob is past the 64 KiB boundary — must NOT appear in results.
+        let entities = extractor.extract(&text);
+        assert!(
+            !entities.iter().any(|e| e.original == "@bob"),
+            "entity beyond truncation point must not be extracted"
+        );
     }
 
     #[test]

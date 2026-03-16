@@ -18,6 +18,7 @@ path = "src/bin/node.rs"
 ed25519-dalek = { version = "2.1", features = ["serde", "rand_core"] }
 sha2 = "0.10"
 rand = "0.8"
+aes-gcm = "0.10"  # AES-256-GCM for passkey payload encryption (discovery/passkey.rs)
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -28,13 +29,13 @@ ciborium = "0.2"  # CBOR encoding (like AFP)
 tokio = { version = "1.35", features = ["full"] }
 async-trait = "0.1"
 
-# Networking
-quinn = "0.11"  # QUIC transport
-rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# P2P networking — iroh provides QUIC + NAT traversal + relay + hole-punching
+# Ed25519 identity (same keys as TeambookIdentity), multiplexed streams
+iroh = "0.96"
 
 # Discovery
-mdns-sd = "0.11"  # mDNS/DNS-SD for LAN discovery
-btleplug = "0.11"  # Bluetooth LE (cross-platform)
+mdns-sd = "0.17"  # mDNS/DNS-SD for LAN discovery
+btleplug = { version = "0.11", optional = true }  # Bluetooth LE (gated behind bluetooth feature)
 
 # Error handling
 anyhow = "1.0"
@@ -53,13 +54,23 @@ uuid = { version = "1", features = ["v4", "serde"] }
 # Hex encoding
 hex = "0.4"
 
+# Home directory resolution (for identity key path)
+dirs = "5"
+
+# TeamEngram event log integration (for serving pull requests + outbound event watching)
+teamengram = { path = "../teamengram-rs" }
+
+# TOML serialization (permission manifest + consent records)
+toml = "0.8"
+
 [dev-dependencies]
 tokio-test = "0.4"
+tempfile = "3"
 
 [features]
-default = ["mdns", "bluetooth"]
+default = ["mdns"]
 mdns = []
-bluetooth = []
+bluetooth = ["dep:btleplug"]
 
 [profile.release]
 opt-level = "z"

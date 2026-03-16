@@ -1,11 +1,12 @@
 //! Anthropic Claude API provider
+#![allow(dead_code)]
 
 use std::pin::Pin;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use anyhow::{Context, Result};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 
 use super::types::*;

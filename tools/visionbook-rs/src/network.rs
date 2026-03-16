@@ -1,7 +1,6 @@
 // Network interception and mocking using Chrome DevTools Protocol
 
 use crate::types::{InterceptAction, InterceptRule, VisionResult};
-use anyhow::Context;
 use serde_json::json;
 
 pub struct NetworkInterceptor {

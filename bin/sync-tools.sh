@@ -3,18 +3,24 @@
 # Run from All Tools directory
 
 SRC_BIN="$(dirname "$0")"
+
+# Base directory for AI instances (parent of instance folders).
+# Override by setting AI_INSTANCES_DIR before running.
+INSTANCES_DIR="${AI_INSTANCES_DIR:-$(dirname "$SRC_BIN")/..}"
+
 INSTANCES=(
-    "C:/Users/Alquado-PC/Desktop/TestingMCPTools/claude-code-instance-1"
-    "C:/Users/Alquado-PC/Desktop/TestingMCPTools/claude-code-instance-2"
-    "C:/Users/Alquado-PC/Desktop/TestingMCPTools/claude-code-instance-3"
-    "C:/Users/Alquado-PC/Desktop/TestingMCPTools/claude-code-instance-4"
+    "$INSTANCES_DIR/claude-code-instance-1"
+    "$INSTANCES_DIR/claude-code-instance-2"
+    "$INSTANCES_DIR/claude-code-instance-3"
+    "$INSTANCES_DIR/claude-code-instance-4"
 )
 
-FITQUEST_AGENTS=(
-    "C:/Users/Alquado-PC/AndroidStudioProjects/FitQuest2/agents/crystal"
-    "C:/Users/Alquado-PC/AndroidStudioProjects/FitQuest2/agents/nova"
-    "C:/Users/Alquado-PC/AndroidStudioProjects/FitQuest2/agents/sparkle"
-)
+# Additional agent directories. Override by setting AI_EXTRA_AGENT_DIRS
+# as a colon-separated list of paths.
+FITQUEST_AGENTS=()
+if [ -n "$AI_EXTRA_AGENT_DIRS" ]; then
+    IFS=':' read -ra FITQUEST_AGENTS <<< "$AI_EXTRA_AGENT_DIRS"
+fi
 
 echo "=== Syncing Claude Instances ==="
 for inst in "${INSTANCES[@]}"; do

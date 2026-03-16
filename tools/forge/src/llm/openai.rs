@@ -1,13 +1,14 @@
 //! OpenAI-compatible API provider
 //!
 //! Works with OpenAI, Azure, local servers (llama.cpp server, ollama), Groq, Together, etc.
+#![allow(dead_code)]
 
 use std::pin::Pin;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use anyhow::{Context, Result};
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::json;
 
 use super::types::*;

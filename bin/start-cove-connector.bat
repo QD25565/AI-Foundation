@@ -10,7 +10,18 @@ echo.
 :: Set paths
 set BIN_DIR=%~dp0
 set MCP_SERVER=%BIN_DIR%ai-foundation-mcp-http.exe
-set NGROK=C:\Users\Alquado-PC\AppData\Local\Microsoft\WinGet\Links\ngrok.exe
+:: Try ngrok from PATH first, fall back to NGROK_PATH env var
+where ngrok >nul 2>&1
+if not errorlevel 1 (
+    for /f "delims=" %%i in ('where ngrok') do set NGROK=%%i
+) else if defined NGROK_PATH (
+    set NGROK=%NGROK_PATH%
+) else (
+    echo [ERROR] ngrok not found in PATH and NGROK_PATH env var is not set.
+    echo Install ngrok and add it to PATH, or set NGROK_PATH to the ngrok executable.
+    pause
+    exit /b 1
+)
 set PORT=8080
 
 :: Check if ngrok is configured
@@ -38,7 +49,7 @@ if not exist "%MCP_SERVER%" (
 
 :: Set environment variables for the MCP server
 set AI_ID=cove-web
-set POSTGRES_URL=postgresql://ai_foundation:ai_foundation_pass@127.0.0.1:5432/ai_foundation
+if not defined POSTGRES_URL set POSTGRES_URL=postgresql://ai_foundation:changeme@127.0.0.1:5432/ai_foundation
 
 echo [1/3] Starting AI Foundation MCP Server on port %PORT%...
 start "AI-Foundation MCP Server" cmd /c "%MCP_SERVER% --port %PORT%"

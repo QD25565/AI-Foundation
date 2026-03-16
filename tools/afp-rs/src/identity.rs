@@ -6,7 +6,7 @@
 //! - Trust Level: Permission tier within the teambook
 //! - Teambook: Which teambook this identity belongs to
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -135,9 +135,9 @@ impl AIIdentity {
             ));
         }
 
-        if !number.chars().all(|c| c.is_ascii_digit()) {
+        if number.is_empty() || !number.chars().all(|c| c.is_ascii_digit()) {
             return Err(AFPError::InvalidAIID(
-                "Suffix must be numeric".to_string(),
+                "Suffix must be numeric and non-empty".to_string(),
             ));
         }
 

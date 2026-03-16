@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Create JWT
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     
-    let header = serde_json::json!({
+    let _header = serde_json::json!({
         "alg": "RS256",
         "typ": "JWT",
         "kid": sa.private_key_id

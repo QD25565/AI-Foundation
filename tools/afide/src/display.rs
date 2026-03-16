@@ -19,7 +19,7 @@ pub fn print_header(title: &str) {
 pub fn print_status_table(
     instances: &[InstanceStatus],
     source_bins: &HashMap<String, BinaryInfo>,
-    verbose: bool,
+    _verbose: bool,
 ) -> Result<()> {
     println!("Source: {} ({} binaries)\n",
         instances.first()

@@ -178,6 +178,7 @@ pub struct DeviceModelSummary {
 
 /// Search response
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct SearchErrorIssuesResponse {
     #[serde(rename = "errorIssues")]
     error_issues: Option<Vec<ErrorIssue>>,

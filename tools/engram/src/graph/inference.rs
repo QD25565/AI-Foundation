@@ -12,8 +12,8 @@
 //! - Confidence decay through inference hops
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use super::csr::{CsrGraph, EdgeData};
-use super::types::{Edge, EdgeType, SemanticEdge, CausalEdge, TemporalEdge, StructuralEdge, LegacyEdge};
+use super::csr::CsrGraph;
+use super::types::{Edge, EdgeType, SemanticEdge, CausalEdge, TemporalEdge};
 
 // ============================================================================
 // Transitive Closure
@@ -183,7 +183,7 @@ impl TransitiveClosure {
     }
 
     /// Incrementally update after adding an edge
-    pub fn add_edge(&mut self, graph: &CsrGraph, source: u64, target: u64, edge_type: u8) {
+    pub fn add_edge(&mut self, graph: &CsrGraph, source: u64, _target: u64, edge_type: u8) {
         if !self.transitive_types.contains(&edge_type) {
             return;
         }
@@ -846,8 +846,8 @@ mod tests {
         let mut engine = InferenceEngine::new();
         let result = engine.run_inference(&graph);
 
-        // Should infer some edges
-        assert!(result.iterations > 0 || engine.inferred_edges().len() >= 0);
+        // Should run at least one iteration and infer at least one edge
+        assert!(result.iterations > 0 && !engine.inferred_edges().is_empty());
     }
 
     #[test]

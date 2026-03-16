@@ -22,6 +22,7 @@ pub struct InstanceStatus {
     pub instance: Instance,
     pub exists: bool,
     pub bin_dir_exists: bool,
+    #[allow(dead_code)]
     pub binary_count: usize,
     pub drift_count: usize,
 }

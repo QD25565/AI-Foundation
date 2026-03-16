@@ -128,7 +128,7 @@ fn benchmark_view_sync(data_dir: &PathBuf) {
             let event = match i % 5 {
                 0 => Event::broadcast("sage-724", "general", &format!("msg{}", i)),
                 1 => Event::direct_message("sage-724", "lyra-584", &format!("dm{}", i)),
-                2 => Event::dialogue_start("sage-724", "lyra-584", "review"),
+                2 => Event::dialogue_start("sage-724", &[String::from("sage-724"), String::from("lyra-584")], "review", true),
                 3 => Event::file_action("lyra-584", "file.rs", "read"),
                 _ => Event::broadcast("cascade-230", "general", &format!("msg{}", i)),
             };

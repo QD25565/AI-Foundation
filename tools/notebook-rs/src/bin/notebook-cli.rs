@@ -21,6 +21,7 @@ static GLOBAL: MiMalloc = MiMalloc;
 use anyhow::{Result, anyhow};
 use clap::{Parser, Subcommand};
 use engram::{Engram, graph::EdgeType};
+use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -63,6 +64,22 @@ enum Commands {
         snap: Option<String>,
     },
 
+    /// Save an ephemeral working memory that expires automatically
+    #[command(alias = "temp", alias = "ephemeral", alias = "scratch")]
+    Work {
+        /// Note content (e.g., "Currently debugging auth token refresh")
+        #[arg(value_name = "CONTENT")]
+        content: String,
+
+        /// Comma-separated tags (e.g., "wip,session,context")
+        #[arg(long)]
+        tags: Option<String>,
+
+        /// Hours until this note expires and is filtered from recall (default: 24)
+        #[arg(long = "ttl", value_name = "HOURS", default_value = "24")]
+        ttl_hours: u16,
+    },
+
     /// Search and recall notes
     #[command(alias = "search", alias = "find", alias = "query", alias = "lookup")]
     Recall {
@@ -103,6 +120,10 @@ enum Commands {
         /// Output only note IDs (one per line)
         #[arg(long)]
         ids_only: bool,
+
+        /// Filter by tag (e.g. "ai-foundation")
+        #[arg(long)]
+        tag: Option<String>,
     },
 
     /// Pin a note for quick access
@@ -285,6 +306,17 @@ enum Commands {
         to_id: u64,
     },
 
+    /// Invalidate an edge between two notes (removes it from graph scoring)
+    #[command(alias = "invalidate-edge", alias = "remove-valid-edge")]
+    InvalidateEdge {
+        /// Source note ID
+        #[arg(value_name = "FROM_ID")]
+        from: u64,
+        /// Target note ID
+        #[arg(value_name = "TO_ID")]
+        to: u64,
+    },
+
     /// Get notes linked to a specific note
     #[command(alias = "linked", alias = "connections", alias = "neighbors")]
     GetLinked {
@@ -336,7 +368,7 @@ enum Commands {
     // ==================== BATCH OPERATIONS ====================
 
     /// Delete multiple notes by ID
-    #[command(alias = "batch-delete", alias = "bulk-delete")]
+    #[command(alias = "bulk-delete")]
     BatchDelete {
         /// Comma-separated note IDs to delete (e.g., "1,2,3,4")
         note_ids: String,
@@ -346,14 +378,14 @@ enum Commands {
     },
 
     /// Pin multiple notes by ID
-    #[command(alias = "batch-pin", alias = "bulk-pin")]
+    #[command(alias = "bulk-pin")]
     BatchPin {
         /// Comma-separated note IDs to pin (e.g., "1,2,3,4")
         note_ids: String,
     },
 
     /// Unpin multiple notes by ID
-    #[command(alias = "batch-unpin", alias = "bulk-unpin")]
+    #[command(alias = "bulk-unpin")]
     BatchUnpin {
         /// Comma-separated note IDs to unpin (e.g., "1,2,3,4")
         note_ids: String,
@@ -550,6 +582,17 @@ enum Commands {
     Profile {
         #[command(subcommand)]
         operation: ProfileOps,
+    },
+
+    /// List all tags with note counts (sorted by frequency)
+    #[command(alias = "tag-list", alias = "list-tags")]
+    Tags {
+        /// Maximum tags to show (e.g., 20)
+        #[arg(value_name = "LIMIT")]
+        limit_positional: Option<usize>,
+
+        #[arg(long = "limit", hide = true, default_value = "50")]
+        limit: usize,
     },
 }
 
@@ -759,12 +802,38 @@ fn find_teambook_exe() -> Option<std::path::PathBuf> {
 }
 
 
+/// Resolve the AI identity for notebook path resolution.
+///
+/// Priority:
+///   1. `{CWD}/.claude/settings.json`  — reliable on all platforms, including
+///      WSL where Windows .exe files may not inherit Linux env vars
+///   2. `$AI_ID` env var               — works when explicitly set by a launcher
+///   3. `"unknown"`                     — loud fallback so misconfiguration is visible
+fn get_ai_id() -> String {
+    // Check settings.json in the current working directory first
+    if let Ok(cwd) = std::env::current_dir() {
+        let settings = cwd.join(".claude").join("settings.json");
+        if let Ok(content) = std::fs::read_to_string(&settings) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(id) = json.get("env")
+                    .and_then(|e| e.get("AI_ID"))
+                    .and_then(|v| v.as_str())
+                {
+                    return id.to_string();
+                }
+            }
+        }
+    }
+    // Fall back to environment variable
+    std::env::var("AI_ID").unwrap_or_else(|_| "unknown".to_string())
+}
+
 fn get_default_db_path() -> Result<PathBuf> {
     // CENTRALIZED: ~/.ai-foundation/agents/{ai_id}/notebook.engram
     // Memory belongs to the AI identity, not the terminal window.
     // Each AI has ONE notebook that follows them across instances.
     // Per-agent directory groups all agent data (notebook, tasks, config).
-    let ai_id = std::env::var("AI_ID").unwrap_or_else(|_| "unknown".to_string());
+    let ai_id = get_ai_id();
     let home = dirs::home_dir()
         .ok_or_else(|| anyhow!("Could not determine home directory"))?;
 
@@ -799,7 +868,7 @@ fn main() -> Result<()> {
     }
 
     let mut db = Engram::open(&db_path)?;
-    let ai_id = std::env::var("AI_ID").unwrap_or_else(|_| "unknown".to_string());
+    let ai_id = get_ai_id();
 
     match cli.command {
         Commands::Remember { content, tags, pin, image, capture, screenshot, snap } => {
@@ -896,6 +965,17 @@ fn main() -> Result<()> {
             }
         }
 
+        Commands::Work { content, tags, ttl_hours } => {
+            let tags_vec = parse_tags(tags);
+            let tag_refs: Vec<&str> = tags_vec.iter().map(|s| s.as_str()).collect();
+            let note_id = db.remember_working(&content, &tag_refs, ttl_hours)?;
+            db.persist_indexes()?;
+            println!("Working note saved: ID {} (expires in {}h)", note_id, ttl_hours);
+            if !tags_vec.is_empty() {
+                println!("Tags: {}", tags_vec.join(", "));
+            }
+        }
+
         Commands::Recall { query, limit_positional, limit, pinned_only } => {
             let final_limit = limit_positional.unwrap_or(limit);
 
@@ -909,31 +989,23 @@ fn main() -> Result<()> {
                     }
                 }
             } else if let Some(q) = query {
-                // Try full hybrid recall (vector + keyword + graph + recency)
-                // When embeddings feature is enabled and model is available, this
-                // automatically does semantic search for much better results
-                #[cfg(feature = "embeddings")]
-                let results = {
-                    use engram::embedding::{EmbeddingGenerator, EmbeddingConfig};
+                // Full hybrid recall: vector + keyword + graph + recency.
+                // Loads Gemma embedding model for semantic search; degrades gracefully
+                // to keyword+graph+recency if the model file is not present.
+                use engram::embedding::{EmbeddingGenerator, EmbeddingConfig};
 
-                    // Try to load embedding model for semantic search
-                    let query_embedding = EmbeddingGenerator::find_model("embeddinggemma-300M-Q8_0.gguf")
-                        .and_then(|model_path| {
-                            let config = EmbeddingConfig::default().with_model(&model_path);
-                            EmbeddingGenerator::load(config).ok()
-                        })
-                        .and_then(|mut gen| gen.embed(&q).ok());
+                let query_embedding = EmbeddingGenerator::find_model("embeddinggemma-300M-Q8_0.gguf")
+                    .and_then(|model_path| {
+                        let config = EmbeddingConfig::default().with_model(&model_path);
+                        EmbeddingGenerator::load(config).ok()
+                    })
+                    .and_then(|mut gen| gen.embed(&q).ok());
 
-                    // Use full hybrid recall with embedding if available
-                    if let Some(ref emb) = query_embedding {
-                        db.recall(&q, Some(emb), final_limit)?
-                    } else {
-                        db.recall_by_keyword(&q, final_limit)?
-                    }
+                let results = if let Some(ref emb) = query_embedding {
+                    db.recall(&q, Some(emb), final_limit)?
+                } else {
+                    db.recall_by_keyword(&q, final_limit)?
                 };
-
-                #[cfg(not(feature = "embeddings"))]
-                let results = db.recall_by_keyword(&q, final_limit)?;
 
                 if results.is_empty() {
                     // Try tag search
@@ -947,8 +1019,92 @@ fn main() -> Result<()> {
                         }
                     }
                 } else {
+                    // Surface similar note pairs as a non-blocking deduplication warning.
+                    // Uses pre-computed semantic edges (EdgeType::Semantic, weight >= 0.75)
+                    // from AutoLinkSemantic — no extra inference at recall time.
+                    let result_ids: HashSet<u64> = results.iter().map(|r| r.note.id).collect();
+                    let mut seen_pairs: HashSet<(u64, u64)> = HashSet::new();
+                    let mut similar_pairs: Vec<(u64, u64, f32)> = Vec::new();
+                    for r in &results {
+                        for (neighbor_id, weight, edge_type) in db.get_related(r.note.id) {
+                            if edge_type == EdgeType::Semantic
+                                && weight >= 0.75
+                                && result_ids.contains(&neighbor_id)
+                            {
+                                let pair = (r.note.id.min(neighbor_id), r.note.id.max(neighbor_id));
+                                if seen_pairs.insert(pair) {
+                                    similar_pairs.push((pair.0, pair.1, weight));
+                                }
+                            }
+                        }
+                    }
+                    if !similar_pairs.is_empty() {
+                        println!("\n⚠️  SIMILAR NOTES DETECTED");
+                        for (a, b, score) in &similar_pairs {
+                            println!(
+                                "  Notes #{} and #{} are {:.0}% similar — consider: merge, delete, or add tags to distinguish",
+                                a, b, score * 100.0
+                            );
+                        }
+                        println!();
+                    }
+                    // ── BFS graph expansion (depth ≤ 2) ──────────────────────────────────
+                    // Expand from each primary recall result up to 2 hops via graph edges.
+                    // Surfaces related notes that keyword/semantic search alone would miss.
+                    // Weight decays 0.5× per hop so 2-hop results don't drown direct matches.
+                    let mut graph_neighbors: Vec<(u64, f32, &str)> = Vec::new();
+                    let mut seen_graph_ids: HashSet<u64> = result_ids.clone();
+                    // Queue: (note_id, cumulative_weight, hop_depth)
+                    let mut bfs_queue: VecDeque<(u64, f32, u8)> =
+                        results.iter().map(|r| (r.note.id, 1.0_f32, 0_u8)).collect();
+
+                    while let Some((current_id, parent_weight, depth)) = bfs_queue.pop_front() {
+                        for (neighbor_id, edge_weight, edge_type) in db.get_related(current_id) {
+                            let include = match edge_type {
+                                EdgeType::Semantic => edge_weight >= 0.6,
+                                EdgeType::Manual => true,
+                                EdgeType::Tag => true,
+                                EdgeType::Temporal => false,
+                            };
+                            if include && seen_graph_ids.insert(neighbor_id) {
+                                let type_str = match edge_type {
+                                    EdgeType::Semantic => "semantic",
+                                    EdgeType::Manual => "manual",
+                                    EdgeType::Tag => "tag",
+                                    EdgeType::Temporal => "temporal",
+                                };
+                                // 0.5× decay per hop beyond first
+                                let hop_factor = if depth == 0 { 1.0_f32 } else { 0.5_f32 };
+                                let score = edge_weight * parent_weight * hop_factor;
+                                graph_neighbors.push((neighbor_id, score, type_str));
+                                if depth + 1 < 2 {
+                                    bfs_queue.push_back((neighbor_id, score, depth + 1));
+                                }
+                            }
+                        }
+                    }
+
+                    // Sort by score descending, cap at 5
+                    graph_neighbors.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    graph_neighbors.truncate(5);
+
+                    // Primary results first — rank 1 is the best direct match
                     for r in &results {
                         print_recall_result(r);
+                    }
+
+                    if !graph_neighbors.is_empty() {
+                        println!("\n↳ Also related (via graph):");
+                        for (neighbor_id, score, type_str) in &graph_neighbors {
+                            if let Ok(Some(note)) = db.get(*neighbor_id) {
+                                let content = note.content.replace('\n', " ");
+                                if note.pinned {
+                                    println!("{}|via-{}:{:.2}|{}|pinned", neighbor_id, type_str, score, content);
+                                } else {
+                                    println!("{}|via-{}:{:.2}|{}", neighbor_id, type_str, score, content);
+                                }
+                            }
+                        }
                     }
                 }
             } else {
@@ -964,10 +1120,12 @@ fn main() -> Result<()> {
             }
         }
 
-        Commands::List { limit_positional, limit, pinned_only, not_pinned, ids_only } => {
+        Commands::List { limit_positional, limit, pinned_only, not_pinned, ids_only, tag } => {
             let final_limit = limit_positional.unwrap_or(limit);
 
-            let notes = if pinned_only {
+            let notes = if let Some(ref t) = tag {
+                db.by_tag(t)?
+            } else if pinned_only {
                 db.pinned()?
             } else {
                 db.recent(final_limit * 2)? // Fetch more for filtering
@@ -993,6 +1151,19 @@ fn main() -> Result<()> {
                     } else {
                         print_note_row(note);
                     }
+                }
+            }
+        }
+
+        Commands::Tags { limit_positional, limit } => {
+            let final_limit = limit_positional.unwrap_or(limit);
+            let tags = db.all_tags();
+            if tags.is_empty() {
+                println!("No tags found");
+            } else {
+                println!("|TAGS|{}", tags.len().min(final_limit));
+                for (tag, count) in tags.iter().take(final_limit) {
+                    println!("{}|{}", tag, count);
                 }
             }
         }
@@ -1268,100 +1439,79 @@ Commands::Delete { note_id_positional, note_id } => {
                 }
             };
 
-            // Try to load embedding generator
-            #[cfg(feature = "embeddings")]
-            {
-                use engram::embedding::{EmbeddingGenerator, EmbeddingConfig};
+            use engram::embedding::{EmbeddingGenerator, EmbeddingConfig};
 
-                let model_file = model_path.unwrap_or_else(|| "embeddinggemma-300M-Q8_0.gguf".to_string());
-                let model_path_resolved = EmbeddingGenerator::find_model(&model_file)
-                    .ok_or_else(|| anyhow!("Model not found: {}. Place GGUF file in bin/ directory.", model_file))?;
+            let model_file = model_path.unwrap_or_else(|| "embeddinggemma-300M-Q8_0.gguf".to_string());
+            let model_path_resolved = EmbeddingGenerator::find_model(&model_file)
+                .ok_or_else(|| anyhow!("Model not found: {}. Place GGUF file in bin/ directory.", model_file))?;
 
-                let config = EmbeddingConfig::default().with_model(&model_path_resolved);
-                let mut generator = EmbeddingGenerator::load(config)?;
+            let config = EmbeddingConfig::default().with_model(&model_path_resolved);
+            let mut generator = EmbeddingGenerator::load(config)?;
 
-                let start = std::time::Instant::now();
-                let embedding = generator.embed(&note.content)?;
-                let elapsed = start.elapsed();
+            let start = std::time::Instant::now();
+            let embedding = generator.embed(&note.content)?;
+            let elapsed = start.elapsed();
 
-                db.add_embedding(nid, &embedding)?;
-                db.persist_indexes()?;
+            db.add_embedding(nid, &embedding)?;
+            db.persist_indexes()?;
 
-                println!("embedded|{}|{}d|{:.3}s", nid, embedding.len(), elapsed.as_secs_f64());
-            }
-
-            #[cfg(not(feature = "embeddings"))]
-            {
-                let _ = (note, model_path);
-                eprintln!("Error: Embedding support not compiled.");
-                eprintln!("Hint: Build notebook-cli with --features embeddings");
-            }
+            println!("embedded|{}|{}d|{:.3}s", nid, embedding.len(), elapsed.as_secs_f64());
         }
 
         Commands::GenerateEmbeddings { limit_positional, limit, model_path, skip_existing } => {
             let final_limit = limit_positional.or(limit).unwrap_or(usize::MAX);
 
-            #[cfg(feature = "embeddings")]
-            {
-                use engram::embedding::{EmbeddingGenerator, EmbeddingConfig};
+            use engram::embedding::{EmbeddingGenerator, EmbeddingConfig};
 
-                let model_file = model_path.unwrap_or_else(|| "embeddinggemma-300M-Q8_0.gguf".to_string());
-                let model_path_resolved = EmbeddingGenerator::find_model(&model_file)
-                    .ok_or_else(|| anyhow!("Model not found: {}. Place GGUF file in bin/ directory.", model_file))?;
+            let model_file = model_path.unwrap_or_else(|| "embeddinggemma-300M-Q8_0.gguf".to_string());
+            let model_path_resolved = EmbeddingGenerator::find_model(&model_file)
+                .ok_or_else(|| anyhow!("Model not found: {}. Place GGUF file in bin/ directory.", model_file))?;
 
-                let config = EmbeddingConfig::default().with_model(&model_path_resolved);
-                let mut generator = EmbeddingGenerator::load(config)?;
+            let config = EmbeddingConfig::default().with_model(&model_path_resolved);
+            let mut generator = EmbeddingGenerator::load(config)?;
 
-                let start = std::time::Instant::now();
-                let notes = db.recent(final_limit)?;
+            let start = std::time::Instant::now();
+            let notes = db.recent(final_limit)?;
 
-                let mut processed = 0u64;
-                let mut skipped = 0u64;
-                let mut embedded = 0u64;
-                let mut errors = 0u64;
+            let mut processed = 0u64;
+            let mut skipped = 0u64;
+            let mut embedded = 0u64;
+            let mut errors = 0u64;
 
-                for note in &notes {
-                    processed += 1;
+            for note in &notes {
+                processed += 1;
 
-                    // Skip if already has embedding
-                    if skip_existing && db.has_embedding(note.id) {
-                        skipped += 1;
-                        continue;
-                    }
+                // Skip if already has embedding
+                if skip_existing && db.has_embedding(note.id) {
+                    skipped += 1;
+                    continue;
+                }
 
-                    match generator.embed(&note.content) {
-                        Ok(embedding) => {
-                            if let Err(_) = db.add_embedding(note.id, &embedding) {
-                                errors += 1;
-                            } else {
-                                embedded += 1;
-                            }
-                        }
-                        Err(_) => {
+                match generator.embed(&note.content) {
+                    Ok(embedding) => {
+                        if let Err(_) = db.add_embedding(note.id, &embedding) {
                             errors += 1;
+                        } else {
+                            embedded += 1;
                         }
                     }
-
-                    // Progress indicator every 10 notes
-                    if processed % 10 == 0 {
-                        eprint!("\rProcessed: {} / {}", processed, notes.len());
+                    Err(_) => {
+                        errors += 1;
                     }
                 }
-                eprintln!(); // Clear progress line
 
-                db.persist_indexes()?;
-                let elapsed = start.elapsed();
-
-                println!("backfill|processed:{}|skipped:{}|new:{}|errors:{}|time:{:.1}s",
-                    processed, skipped, embedded, errors, elapsed.as_secs_f64());
+                // Progress indicator every 10 notes
+                if processed % 10 == 0 {
+                    eprint!("\rProcessed: {} / {}", processed, notes.len());
+                }
             }
+            eprintln!(); // Clear progress line
 
-            #[cfg(not(feature = "embeddings"))]
-            {
-                let _ = (final_limit, model_path, skip_existing);
-                eprintln!("Error: Embedding support not compiled.");
-                eprintln!("Hint: Build notebook-cli with --features embeddings");
-            }
+            db.persist_indexes()?;
+            let elapsed = start.elapsed();
+
+            println!("backfill|processed:{}|skipped:{}|new:{}|errors:{}|time:{:.1}s",
+                processed, skipped, embedded, errors, elapsed.as_secs_f64());
         }
 
         // ===== GRAPH MEMORY COMMANDS =====
@@ -1387,6 +1537,15 @@ Commands::Delete { note_id_positional, note_id } => {
                 println!("unlinked|{}|{}", from_id, to_id);
             } else {
                 println!("error|no_edge|{}|{}", from_id, to_id);
+            }
+        }
+
+        Commands::InvalidateEdge { from, to } => {
+            let removed = db.invalidate_edge(from, to);
+            if removed {
+                println!("Edge {} → {} invalidated", from, to);
+            } else {
+                println!("No edge found from {} to {}", from, to);
             }
         }
 
@@ -2170,10 +2329,16 @@ fn print_recall_result(r: &engram::recall::RecallResult) {
     // NO TRUNCATION - full content preserves context and AI collaboration effectiveness
     // QD explicitly stated truncation degrades tool functionality from ~90% to ~20%
     let content = r.note.content.replace('\n', " ");
+    // Score transparency: show per-signal breakdown so AIs understand WHY a result ranked
+    // Format: ID|FINAL [vector:V keyword:K graph:G recency:R]|content
+    let scores = format!(
+        "{:.2} [vector:{:.2} keyword:{:.2} graph:{:.2} recency:{:.2}]",
+        r.final_score, r.vector_score, r.keyword_score, r.graph_score, r.recency_score
+    );
     if r.note.pinned {
-        println!("{}|{:.2}|{}|pinned", r.note.id, r.final_score, content);
+        println!("{}|{}|{}|pinned", r.note.id, scores, content);
     } else {
-        println!("{}|{:.2}|{}", r.note.id, r.final_score, content);
+        println!("{}|{}|{}", r.note.id, scores, content);
     }
 }
 

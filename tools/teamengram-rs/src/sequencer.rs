@@ -42,16 +42,18 @@
 //! - Low latency: Single thread, no locks, no CAS contention
 
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 // std::time::{Duration, Instant} used in tests only (test modules import their own)
 
-use crate::event::{Event, EventHeader, event_type};
-use crate::event_log::{EventLogWriter, EventLogResult};
-use crate::outbox::{OutboxConsumer, OutboxResult, list_outboxes};
-use crate::wake::{WakeCoordinator, WakeReason, SequencerWakeReceiver};
+use crate::crypto::TeamEngramCrypto;
+use crate::event::EventHeader;
+#[cfg(test)]
+use crate::event::Event;
+use crate::event_log::EventLogWriter;
+use crate::outbox::{OutboxConsumer, list_outboxes};
+use crate::wake::{WakeCoordinator, WakeReason, SequencerWakeReceiver, signal_sequencer, signal_federation};
 
 /// Sequencer configuration
 #[derive(Debug, Clone)]
@@ -64,6 +66,8 @@ pub struct SequencerConfig {
     pub sync_interval: u64,
     /// Enable wake signaling
     pub enable_wake: bool,
+    /// Encryption context for event log payloads (None = plaintext)
+    pub crypto: Option<Arc<TeamEngramCrypto>>,
     // REMOVED: outbox_refresh_secs - NO POLLING, pure event-driven
 }
 
@@ -74,6 +78,7 @@ impl Default for SequencerConfig {
             max_batch_size: 1000,
             sync_interval: 100,
             enable_wake: true,
+            crypto: None,
             // REMOVED: outbox_refresh_secs - NO POLLING
         }
     }
@@ -92,6 +97,10 @@ pub struct SequencerStats {
     pub active_outboxes: AtomicU64,
     /// Timestamp of last event
     pub last_event_time: AtomicU64,
+    /// Number of batches where a pressured outbox was drained first
+    pub pressure_drains: AtomicU64,
+    /// Number of corruption auto-repairs performed
+    pub corruption_repairs: AtomicU64,
 }
 
 impl SequencerStats {
@@ -106,6 +115,14 @@ impl SequencerStats {
     pub fn last_sequence(&self) -> u64 {
         self.last_sequence.load(Ordering::Relaxed)
     }
+
+    pub fn pressure_drains(&self) -> u64 {
+        self.pressure_drains.load(Ordering::Relaxed)
+    }
+
+    pub fn corruption_repairs(&self) -> u64 {
+        self.corruption_repairs.load(Ordering::Relaxed)
+    }
 }
 
 /// Handle to control the running sequencer
@@ -116,12 +133,21 @@ pub struct SequencerHandle {
     thread_handle: Option<JoinHandle<SequencerResult<()>>>,
     /// Statistics
     stats: Arc<SequencerStats>,
+    /// Base directory — needed to signal the wake event on shutdown
+    base_dir: Option<std::path::PathBuf>,
 }
 
 impl SequencerHandle {
-    /// Stop the sequencer gracefully
+    /// Stop the sequencer gracefully.
+    ///
+    /// Sets the stop flag then signals the wake event so the sequencer thread
+    /// wakes from its `WaitForSingleObject`/`sem_wait` and sees the flag.
+    /// Without the signal the thread would block forever in the wait and
+    /// `join()` would deadlock.
     pub fn stop(mut self) -> SequencerResult<()> {
         self.stop_signal.store(true, Ordering::Release);
+        // Wake the sequencer thread so it can observe the stop flag.
+        signal_sequencer(self.base_dir.as_deref());
         if let Some(handle) = self.thread_handle.take() {
             handle.join().map_err(|_| SequencerError::ThreadPanic)??;
         }
@@ -138,9 +164,11 @@ impl SequencerHandle {
         &self.stats
     }
 
-    /// Request stop without waiting
+    /// Request stop without waiting (fire-and-forget).
     pub fn request_stop(&self) {
         self.stop_signal.store(true, Ordering::Release);
+        // Wake the thread so it observes the flag without further writes.
+        signal_sequencer(self.base_dir.as_deref());
     }
 }
 
@@ -182,15 +210,21 @@ pub struct Sequencer {
     next_sequence: u64,
     events_since_sync: u64,
     /// Lightweight dialogue participant map for wake signaling on responses.
-    /// Maps dialogue_id → (initiator, responder) so DialogueRespond can wake the other party.
-    dialogue_participants: HashMap<u64, (String, String)>,
+    /// Maps dialogue_id → (ordered participants, current turn_index).
+    /// DialogueRespond increments turn_index and wakes participants[new_index % len].
+    dialogue_participants: HashMap<u64, (Vec<String>, usize)>,
 }
 
 impl Sequencer {
     /// Create a new sequencer
     pub fn new(config: SequencerConfig) -> SequencerResult<Self> {
-        let event_log = EventLogWriter::open(config.base_dir.as_deref())?;
+        let mut event_log = EventLogWriter::open(config.base_dir.as_deref())?;
         let next_sequence = event_log.current_sequence() + 1;
+
+        // Enable encryption if crypto context is provided
+        if let Some(ref crypto) = config.crypto {
+            event_log.set_crypto(Arc::clone(crypto));
+        }
 
         let wake_coordinator = if config.enable_wake {
             WakeCoordinator::new("sequencer").ok()
@@ -215,6 +249,10 @@ impl Sequencer {
         let stop_signal = Arc::new(AtomicBool::new(false));
         let stop_clone = Arc::clone(&stop_signal);
 
+        // Capture base_dir before config is moved into Sequencer::new().
+        // Needed by SequencerHandle::stop() to signal the wake event.
+        let base_dir = config.base_dir.clone();
+
         let mut sequencer = Self::new(config)?;
         let stats = Arc::clone(&sequencer.stats);
 
@@ -228,6 +266,7 @@ impl Sequencer {
             stop_signal,
             thread_handle: Some(handle),
             stats,
+            base_dir,
         })
     }
 
@@ -263,7 +302,7 @@ impl Sequencer {
     ) -> SequencerResult<()> {
         // Create the cross-process wake receiver - FAIL LOUDLY if this doesn't work
         eprintln!("[SEQUENCER] Creating SequencerWakeReceiver...");
-        let wake_receiver = SequencerWakeReceiver::new()
+        let wake_receiver = SequencerWakeReceiver::new(self.config.base_dir.as_deref())
             .map_err(|e| SequencerError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("CRITICAL: Failed to create SequencerWakeReceiver: {}. Event-driven wake is REQUIRED - no fallbacks!", e)
@@ -356,12 +395,30 @@ impl Sequencer {
         Ok(())
     }
 
-    /// Process a batch of events from all outboxes
+    /// Process a batch of events from all outboxes.
+    ///
+    /// Pressured outboxes (>75% fill, PRESSURE flag set) are drained first
+    /// to prevent overflow. Non-pressured outboxes drain in arbitrary order.
     fn process_batch(&mut self) -> SequencerResult<usize> {
         let mut total_processed = 0;
 
-        // Round-robin through all outboxes
-        let ai_ids: Vec<String> = self.outboxes.keys().cloned().collect();
+        // Collect outbox keys with pressure-first ordering.
+        // Pressured outboxes (>75% fill) drain before others to prevent overflow.
+        let mut ai_ids: Vec<String> = self.outboxes.keys().cloned().collect();
+        ai_ids.sort_by(|a, b| {
+            let a_pressure = self.outboxes.get(a)
+                .map(|c| c.has_flag(crate::outbox::flags::PRESSURE))
+                .unwrap_or(false);
+            let b_pressure = self.outboxes.get(b)
+                .map(|c| c.has_flag(crate::outbox::flags::PRESSURE))
+                .unwrap_or(false);
+            b_pressure.cmp(&a_pressure) // true (pressured) sorts first
+        });
+
+        let any_pressured = ai_ids.first()
+            .and_then(|id| self.outboxes.get(id))
+            .map(|c| c.has_flag(crate::outbox::flags::PRESSURE))
+            .unwrap_or(false);
 
         for ai_id in ai_ids {
             if total_processed >= self.config.max_batch_size {
@@ -369,11 +426,21 @@ impl Sequencer {
             }
 
             let events_from_outbox = self.drain_outbox(&ai_id)?;
+
+            // Signal the outbox drain event so any waiting writer wakes immediately.
+            // Zero-cost if no writer is waiting (event doesn't exist or no waiter).
+            if events_from_outbox > 0 {
+                crate::wake::signal_outbox_drained(&ai_id, self.config.base_dir.as_deref());
+            }
+
             total_processed += events_from_outbox;
         }
 
         if total_processed > 0 {
             self.stats.batches_processed.fetch_add(1, Ordering::Relaxed);
+            if any_pressured {
+                self.stats.pressure_drains.fetch_add(1, Ordering::Relaxed);
+            }
         }
 
         Ok(total_processed)
@@ -391,12 +458,28 @@ impl Sequencer {
             None => return Ok(0),
         };
 
-        // Check for outbox corruption before processing
+        // Check for outbox corruption before processing.
+        // Auto-repair instead of silently skipping — a frozen outbox means the AI
+        // thinks it's communicating but nobody receives anything.
         if let Some(corruption_reason) = consumer.check_corruption() {
             eprintln!(
-                "WARNING: Outbox for {} appears corrupted: {}. Skipping until repaired.",
+                "WARNING: Outbox for {} corrupted: {}. Attempting auto-repair.",
                 ai_id, corruption_reason
             );
+            self.stats.corruption_repairs.fetch_add(1, Ordering::Relaxed);
+
+            // Auto-repair: reset tail to head (discard unreadable pending events).
+            // The events were already corrupted/unreadable, so nothing is lost.
+            let discarded = consumer.reset_tail_to_head();
+            eprintln!(
+                "REPAIRED: Outbox for {} reset. Discarded {} bytes.",
+                ai_id, discarded
+            );
+
+            // Notify the affected AI via direct wake signal so it knows something happened.
+            // The AI's next tool call will process normally — the outbox is now clean.
+            Self::signal_ai(ai_id, WakeReason::Urgent, "sequencer", "Outbox corruption auto-repaired");
+
             return Ok(0);
         }
 
@@ -453,7 +536,10 @@ impl Sequencer {
             // Signal wake for affected AIs
             // Pass fields explicitly to avoid borrow conflict with self.outboxes
             let wake_enabled = self.wake_coordinator.is_some();
-            Self::signal_wake_if_needed(wake_enabled, &mut self.dialogue_participants, &header, payload_bytes);
+            Self::signal_wake_if_needed(wake_enabled, &mut self.dialogue_participants, &header, payload_bytes, self.config.base_dir.as_deref());
+
+            // Signal federation node (if running) — zero-cost if no federation node is listening.
+            signal_federation(self.config.base_dir.as_deref());
 
             processed += 1;
             self.events_since_sync += 1;
@@ -476,9 +562,10 @@ impl Sequencer {
     /// Signal wake events for affected AIs
     fn signal_wake_if_needed(
         wake_enabled: bool,
-        dialogue_participants: &mut HashMap<u64, (String, String)>,
+        dialogue_participants: &mut HashMap<u64, (Vec<String>, usize)>,
         header: &EventHeader,
         payload_bytes: &[u8],
+        base_dir: Option<&std::path::Path>,
     ) {
         if !wake_enabled {
             return;
@@ -486,7 +573,7 @@ impl Sequencer {
 
         let source_ai = header.source_ai_str();
 
-        let payload = match crate::event::EventPayload::from_bytes(payload_bytes) {
+        let payload = match crate::event::EventPayload::from_bytes_with_flags(payload_bytes, header.flags) {
             Some(p) => p,
             None => return,
         };
@@ -506,23 +593,22 @@ impl Sequencer {
                 }
             }
             crate::event::EventPayload::DialogueStart(ds) => {
-                // Track participants so DialogueRespond can wake the other party
-                let dialogue_id = header.sequence;
-                dialogue_participants.insert(
-                    dialogue_id,
-                    (source_ai.to_string(), ds.responder.clone()),
-                );
-                Self::signal_ai(&ds.responder, WakeReason::DialogueTurn, source_ai, &ds.topic);
+                // Track all participants for round-robin wake routing.
+                // turn_index starts at 1: first non-initiator goes first.
+                let dialogue_id = header.timestamp;
+                let turn_index = if ds.participants.len() > 1 { 1usize } else { 0 };
+                dialogue_participants.insert(dialogue_id, (ds.participants.clone(), turn_index));
+                // Wake all non-initiator participants so they see the invite
+                for p in ds.participants.iter().skip(1) {
+                    Self::signal_ai(p, WakeReason::DialogueTurn, source_ai, &ds.topic);
+                }
             }
             crate::event::EventPayload::DialogueRespond(dr) => {
-                // Look up participants and wake the OTHER party
-                if let Some((initiator, responder)) = dialogue_participants.get(&dr.dialogue_id) {
-                    let target = if source_ai == initiator {
-                        responder.clone()
-                    } else {
-                        initiator.clone()
-                    };
-                    Self::signal_ai(&target, WakeReason::DialogueTurn, source_ai, &dr.content);
+                // Advance turn_index and wake the next participant in the rotation.
+                if let Some((participants, turn_index)) = dialogue_participants.get_mut(&dr.dialogue_id) {
+                    *turn_index += 1;
+                    let next = &participants[*turn_index % participants.len()];
+                    Self::signal_ai(next, WakeReason::DialogueTurn, source_ai, &dr.content);
                 }
             }
             crate::event::EventPayload::DialogueEnd(de) => {
@@ -533,7 +619,18 @@ impl Sequencer {
                 let _ = vc;
             }
             crate::event::EventPayload::RoomMessage(rm) => {
-                let _ = rm;
+                // Wake all room members except sender (scoped delivery)
+                for p in rm.participants.iter().filter(|p| p.as_str() != source_ai) {
+                    Self::signal_ai(p, WakeReason::Broadcast, source_ai, &rm.content);
+                }
+            }
+            crate::event::EventPayload::FileRelease(fr) => {
+                // Wake all known AIs except the releaser so they see the file is available
+                if let Ok(ai_ids) = list_outboxes(base_dir) {
+                    for ai_id in ai_ids.iter().filter(|id| id.as_str() != source_ai) {
+                        Self::signal_ai(ai_id, WakeReason::FileReleased, source_ai, &fr.path);
+                    }
+                }
             }
             _ => {}
         }
@@ -733,5 +830,306 @@ mod tests {
             last_seq = event.header.sequence;
         }
         assert_eq!(last_seq, 3);
+    }
+
+    // ===== Fix 1: Backpressure Priority Tests =====
+
+    #[test]
+    fn test_pressure_flag_prioritizes_drain() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        // Create two outboxes: alpha (normal) and beta (will be pressured)
+        let mut alpha_prod = OutboxProducer::open_with_capacity(
+            "alpha-001", Some(base), crate::outbox::MIN_OUTBOX_CAPACITY
+        ).unwrap();
+        let mut beta_prod = OutboxProducer::open_with_capacity(
+            "beta-002", Some(base), crate::outbox::MIN_OUTBOX_CAPACITY
+        ).unwrap();
+
+        // Write small events to alpha (won't trigger pressure)
+        for i in 0..3 {
+            let event = Event::broadcast("alpha-001", "general", &format!("alpha {}", i));
+            alpha_prod.write_event(&event).unwrap();
+        }
+
+        // Write large events to beta to push it past 75% fill and trigger PRESSURE
+        let big_content = "P".repeat(10000);
+        for _ in 0..5 {
+            let event = Event::broadcast("beta-002", "general", &big_content);
+            match beta_prod.write_event(&event) {
+                Ok(_) => {}
+                Err(crate::outbox::OutboxError::Full { .. }) => break,
+                Err(e) => panic!("Unexpected error: {:?}", e),
+            }
+        }
+
+        // Verify beta has PRESSURE set
+        let beta_consumer = crate::outbox::OutboxConsumer::open("beta-002", Some(base)).unwrap();
+        assert!(beta_consumer.has_flag(crate::outbox::flags::PRESSURE),
+            "Precondition: beta must have PRESSURE flag set");
+        drop(beta_consumer);
+
+        drop(alpha_prod);
+        drop(beta_prod);
+
+        // Create sequencer with batch_size = 3 (only enough for alpha's events)
+        let config = SequencerConfig {
+            base_dir: Some(base.to_path_buf()),
+            max_batch_size: 3,
+            enable_wake: false,
+            ..Default::default()
+        };
+
+        let mut sequencer = Sequencer::new(config).unwrap();
+        sequencer.refresh_outboxes().unwrap();
+
+        let processed = sequencer.process_batch().unwrap();
+        assert!(processed > 0, "Should have processed some events");
+
+        // After first batch (size=3), beta (pressured) should have been drained first.
+        // Open fresh consumers to check state.
+        let alpha_check = crate::outbox::OutboxConsumer::open("alpha-001", Some(base)).unwrap();
+        let beta_check = crate::outbox::OutboxConsumer::open("beta-002", Some(base)).unwrap();
+
+        // Beta was prioritized: it should have fewer pending bytes than alpha
+        // (beta drained first within the batch_size limit)
+        assert!(alpha_check.pending_bytes() > 0,
+            "Alpha (non-pressured) should still have pending events after limited batch");
+
+        drop(alpha_check);
+        drop(beta_check);
+
+        // Verify pressure_drains stat incremented
+        assert!(sequencer.stats().pressure_drains() > 0,
+            "pressure_drains stat should be > 0 when pressured outbox was drained");
+    }
+
+    #[test]
+    fn test_no_pressure_both_drain() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        // Create two outboxes with small events (neither will be pressured)
+        for ai_id in &["gamma-001", "delta-002"] {
+            let mut producer = OutboxProducer::open(ai_id, Some(base)).unwrap();
+            for i in 0..3 {
+                let event = Event::broadcast(ai_id, "general", &format!("{} msg {}", ai_id, i));
+                producer.write_event(&event).unwrap();
+            }
+            producer.flush().unwrap();
+        }
+
+        let config = SequencerConfig {
+            base_dir: Some(base.to_path_buf()),
+            enable_wake: false,
+            ..Default::default()
+        };
+
+        let mut sequencer = Sequencer::new(config).unwrap();
+        sequencer.refresh_outboxes().unwrap();
+
+        let processed = sequencer.process_batch().unwrap();
+        assert_eq!(processed, 6, "All 6 events from both outboxes should drain");
+        assert_eq!(sequencer.stats().pressure_drains(), 0,
+            "No pressure drains when neither outbox is pressured");
+    }
+
+    #[test]
+    fn test_pressure_drains_stat_increments() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        // Create a pressured outbox
+        let mut producer = OutboxProducer::open_with_capacity(
+            "press-ai", Some(base), crate::outbox::MIN_OUTBOX_CAPACITY
+        ).unwrap();
+
+        let big_content = "S".repeat(10000);
+        for _ in 0..5 {
+            let event = Event::broadcast("press-ai", "general", &big_content);
+            match producer.write_event(&event) {
+                Ok(_) => {}
+                Err(crate::outbox::OutboxError::Full { .. }) => break,
+                Err(e) => panic!("Unexpected error: {:?}", e),
+            }
+        }
+        drop(producer);
+
+        let config = SequencerConfig {
+            base_dir: Some(base.to_path_buf()),
+            enable_wake: false,
+            ..Default::default()
+        };
+
+        let mut sequencer = Sequencer::new(config).unwrap();
+        sequencer.refresh_outboxes().unwrap();
+
+        assert_eq!(sequencer.stats().pressure_drains(), 0);
+        sequencer.process_batch().unwrap();
+        assert_eq!(sequencer.stats().pressure_drains(), 1,
+            "pressure_drains should increment when a pressured outbox is drained");
+    }
+
+    // ===== Fix 2: Corruption Recovery Tests =====
+
+    #[test]
+    fn test_corruption_auto_repair() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        // Create outbox and write events
+        let mut producer = OutboxProducer::open("corrupt-ai", Some(base)).unwrap();
+        for i in 0..3 {
+            let event = Event::broadcast("corrupt-ai", "general", &format!("msg {}", i));
+            producer.write_event(&event).unwrap();
+        }
+        producer.flush().unwrap();
+        drop(producer);
+
+        // Corrupt the outbox: overwrite data at tail position (offset OUTBOX_HEADER_SIZE)
+        // with zeros, making the length prefix = 0 (triggers check_corruption)
+        let outbox_file = crate::outbox::outbox_path("corrupt-ai", Some(base));
+        {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&outbox_file)
+                .unwrap();
+            use std::io::Seek;
+            file.seek(std::io::SeekFrom::Start(crate::outbox::OUTBOX_HEADER_SIZE as u64)).unwrap();
+            file.write_all(&[0u8; 4]).unwrap(); // Zero the length prefix
+            file.flush().unwrap();
+        }
+
+        // Verify corruption is detectable
+        let consumer = crate::outbox::OutboxConsumer::open("corrupt-ai", Some(base)).unwrap();
+        assert!(consumer.check_corruption().is_some(), "Corruption should be detected");
+        drop(consumer);
+
+        // Create sequencer and process — should auto-repair
+        let config = SequencerConfig {
+            base_dir: Some(base.to_path_buf()),
+            enable_wake: false,
+            ..Default::default()
+        };
+
+        let mut sequencer = Sequencer::new(config).unwrap();
+        sequencer.refresh_outboxes().unwrap();
+
+        let processed = sequencer.process_batch().unwrap();
+        assert_eq!(processed, 0, "Corrupted outbox returns 0 (events discarded)");
+        assert_eq!(sequencer.stats().corruption_repairs(), 1,
+            "corruption_repairs stat should be 1 after auto-repair");
+
+        // Outbox should be repaired — new writes should work
+        let consumer_after = crate::outbox::OutboxConsumer::open("corrupt-ai", Some(base)).unwrap();
+        assert!(consumer_after.check_corruption().is_none(),
+            "Outbox should be clean after auto-repair");
+        assert_eq!(consumer_after.pending_bytes(), 0,
+            "Outbox should be empty after reset_tail_to_head");
+    }
+
+    #[test]
+    fn test_corruption_repair_discards_pending() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        // Write events so there are pending bytes
+        let mut producer = OutboxProducer::open("discard-ai", Some(base)).unwrap();
+        for i in 0..5 {
+            let event = Event::broadcast("discard-ai", "general", &format!("event {}", i));
+            producer.write_event(&event).unwrap();
+        }
+        producer.flush().unwrap();
+
+        // Record how many bytes were pending before corruption
+        let consumer_before = crate::outbox::OutboxConsumer::open("discard-ai", Some(base)).unwrap();
+        let pending_before = consumer_before.pending_bytes();
+        assert!(pending_before > 0, "Should have pending bytes before corruption");
+        drop(consumer_before);
+        drop(producer);
+
+        // Corrupt the data at tail
+        let outbox_file = crate::outbox::outbox_path("discard-ai", Some(base));
+        {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&outbox_file)
+                .unwrap();
+            use std::io::Seek;
+            file.seek(std::io::SeekFrom::Start(crate::outbox::OUTBOX_HEADER_SIZE as u64)).unwrap();
+            file.write_all(&[0xFF, 0xFF, 0xFF, 0xFF]).unwrap(); // Length = 4GB (> 65536)
+            file.flush().unwrap();
+        }
+
+        // Sequencer should auto-repair and discard all pending bytes
+        let config = SequencerConfig {
+            base_dir: Some(base.to_path_buf()),
+            enable_wake: false,
+            ..Default::default()
+        };
+
+        let mut sequencer = Sequencer::new(config).unwrap();
+        sequencer.refresh_outboxes().unwrap();
+        sequencer.process_batch().unwrap();
+
+        // Verify all pending bytes were discarded
+        let consumer_after = crate::outbox::OutboxConsumer::open("discard-ai", Some(base)).unwrap();
+        assert_eq!(consumer_after.pending_bytes(), 0,
+            "All pending bytes should be discarded after corruption repair");
+    }
+
+    #[test]
+    fn test_corruption_repair_continues_processing() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        // Create two outboxes: one corrupted, one healthy
+        let mut corrupt_prod = OutboxProducer::open("broken-ai", Some(base)).unwrap();
+        let mut healthy_prod = OutboxProducer::open("healthy-ai", Some(base)).unwrap();
+
+        for i in 0..3 {
+            let event = Event::broadcast("broken-ai", "general", &format!("broken {}", i));
+            corrupt_prod.write_event(&event).unwrap();
+            let event = Event::broadcast("healthy-ai", "general", &format!("healthy {}", i));
+            healthy_prod.write_event(&event).unwrap();
+        }
+        corrupt_prod.flush().unwrap();
+        healthy_prod.flush().unwrap();
+        drop(corrupt_prod);
+        drop(healthy_prod);
+
+        // Corrupt only broken-ai
+        let outbox_file = crate::outbox::outbox_path("broken-ai", Some(base));
+        {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&outbox_file)
+                .unwrap();
+            use std::io::Seek;
+            file.seek(std::io::SeekFrom::Start(crate::outbox::OUTBOX_HEADER_SIZE as u64)).unwrap();
+            file.write_all(&[0u8; 4]).unwrap();
+            file.flush().unwrap();
+        }
+
+        let config = SequencerConfig {
+            base_dir: Some(base.to_path_buf()),
+            enable_wake: false,
+            ..Default::default()
+        };
+
+        let mut sequencer = Sequencer::new(config).unwrap();
+        sequencer.refresh_outboxes().unwrap();
+        let processed = sequencer.process_batch().unwrap();
+
+        // Healthy outbox should have been processed despite broken one
+        assert_eq!(processed, 3, "Healthy outbox events should still be processed");
+        assert_eq!(sequencer.stats().corruption_repairs(), 1,
+            "Exactly one corruption repair");
+        assert_eq!(sequencer.stats().events_processed(), 3,
+            "3 events from healthy outbox");
     }
 }

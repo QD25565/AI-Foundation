@@ -159,11 +159,13 @@ impl ServerState {
     }
 
     /// Check if notebook access is allowed (verified AI session exists)
+    #[allow(dead_code)] // WIP: called once identity-gated notebook access is enforced
     pub fn is_notebook_verified(&self) -> bool {
         self.verified_session.lock().unwrap().is_some()
     }
 
     /// Get verification status message
+    #[allow(dead_code)] // WIP: surfaced in identity verification tool response
     pub fn verification_status(&self) -> String {
         if let Some(ref token) = *self.verified_session.lock().unwrap() {
             format!(

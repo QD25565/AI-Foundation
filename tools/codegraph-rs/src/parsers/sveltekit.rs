@@ -6,8 +6,8 @@
 //! - /src/routes/diet/tracker/+page.svelte → /diet/tracker
 //! - /src/routes/[slug]/+page.svelte → /[slug] (dynamic)
 
-use crate::graph::{CodeGraph, Node, Edge, NodeKind, EdgeKind};
-use crate::parser::{Parser, RouteDefinition, NavigationLink};
+use crate::graph::{CodeGraph, Node};
+use crate::parser::{Parser, NavigationLink};
 use std::path::Path;
 use std::fs;
 use walkdir::WalkDir;
@@ -20,6 +20,7 @@ pub struct SvelteKitParser {
     /// Regex for extracting <a href="..."> links
     href_regex: Regex,
     /// Regex for extracting $app/navigation imports
+    #[allow(dead_code)]
     nav_import_regex: Regex,
 }
 

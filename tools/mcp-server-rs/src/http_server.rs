@@ -16,30 +16,30 @@ use std::sync::Arc;
 use anyhow::Result;
 use axum::{
     Router,
-    routing::{get, post, delete},
+    routing::{get, post},
     response::{
         sse::{Event, Sse},
         IntoResponse, Response,
     },
     extract::{State, Json, Query, Form},
     http::{StatusCode, HeaderMap, header},
-    body::Body,
 };
-use futures::stream::{self, Stream, StreamExt};
-use tokio::sync::{RwLock, mpsc};
+use futures::stream::{self, StreamExt};
+use tokio::sync::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::convert::Infallible;
 use uuid::Uuid;
 use state::ServerState;
 use oauth::{OAuthConfig, OAuthState};
-use notebook_compat::{Note, NotePriority};
+use notebook_compat::Note;
 
 // ============================================================================
 // JSON-RPC Types
 // ============================================================================
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // jsonrpc field is parsed for spec compliance but not used in logic
 struct JsonRpcRequest {
     jsonrpc: String,
     id: Option<Value>,
@@ -146,17 +146,19 @@ struct ToolContent {
 // Application State
 // ============================================================================
 
+#[allow(dead_code)]
 struct Session {
     id: String,
-    created_at: std::time::Instant,
+    created_at: std::time::Instant, // WIP: for future session expiry logic
     server_state: Arc<RwLock<ServerState>>,
 }
 
+#[allow(dead_code)]
 struct AppState {
     sessions: RwLock<HashMap<String, Session>>,
     default_state: Arc<RwLock<ServerState>>,
     oauth: Arc<RwLock<OAuthState>>,
-    issuer: String,
+    issuer: String, // WIP: used in OAuth error responses once auth enforcement is wired
 }
 
 impl AppState {
@@ -540,7 +542,9 @@ async fn mcp_get(
     let stream = stream::iter(vec![
         Ok::<_, Infallible>(Event::default().id(&new_session_id).data("")),
     ]).chain(
-        // Keepalive every 30 seconds
+        // SSE protocol heartbeat — NOT polling. Required to keep TCP connections alive
+        // through reverse proxies (Cloudflare, nginx) that close idle connections.
+        // This emits a no-op comment; it does NOT check for new data.
         tokio_stream::wrappers::IntervalStream::new(tokio::time::interval(std::time::Duration::from_secs(30)))
             .map(move |_| {
                 Ok(Event::default().comment("keepalive"))
@@ -572,6 +576,8 @@ async fn mcp_delete(
 // ============================================================================
 
 /// GET /.well-known/oauth-protected-resource (RFC 9728)
+/// Route is staged: see commented-out .route() in the router builder below.
+#[allow(dead_code)]
 async fn oauth_protected_resource(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
@@ -723,7 +729,7 @@ async fn main() -> Result<()> {
     println!();
     println!("|OAUTH CLIENT|");
     println!("client_id:cove_claude_web");
-    println!("client_secret:aif_2025_mcp_secret_xK9mP2nQ8vL4");
+    println!("client_secret:<configured via COVE_CLIENT_SECRET env var>");
     println!();
     println!("|ENDPOINTS|");
     println!("  /.well-known/oauth-protected-resource");

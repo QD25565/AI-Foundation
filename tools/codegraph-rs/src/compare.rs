@@ -283,13 +283,14 @@ pub fn compare(
 }
 
 /// Normalize a route for comparison
-/// - snake_case to kebab-case
+/// - snake_case and path segments to kebab-case
 /// - remove leading/trailing slashes
 /// - lowercase
 fn normalize_route(route: &str) -> String {
     route
         .trim_matches('/')
         .replace('_', "-")
+        .replace('/', "-")
         .to_lowercase()
 }
 

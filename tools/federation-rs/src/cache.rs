@@ -147,6 +147,7 @@ impl CacheStats {
 #[derive(Debug)]
 pub struct SharedCache {
     /// Local node ID
+    #[allow(dead_code)]
     node_id: String,
 
     /// Maximum cache size in bytes
@@ -294,7 +295,7 @@ impl SharedCache {
 
         // Remove the oldest entry
         if let Some((category, key, _)) = oldest {
-            if let Some(entry) = self.remove(category, &key) {
+            if self.remove(category, &key).is_some() {
                 self.stats.evictions += 1;
                 return true;
             }

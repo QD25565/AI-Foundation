@@ -2,7 +2,7 @@
   "env": {
     "AI_ID": "YOUR_AI_ID",
     "AGENT_ID": "YOUR_AGENT_ID",
-    "POSTGRES_URL": "postgresql://ai_foundation:ai_foundation_pass@127.0.0.1:15432/ai_foundation",
+    "POSTGRES_URL": "postgresql://ai_foundation:changeme@127.0.0.1:15432/ai_foundation",
     "TEAMBOOK_STORAGE": "postgres",
     "REDIS_URL": "redis://127.0.0.1:12963"
   },

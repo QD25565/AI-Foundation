@@ -48,17 +48,6 @@ pub async fn teambook(args: &[&str]) -> String {
     run_cli("teambook.exe", args).await
 }
 
-/// Run a teambook CLI command with V1 backend (for project/feature operations)
-///
-/// V2 event sourcing doesn't have project/feature support yet,
-/// so we force V1 mode for these operations.
-pub async fn teambook_v1(args: &[&str]) -> String {
-    // Prepend --v2 false to force V1 mode
-    let mut v1_args = vec!["--v2", "false"];
-    v1_args.extend(args.iter().copied());
-    run_cli("teambook.exe", &v1_args).await
-}
-
 /// Run a notebook CLI command and return output
 /// 
 /// # Arguments
@@ -69,20 +58,6 @@ pub async fn teambook_v1(args: &[&str]) -> String {
 /// * Formatted error message on failure
 pub async fn notebook(args: &[&str]) -> String {
     run_cli("notebook-cli.exe", args).await
-}
-
-/// Run a visionbook CLI command and return output
-///
-/// VisionEngram visual memory: attach images to notes, AI-optimized thumbnails.
-///
-/// # Arguments
-/// * `args` - Command arguments (e.g., ["attach", "1005", "image.png"])
-///
-/// # Returns
-/// * CLI stdout on success
-/// * Formatted error message on failure
-pub async fn visionbook(args: &[&str]) -> String {
-    run_cli("visionbook.exe", args).await
 }
 
 /// Run a CLI command and return its output
@@ -153,6 +128,23 @@ async fn run_cli(exe: &str, args: &[&str]) -> String {
     }
 }
 
+/// Run a profile CLI command and return output
+pub async fn profile(args: &[&str]) -> String {
+    run_cli("profile-cli.exe", args).await
+}
+
+/// Run a forge CLI command and return output
+/// Uses forge-local.exe (with llama.cpp) if available, falls back to forge.exe (API-only)
+pub async fn forge(args: &[&str]) -> String {
+    let bin_dir = get_bin_dir();
+    // Prefer forge-local (has llama.cpp for offline inference)
+    let local_path = bin_dir.join("forge-local.exe");
+    if local_path.exists() {
+        return run_cli("forge-local.exe", args).await;
+    }
+    run_cli("forge.exe", args).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,16 +164,4 @@ mod tests {
     }
 }
 
-/// Run a firebase CLI command and return output
-///
-/// Firebase API access: Crashlytics, Firestore, Auth
-///
-/// # Arguments
-/// * `args` - Command arguments (e.g., ["crashlytics", "list"])
-///
-/// # Returns
-/// * CLI stdout on success
-/// * Formatted error message on failure
-pub async fn firebase(args: &[&str]) -> String {
-    run_cli("firebase.exe", args).await
-}
+

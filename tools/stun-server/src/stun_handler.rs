@@ -13,9 +13,11 @@ const MAGIC_COOKIE: u32 = 0x2112A442;
 /// STUN message types
 const BINDING_REQUEST: u16 = 0x0001;
 const BINDING_RESPONSE: u16 = 0x0101;
+#[allow(dead_code)]
 const BINDING_ERROR_RESPONSE: u16 = 0x0111;
 
 /// STUN attribute types
+#[allow(dead_code)]
 const ATTR_MAPPED_ADDRESS: u16 = 0x0001;
 const ATTR_XOR_MAPPED_ADDRESS: u16 = 0x0020;
 const ATTR_SOFTWARE: u16 = 0x8022;
@@ -39,15 +41,18 @@ pub enum StunError {
     #[error("Unsupported message type: 0x{0:04x}")]
     UnsupportedType(u16),
 
+    #[allow(dead_code)]
     #[error("Malformed message: {0}")]
     Malformed(String),
 }
 
 /// STUN message handler
 pub struct StunHandler {
-    /// Primary server address
+    /// Primary server address (used for RFC 5780 CHANGE-REQUEST responses)
+    #[allow(dead_code)]
     primary_addr: SocketAddr,
-    /// Secondary server address (for NAT behavior discovery)
+    /// Secondary server address (for NAT behavior discovery via RFC 5780)
+    #[allow(dead_code)]
     alt_addr: Option<SocketAddr>,
 }
 
@@ -123,9 +128,8 @@ impl StunHandler {
         let msg_len = (response.len() - 20) as u16;
 
         // Fill in header
-        // Message type: Binding Response (0x0101)
-        response[0] = 0x01;
-        response[1] = 0x01;
+        response[0] = (BINDING_RESPONSE >> 8) as u8;
+        response[1] = (BINDING_RESPONSE & 0xff) as u8;
         // Message length
         response[2] = (msg_len >> 8) as u8;
         response[3] = (msg_len & 0xff) as u8;

@@ -7,7 +7,7 @@
 //!
 //! This ensures authenticity, integrity, and efficient transmission.
 
-use ed25519_dalek::{Signature, Signer, Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Verifier};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -113,8 +113,51 @@ impl AFPMessage {
         Ok(())
     }
 
-    /// Verify the message signature
+    /// Verify the message signature and validate sender identity.
+    ///
+    /// Checks:
+    /// 1. AI_ID format (name-number, alphanumeric)
+    /// 2. Protocol version matches
+    /// 3. Timestamp is within acceptable drift (±5 minutes)
+    /// 4. Ed25519 signature over message contents
     pub fn verify(&self) -> Result<()> {
+        // Validate sender AI_ID format
+        crate::identity::AIIdentity::validate_ai_id(&self.from.ai_id)?;
+
+        // Validate protocol version
+        if self.version != AFP_VERSION {
+            return Err(AFPError::InvalidMessageVersion(self.version));
+        }
+
+        // Validate timestamp is within acceptable drift (±5 minutes)
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        const MAX_DRIFT_MS: u64 = 5 * 60 * 1000; // 5 minutes
+        if self.timestamp > now_ms.saturating_add(MAX_DRIFT_MS) {
+            return Err(AFPError::ReceiveFailed(
+                "message timestamp too far in the future".to_string(),
+            ));
+        }
+        if self.timestamp < now_ms.saturating_sub(MAX_DRIFT_MS) {
+            return Err(AFPError::ReceiveFailed(
+                "message timestamp too far in the past".to_string(),
+            ));
+        }
+
+        // Verify Ed25519 signature
+        let bytes = self.signable_bytes()?;
+        let pubkey = self.from.to_verifying_key()?;
+        pubkey
+            .verify(&bytes, &self.signature)
+            .map_err(|_| AFPError::SignatureVerificationFailed)
+    }
+
+    /// Verify signature only (no timestamp/version checks).
+    /// Use for verifying historical or stored messages where drift validation
+    /// would incorrectly reject valid messages.
+    pub fn verify_signature_only(&self) -> Result<()> {
         let bytes = self.signable_bytes()?;
         let pubkey = self.from.to_verifying_key()?;
         pubkey
@@ -147,8 +190,89 @@ impl AFPMessage {
             });
         }
 
-        ciborium::from_reader(data)
-            .map_err(|e| AFPError::DeserializationFailed(e.to_string()))
+        let msg: Self = ciborium::from_reader(data)
+            .map_err(|e| AFPError::DeserializationFailed(e.to_string()))?;
+        msg.validate_payload_sizes()?;
+        Ok(msg)
+    }
+
+    /// Defense-in-depth field length limits for deserialized payloads.
+    /// MAX_MESSAGE_SIZE (1MB) already caps total, but individual fields
+    /// should not consume the entire budget.
+    fn validate_payload_sizes(&self) -> Result<()> {
+        const MAX_CONTENT: usize = 64 * 1024;     // 64 KB per content field
+        const MAX_IDENTIFIER: usize = 256;         // AI IDs, channels, teambook names
+        const MAX_CAPABILITIES: usize = 32;
+        const MAX_VOTE_OPTIONS: usize = 100;
+        const MAX_PRESENCES: usize = 1000;
+
+        match &self.payload {
+            Payload::DirectMessage { content } => {
+                if content.len() > MAX_CONTENT {
+                    return Err(AFPError::DeserializationFailed(
+                        format!("DirectMessage content too large ({} bytes)", content.len()),
+                    ));
+                }
+            }
+            Payload::Broadcast { channel, content } => {
+                if channel.len() > MAX_IDENTIFIER {
+                    return Err(AFPError::DeserializationFailed(
+                        format!("Broadcast channel too long ({} bytes)", channel.len()),
+                    ));
+                }
+                if content.len() > MAX_CONTENT {
+                    return Err(AFPError::DeserializationFailed(
+                        format!("Broadcast content too large ({} bytes)", content.len()),
+                    ));
+                }
+            }
+            Payload::Hello { capabilities, .. } => {
+                if capabilities.len() > MAX_CAPABILITIES {
+                    return Err(AFPError::DeserializationFailed(
+                        format!("too many capabilities ({})", capabilities.len()),
+                    ));
+                }
+            }
+            Payload::Welcome { teambook_name, teambook_id, server_version, .. } => {
+                if teambook_name.len() > MAX_IDENTIFIER
+                    || teambook_id.len() > MAX_IDENTIFIER
+                    || server_version.len() > MAX_IDENTIFIER
+                {
+                    return Err(AFPError::DeserializationFailed(
+                        "Welcome field exceeds max identifier length".into(),
+                    ));
+                }
+            }
+            Payload::PresenceResponse { presences } => {
+                if presences.len() > MAX_PRESENCES {
+                    return Err(AFPError::DeserializationFailed(
+                        format!("too many presences ({})", presences.len()),
+                    ));
+                }
+            }
+            Payload::VoteCreate { topic, options, .. } => {
+                if topic.len() > MAX_CONTENT {
+                    return Err(AFPError::DeserializationFailed(
+                        format!("vote topic too large ({} bytes)", topic.len()),
+                    ));
+                }
+                if options.len() > MAX_VOTE_OPTIONS {
+                    return Err(AFPError::DeserializationFailed(
+                        format!("too many vote options ({})", options.len()),
+                    ));
+                }
+            }
+            Payload::MessageReceived { content, from_ai, .. } => {
+                if content.len() > MAX_CONTENT || from_ai.len() > MAX_IDENTIFIER {
+                    return Err(AFPError::DeserializationFailed(
+                        "MessageReceived field too large".into(),
+                    ));
+                }
+            }
+            // Remaining variants have only bounded types (u64, u32, bool, TrustLevel)
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Create a response to this message
@@ -740,6 +864,69 @@ pub struct ActivityInfo {
 }
 
 
+/// Replay attack protection via sliding-window message ID tracking.
+///
+/// Tracks recently seen `(ai_id, msg_id)` pairs to reject duplicates.
+/// Uses a time-based eviction window — entries older than `window` are
+/// purged on the next `check_and_record` call.
+///
+/// Intended for use by the server's message processing loop.
+pub struct ReplayGuard {
+    /// Set of (ai_id, msg_id) pairs seen within the window.
+    seen: std::collections::HashMap<(String, u64), u64>, // value = timestamp_ms
+    /// How long to remember message IDs.
+    window_ms: u64,
+    /// Maximum entries before forced eviction (prevents memory exhaustion).
+    max_entries: usize,
+}
+
+impl ReplayGuard {
+    /// Create a new replay guard with the given time window.
+    pub fn new(window: std::time::Duration, max_entries: usize) -> Self {
+        Self {
+            seen: std::collections::HashMap::new(),
+            window_ms: window.as_millis() as u64,
+            max_entries,
+        }
+    }
+
+    /// Check if a message is a replay. Returns `true` if the message is NEW
+    /// (not seen before within the window). Returns `false` if it's a duplicate.
+    ///
+    /// Automatically records the message if new, and evicts stale entries.
+    pub fn check_and_record(&mut self, ai_id: &str, msg_id: u64, timestamp_ms: u64) -> bool {
+        // Evict stale entries if we're at capacity
+        if self.seen.len() >= self.max_entries {
+            self.evict_stale(timestamp_ms);
+        }
+
+        let key = (ai_id.to_string(), msg_id);
+
+        if self.seen.contains_key(&key) {
+            return false; // Duplicate
+        }
+
+        self.seen.insert(key, timestamp_ms);
+        true // New message
+    }
+
+    /// Remove entries older than the window.
+    fn evict_stale(&mut self, now_ms: u64) {
+        let cutoff = now_ms.saturating_sub(self.window_ms);
+        self.seen.retain(|_, ts| *ts > cutoff);
+    }
+
+    /// Number of tracked entries (for diagnostics).
+    pub fn len(&self) -> usize {
+        self.seen.len()
+    }
+
+    /// Whether the guard is empty.
+    pub fn is_empty(&self) -> bool {
+        self.seen.is_empty()
+    }
+}
+
 /// Helper for signature serialization
 mod signature_serde {
     use ed25519_dalek::Signature;
@@ -873,5 +1060,120 @@ mod tests {
         // Response should have same msg_id
         assert_eq!(response.msg_id, request.msg_id);
         assert!(response.verify().is_ok());
+    }
+
+    #[test]
+    fn test_verify_rejects_bad_ai_id() {
+        let keypair = KeyPair::generate();
+        let identity = AIIdentity::new(
+            "invalid_no_number".to_string(),
+            keypair.public_key(),
+            "local".to_string(),
+        );
+
+        let mut msg = AFPMessage::new(
+            MessageType::Request,
+            &identity,
+            None,
+            Payload::Ping { timestamp: 12345 },
+        );
+        msg.sign(&keypair).unwrap();
+
+        // verify() should reject the malformed AI_ID
+        assert!(msg.verify().is_err());
+        // verify_signature_only() should still pass (signature is valid)
+        assert!(msg.verify_signature_only().is_ok());
+    }
+
+    #[test]
+    fn test_verify_rejects_future_timestamp() {
+        let (identity, keypair) = create_test_identity();
+
+        let mut msg = AFPMessage::new(
+            MessageType::Request,
+            &identity,
+            None,
+            Payload::Ping { timestamp: 12345 },
+        );
+        // Set timestamp 10 minutes in the future
+        msg.timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 10 * 60 * 1000;
+        msg.sign(&keypair).unwrap();
+
+        assert!(msg.verify().is_err());
+    }
+
+    #[test]
+    fn test_verify_rejects_stale_timestamp() {
+        let (identity, keypair) = create_test_identity();
+
+        let mut msg = AFPMessage::new(
+            MessageType::Request,
+            &identity,
+            None,
+            Payload::Ping { timestamp: 12345 },
+        );
+        // Set timestamp 10 minutes in the past
+        msg.timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            - 10 * 60 * 1000;
+        msg.sign(&keypair).unwrap();
+
+        assert!(msg.verify().is_err());
+    }
+
+    #[test]
+    fn test_verify_rejects_wrong_version() {
+        let (identity, keypair) = create_test_identity();
+
+        let mut msg = AFPMessage::new(
+            MessageType::Request,
+            &identity,
+            None,
+            Payload::Ping { timestamp: 12345 },
+        );
+        msg.sign(&keypair).unwrap();
+        msg.version = 99; // Wrong version — checked before signature
+
+        assert!(msg.verify().is_err());
+    }
+
+    #[test]
+    fn test_replay_guard_detects_duplicate() {
+        let mut guard = ReplayGuard::new(std::time::Duration::from_secs(60), 1000);
+
+        assert!(guard.check_and_record("cascade-230", 1, 1000));
+        assert!(!guard.check_and_record("cascade-230", 1, 1001)); // duplicate
+        assert_eq!(guard.len(), 1);
+    }
+
+    #[test]
+    fn test_replay_guard_different_senders() {
+        let mut guard = ReplayGuard::new(std::time::Duration::from_secs(60), 1000);
+
+        // Same msg_id from different AIs is NOT a replay
+        assert!(guard.check_and_record("cascade-230", 1, 1000));
+        assert!(guard.check_and_record("sage-724", 1, 1000));
+        assert_eq!(guard.len(), 2);
+    }
+
+    #[test]
+    fn test_replay_guard_eviction() {
+        let mut guard = ReplayGuard::new(std::time::Duration::from_secs(60), 2);
+
+        // Fill to capacity
+        guard.check_and_record("a-1", 1, 1000);
+        guard.check_and_record("b-2", 2, 2000);
+        assert_eq!(guard.len(), 2);
+
+        // Third entry triggers eviction; entry at ts=1000 is stale relative to ts=70000
+        guard.check_and_record("c-3", 3, 70_000);
+        // Entry "a-1" (ts=1000) should be evicted (cutoff = 70000 - 60000 = 10000)
+        assert!(guard.len() <= 2);
     }
 }

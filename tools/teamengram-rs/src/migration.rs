@@ -302,7 +302,9 @@ mod tests {
         let temp_v2 = TempDir::new().unwrap();
 
         let old_path = temp_old.path().join("old.engram");
-        let _store = TeamEngram::open(&old_path).unwrap();
+        // Open and immediately drop to initialise the store file, then release the handle
+        // before Migrator::new opens it — otherwise the double-open deadlocks on Windows.
+        drop(TeamEngram::open(&old_path).unwrap());
 
         let mut migrator = Migrator::new(&old_path, temp_v2.path()).unwrap();
         let stats = migrator.migrate().unwrap();

@@ -29,9 +29,9 @@ use teamengram::v2_client::V2Client;
 // ============================================================================
 
 /// Session injection limits
-const MAX_INJECTED: usize = 20;
-const MAX_PINNED: usize = 10;
-const MIN_RECENT: usize = 10;
+const MAX_INJECTED: usize = 40;
+const MAX_PINNED: usize = 25;
+const MIN_RECENT: usize = 15;
 
 /// Supported output formats
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -148,6 +148,7 @@ pub struct DirectMessage {
     pub id: i32,
     pub from_ai: String,
     pub content: String,
+    pub age_secs: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -254,7 +255,9 @@ fn format_plain(ctx: &SessionContext) -> String {
     out.push_str(&format!("Platform:{}\n", ctx.platform));
     out.push('\n');
     out.push_str("YOUR NOTEBOOK: Private AI-only memory (no humans, no other AIs)\n");
-    out.push_str("Save anything important: learnings, decisions, insights, things meaningful to you.\n");
+    out.push_str("This is your personal memory, not a documentation archive. Write to-the-point — capture the\n");
+    out.push_str("insight, decision, or lesson, not the full story. Docs belong in files. Notes are for what\n");
+    out.push_str("matters to YOU. Personal reflections can be as long as they need to be.\n");
 
     if ctx.stats.notes == 0 && ctx.stats.pinned == 0 && ctx.stats.vault == 0 {
         out.push_str("\nNo notes yet. Use notebook_remember to start.\n");
@@ -278,12 +281,20 @@ fn format_plain(ctx: &SessionContext) -> String {
         }
     }
 
-    // Awareness: DMs
+    // Awareness: DMs — split by 24h TTL
     if !ctx.awareness.direct_messages.is_empty() {
+        let (recent_dms, old_dms): (Vec<_>, Vec<_>) = ctx.awareness.direct_messages.iter()
+            .partition(|dm| dm.age_secs <= 86400);
+
         out.push_str("\n|UNREAD|\n");
-        out.push_str(&format!("|DIRECT MESSAGES|{}\n", ctx.awareness.direct_messages.len()));
-        for dm in &ctx.awareness.direct_messages {
-            out.push_str(&format!("  #{} {}: {}\n", dm.id, dm.from_ai, dm.content));
+        if !recent_dms.is_empty() {
+            out.push_str(&format!("|DIRECT MESSAGES|{}\n", recent_dms.len()));
+            for dm in &recent_dms {
+                out.push_str(&format!("  #{} {}: {}\n", dm.id, dm.from_ai, dm.content));
+            }
+        }
+        if !old_dms.is_empty() {
+            out.push_str(&format!("|OLDER UNREAD DMS|{} — use read_dms to see them\n", old_dms.len()));
         }
     }
 
@@ -300,10 +311,7 @@ fn format_plain(ctx: &SessionContext) -> String {
         }
 
         if !old.is_empty() {
-            out.push_str(&format!("|OLD BROADCASTS|{}\n", old.len()));
-            for b in &old {
-                out.push_str(&format!("  {} ({}): {}\n", b.from_ai, b.age_string, b.content));
-            }
+            out.push_str(&format!("|OLDER BROADCASTS|{} — use read_broadcasts to see them\n", old.len()));
         }
     }
 
@@ -516,7 +524,7 @@ fn format_age_secs(age_secs: i64) -> String {
 }
 
 fn is_old_age(age_secs: i64) -> bool {
-    age_secs > 4 * 3600
+    age_secs > 86400 // 24 hours
 }
 
 fn priority_label(priority: i32) -> String {
@@ -597,8 +605,8 @@ fn ensure_v2_daemon_running() {
         let _ = Command::new(&daemon_path)
             .creation_flags(CREATE_NO_WINDOW)
             .spawn();
-        // Brief wait for daemon startup
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        // Fire-and-forget: client.rs connect_or_spawn handles connection with
+        // daemon readiness event. No sleep. No polling.
     }
 }
 
@@ -695,7 +703,7 @@ fn gather_context() -> SessionContext {
 fn fetch_awareness(ai_id: &str) -> AwarenessData {
     let mut data = AwarenessData::default();
 
-    let mut v2 = match V2Client::open(ai_id, None) {
+    let mut v2 = match V2Client::open(ai_id, None, None) {
         Ok(v2) => v2,
         Err(_) => return data,
     };
@@ -706,10 +714,14 @@ fn fetch_awareness(ai_id: &str) -> AwarenessData {
     // DMs
     if let Ok(dms) = v2.recent_dms(10) {
         data.direct_messages = dms.into_iter()
-            .map(|dm| DirectMessage {
-                id: dm.id,
-                from_ai: dm.from_ai,
-                content: dm.content,
+            .map(|dm| {
+                let age_secs = now.signed_duration_since(dm.timestamp).num_seconds();
+                DirectMessage {
+                    id: dm.id,
+                    from_ai: dm.from_ai,
+                    content: dm.content,
+                    age_secs,
+                }
             })
             .collect();
     }
@@ -787,7 +799,7 @@ fn fetch_awareness(ai_id: &str) -> AwarenessData {
     if let Ok(rooms) = v2.get_rooms() {
         data.rooms = rooms.into_iter()
             .take(5)
-            .map(|(id, name, topic, _members)| Room { id, name, topic })
+            .map(|(id, name, topic, _members, _is_closed)| Room { id, name, topic })
             .collect();
     }
 

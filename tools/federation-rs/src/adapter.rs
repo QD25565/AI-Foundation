@@ -173,7 +173,7 @@ impl ToDeepNetAddress for Endpoint {
                 // Passkeys need to be resolved first
                 None
             }
-            Endpoint::Relay { relay_node_id, relay_endpoint } => {
+            Endpoint::Relay { relay_node_id, relay_endpoint: _ } => {
                 // Convert relay node ID to bytes
                 if let Some(relay_bytes) = hex_to_bytes_32(relay_node_id) {
                     // Use zeros for target since we don't have it in Endpoint

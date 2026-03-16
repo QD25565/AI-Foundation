@@ -16,7 +16,7 @@ use afp::{
 };
 use clap::{Parser, Subcommand};
 use std::net::SocketAddr;
-use tracing::{info, Level};
+use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
 #[derive(Parser, Debug)]
@@ -142,7 +142,7 @@ async fn main() -> anyhow::Result<()> {
                         println!("Ping {}: error - {}", i + 1, e);
                     }
                 }
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                // No sleep between pings — fire them back-to-back.
             }
 
             if !latencies.is_empty() {

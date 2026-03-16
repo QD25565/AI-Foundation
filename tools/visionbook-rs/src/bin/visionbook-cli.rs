@@ -7,7 +7,7 @@ use visionbook_core::{
     ScreenshotCapture, BrowserSession, PdfGenerator, VideoRecorder, DeviceEmulator,
     ScreenshotOptions, CaptureTarget, ImageFormat, NavigationOptions, ElementSelector,
     PdfOptions, VideoOptions, parse_device, list_devices,
-    VisualMemory, VisionEntry,
+    VisualMemory,
 };
 
 #[derive(Parser)]

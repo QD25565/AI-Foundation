@@ -220,13 +220,30 @@ fn main() {
         .map(|v| v == "1")
         .unwrap_or(build_shared_libs);
     let profile = env::var("LLAMA_LIB_PROFILE").unwrap_or("Release".to_string());
+    // On Windows MSVC, match Rust's CRT mode automatically to avoid LNK2019 mismatches.
+    // The .cargo/config.toml in this workspace forces +crt-static on x86_64-pc-windows-msvc,
+    // which means Rust links /MT (static CRT). If llama.cpp is compiled with /MD (dynamic CRT,
+    // the CMake default), the linker fails with 24+ unresolved __imp_ftell/__imp_fmaxf/etc.
+    // CARGO_CFG_TARGET_FEATURE contains the active Rust target features (including crt-static
+    // when +crt-static is in RUSTFLAGS). We match it so llama.cpp always uses the same CRT.
+    // Override with LLAMA_STATIC_CRT=1 or =0 to force a specific mode regardless.
     let static_crt = env::var("LLAMA_STATIC_CRT")
         .map(|v| v == "1")
-        .unwrap_or(false);
+        .unwrap_or_else(|_| {
+            if matches!(target_os, TargetOs::Windows(WindowsVariant::Msvc)) {
+                env::var("CARGO_CFG_TARGET_FEATURE")
+                    .unwrap_or_default()
+                    .split(',')
+                    .any(|f| f.trim() == "crt-static")
+            } else {
+                false
+            }
+        });
 
     println!("cargo:rerun-if-env-changed=LLAMA_LIB_PROFILE");
     println!("cargo:rerun-if-env-changed=LLAMA_BUILD_SHARED_LIBS");
     println!("cargo:rerun-if-env-changed=LLAMA_STATIC_CRT");
+    println!("cargo:rerun-if-env-changed=CARGO_CFG_TARGET_FEATURE");
 
     debug_log!("TARGET: {}", target_triple);
     debug_log!("CARGO_MANIFEST_DIR: {}", manifest_dir);
@@ -796,9 +813,9 @@ fn main() {
     match target_os {
         TargetOs::Windows(WindowsVariant::Msvc) => {
             println!("cargo:rustc-link-lib=advapi32");
-            if cfg!(debug_assertions) {
-                println!("cargo:rustc-link-lib=dylib=msvcrtd");
-            }
+            // CRT is determined by static_crt above, which mirrors Rust's own CRT mode
+            // via CARGO_CFG_TARGET_FEATURE. Explicitly linking msvcrtd conflicts with
+            // static CRT (/MT) and was the second cause of the LNK2019 symbol errors.
         }
         TargetOs::Windows(WindowsVariant::Other) => {
             // MinGW/GNU target - add LLVM-MinGW lib path and link C++ runtime

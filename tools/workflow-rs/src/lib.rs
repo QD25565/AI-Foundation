@@ -12,7 +12,6 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use pyo3::prelude::*;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
 use uuid::Uuid;
@@ -405,6 +404,7 @@ impl PersonalPlaybookPy {
         Ok(Self { inner })
     }
 
+    #[pyo3(signature = (title, context, approach, learned_from=None, tags=None))]
     fn add_strategy(
         &self,
         title: &str,
@@ -452,18 +452,21 @@ impl PersonalPlaybookPy {
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
     }
 
+    #[pyo3(signature = (tags=None))]
     fn get_strategies(&self, tags: Option<Vec<String>>) -> PyResult<String> {
         self.inner.get_strategies(tags)
             .map(|strategies| serde_json::to_string(&strategies).unwrap())
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
     }
 
+    #[pyo3(signature = (tags=None))]
     fn get_insights(&self, tags: Option<Vec<String>>) -> PyResult<String> {
         self.inner.get_insights(tags)
             .map(|insights| serde_json::to_string(&insights).unwrap())
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e.to_string()))
     }
 
+    #[pyo3(signature = (tags=None))]
     fn get_patterns(&self, tags: Option<Vec<String>>) -> PyResult<String> {
         self.inner.get_patterns(tags)
             .map(|patterns| serde_json::to_string(&patterns).unwrap())

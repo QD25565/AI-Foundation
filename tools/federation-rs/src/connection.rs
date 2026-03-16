@@ -1,8 +1,8 @@
 //! Federation connection state machine
 
 use crate::{
-    Endpoint, FederationNode, NegotiatedSharing, ParticipationRequirements,
-    SharingPreferences, TransportType, TrustLevel, Result, FederationError,
+    Endpoint, FederationNode, NegotiatedSharing,
+    SharingPreferences, TransportType, Result, FederationError,
 };
 use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};

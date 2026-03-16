@@ -4,7 +4,7 @@
 //! Following AI-Foundation principle: read-only for safety.
 
 use crate::client::FirebaseClient;
-use crate::error::{FirebaseError, Result};
+use crate::error::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -76,6 +76,7 @@ pub struct MapValue {
 
 /// List documents response
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct ListDocumentsResponse {
     documents: Option<Vec<Document>>,
     #[serde(rename = "nextPageToken")]
@@ -135,6 +136,7 @@ struct Order {
 
 /// Query result
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct QueryResult {
     document: Option<Document>,
     #[serde(rename = "readTime")]

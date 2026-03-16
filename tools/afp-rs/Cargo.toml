@@ -28,6 +28,12 @@ ed25519-dalek = { version = "2.0", features = ["rand_core"] }
 sha2 = "0.10"
 rand = "0.8"
 
+# Authenticated encryption for file-based key storage
+aes-gcm = "0.10"
+
+# Volatile memory zeroization (prevents compiler from optimizing away key erasure)
+zeroize = "1"
+
 # Transport - QUIC
 quinn = "0.11"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
@@ -69,6 +75,9 @@ windows = { version = "0.58", features = [
     "Win32_Foundation",
 ] }
 
+[dev-dependencies]
+tempfile = "3"
+
 [features]
 default = []
-tpm = []  # Enable TPM support (requires tss-esapi, complex build)
+tpm = []  # Enable TPM support (requires tss-esapi on Linux, complex build)

@@ -6,7 +6,7 @@
 //! Latency: ~100ns (memory read) vs ~150ms (subprocess + HTTP)
 
 use memmap2::{MmapMut, MmapOptions};
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::{Context, Result};
@@ -431,7 +431,6 @@ const fn bulletin_size() -> usize {
 /// The bulletin board - shared memory for awareness data
 pub struct BulletinBoard {
     mmap: MmapMut,
-    path: PathBuf,
 }
 
 impl BulletinBoard {
@@ -460,6 +459,7 @@ impl BulletinBoard {
             .read(true)
             .write(true)
             .create(true)
+            .truncate(false)
             .open(&path)
             .context("Failed to open bulletin file")?;
 
@@ -493,7 +493,7 @@ impl BulletinBoard {
             mmap.flush().context("Failed to flush bulletin")?;
         }
 
-        Ok(Self { mmap, path })
+        Ok(Self { mmap })
     }
 
     /// Get the header (read-only)

@@ -115,6 +115,7 @@ impl IdentityChallenge {
     }
 
     /// Get challenge as hex string (human-readable format)
+    #[allow(dead_code)] // WIP: used in text-based challenge display
     pub fn challenge_hex(&self) -> String {
         hex::encode(&self.challenge)
     }
@@ -147,6 +148,7 @@ impl IdentityChallenge {
     }
 
     /// Verify using hex-encoded signature string
+    #[allow(dead_code)] // WIP: used in text-based verification flow
     pub fn verify_response_hex(&self, signature_hex: &str) -> Result<Duration, VerifyError> {
         let signature_bytes = hex::decode(signature_hex)
             .map_err(|_| VerifyError::InvalidSignature)?;
@@ -180,6 +182,7 @@ impl std::fmt::Display for VerifyError {
 /// Session token issued after successful verification
 /// Valid for the lifetime of the MCP server process
 #[derive(Clone)]
+#[allow(dead_code)] // WIP: fields read when enforcing per-tool auth
 pub struct SessionToken {
     pub ai_id: String,
     pub verified_at: Instant,
@@ -196,12 +199,14 @@ impl SessionToken {
     }
 
     /// Check if this token is valid for the given AI
+    #[allow(dead_code)] // WIP: called when verifying AI identity per request
     pub fn is_valid_for(&self, ai_id: &str) -> bool {
         self.ai_id == ai_id
     }
 }
 
 // Include hex encoding/decoding
+#[allow(dead_code)] // WIP: used by challenge_hex and verify_response_hex
 mod hex {
     pub fn encode(bytes: &[u8]) -> String {
         bytes.iter().map(|b| format!("{:02x}", b)).collect()

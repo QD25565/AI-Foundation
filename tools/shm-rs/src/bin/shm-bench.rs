@@ -4,7 +4,7 @@
 //! Includes comparison between custom wire format and rkyv zero-copy serialization.
 
 use std::time::Instant;
-use shm::{SharedRegion, Message, MessageType, ZcMessage, ZcMessageType, access_message};
+use shm_rs::{SharedRegion, Message, MessageType, ZcMessage, ZcMessageType, access_message};
 
 const ITERATIONS: usize = 100_000;
 const MESSAGE_SIZES: &[usize] = &[64, 256, 1024, 4096];

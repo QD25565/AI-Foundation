@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use crate::ring_buffer::{RingBufferHeader, SpscRingBuffer};
-use crate::zerocopy::{ZcMessage, ArchivedZcMessage, access_message};
+use crate::zerocopy::ZcMessage;
 use crate::MAX_MESSAGE_SIZE;
 
 /// Message types for AI communication

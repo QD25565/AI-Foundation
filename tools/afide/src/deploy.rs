@@ -4,12 +4,12 @@ use crate::config::Config;
 use crate::registry::{self, BinaryInfo};
 use anyhow::{Result, Context};
 use colored::*;
-use std::collections::HashMap;
 use std::path::Path;
 use std::fs;
 use std::process::Command;
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct DeployResult {
     pub instance: String,
     pub file: String,
@@ -198,24 +198,22 @@ fn is_process_running(name: &str) -> bool {
 fn kill_process(name: &str) -> Result<()> {
     #[cfg(windows)]
     {
+        // taskkill /F is synchronous — the process is terminated before the command returns.
+        // No sleep needed.
         Command::new("taskkill")
             .args(["/F", "/IM", &format!("{}.exe", name)])
             .output()
             .context("Failed to kill process")?;
-
-        // Wait a bit for process to terminate
-        std::thread::sleep(std::time::Duration::from_millis(500));
     }
 
     #[cfg(not(windows))]
     {
+        // pkill -9 sends SIGKILL which is immediate. No sleep needed.
         Command::new("pkill")
             .arg("-9")
             .arg(name)
             .output()
             .context("Failed to kill process")?;
-
-        std::thread::sleep(std::time::Duration::from_millis(500));
     }
 
     Ok(())

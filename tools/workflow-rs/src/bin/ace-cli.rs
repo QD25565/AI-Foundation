@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use workflow_rs::{PersonalPlaybook, Strategy, Insight, Pattern};
+use workflow_rs::PersonalPlaybook;
 
 #[derive(Parser)]
 #[command(name = "ace-cli")]

@@ -76,8 +76,23 @@ impl BrowserSession {
                     .context("Navigation timeout")?;
             }
             WaitCondition::NetworkIdle => {
-                // Wait for network to be idle (no active requests for 500ms)
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                // Subscribe to CDP Page lifecycle events — zero polling.
+                // Chrome emits "networkIdle" when no requests have been in-flight for ~500ms.
+                // 15s ceiling handles long-polling pages that never fully idle.
+                use chromiumoxide::cdp::browser_protocol::page::EventLifecycleEvent;
+
+                let mut lifecycle = page.event_listener::<EventLifecycleEvent>()
+                    .await
+                    .context("Failed to subscribe to lifecycle events")?;
+
+                let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(15);
+                loop {
+                    match tokio::time::timeout_at(deadline, lifecycle.next()).await {
+                        Ok(Some(event)) if event.name == "networkIdle" => break,
+                        Ok(Some(_)) => continue, // Other lifecycle events — keep waiting
+                        Ok(None) | Err(_) => break, // Stream ended or 15s ceiling reached
+                    }
+                }
             }
         }
 
@@ -127,8 +142,6 @@ impl BrowserSession {
             .context("Failed to create page")?;
 
         let selector_str = selector.as_str();
-
-        use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotParams;
 
         // Find element
         let element = match selector {

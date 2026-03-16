@@ -233,9 +233,15 @@ impl Page {
         *header = PageHeader::new(PageType::Branch, page_id, txn_id);
     }
 
+    /// Maximum number of leaf entries that fit in a page
+    const MAX_LEAF_ENTRIES: usize = (PAGE_SIZE - PageHeader::SIZE) / LeafEntry::SIZE;
+    /// Maximum number of branch entries that fit in a page
+    const MAX_BRANCH_ENTRIES: usize = (PAGE_SIZE - PageHeader::SIZE) / BranchEntry::SIZE;
+
     /// Get leaf entries slice
     pub fn leaf_entries(&self) -> &[LeafEntry] {
-        let count = self.header().count as usize;
+        // Clamp count to prevent out-of-bounds access from corrupted headers
+        let count = (self.header().count as usize).min(Self::MAX_LEAF_ENTRIES);
         let ptr = unsafe {
             self.data.as_ptr().add(PageHeader::SIZE) as *const LeafEntry
         };
@@ -244,7 +250,7 @@ impl Page {
 
     /// Get mutable leaf entries slice
     pub fn leaf_entries_mut(&mut self) -> &mut [LeafEntry] {
-        let count = self.header().count as usize;
+        let count = (self.header().count as usize).min(Self::MAX_LEAF_ENTRIES);
         let ptr = unsafe {
             self.data.as_mut_ptr().add(PageHeader::SIZE) as *mut LeafEntry
         };
@@ -253,7 +259,7 @@ impl Page {
 
     /// Get branch entries slice
     pub fn branch_entries(&self) -> &[BranchEntry] {
-        let count = self.header().count as usize;
+        let count = (self.header().count as usize).min(Self::MAX_BRANCH_ENTRIES);
         let ptr = unsafe {
             self.data.as_ptr().add(PageHeader::SIZE) as *const BranchEntry
         };
@@ -389,6 +395,96 @@ impl Page {
         }
     }
 
+    /// Compact a leaf page by defragmenting key/value data.
+    /// Rewrites all live data contiguously from the end of the page,
+    /// reclaiming garbage left by leaf_upsert value replacements.
+    pub fn leaf_compact(&mut self) {
+        let count = self.header().count as usize;
+        if count == 0 {
+            return;
+        }
+
+        // Collect all live key/value data (owned copies — safe to overwrite page after)
+        let entries = self.leaf_entries();
+        let mut live: Vec<(Vec<u8>, Vec<u8>)> = Vec::with_capacity(count);
+        for i in 0..count {
+            let e = &entries[i];
+            let ks = e.key_offset as usize;
+            let vs = e.val_offset as usize;
+            let key = self.data[ks..ks + e.key_len as usize].to_vec();
+            let val = self.data[vs..vs + e.val_len as usize].to_vec();
+            live.push((key, val));
+        }
+
+        // Rewrite data contiguously from end of page, growing downward
+        let mut offset = PAGE_SIZE;
+        for (i, (key, val)) in live.iter().enumerate() {
+            // Value first (higher offset)
+            offset -= val.len();
+            let val_offset = offset;
+            self.data[val_offset..val_offset + val.len()].copy_from_slice(val);
+
+            // Key
+            offset -= key.len();
+            let key_offset = offset;
+            self.data[key_offset..key_offset + key.len()].copy_from_slice(key);
+
+            // Update entry in-place
+            let entry_off = PageHeader::SIZE + i * LeafEntry::SIZE;
+            unsafe {
+                let ptr = self.data.as_mut_ptr().add(entry_off) as *mut LeafEntry;
+                (*ptr).key_offset = key_offset as u16;
+                (*ptr).val_offset = val_offset as u16;
+            }
+        }
+
+        self.header_mut().free_offset = offset as u16;
+        self.update_checksum();
+    }
+
+    /// Get key bytes for a branch entry
+    pub fn branch_key(&self, index: usize) -> &[u8] {
+        let entries = self.branch_entries();
+        if index >= entries.len() {
+            return &[];
+        }
+        let entry = &entries[index];
+        let start = entry.key_offset as usize;
+        let end = start + entry.key_len as usize;
+        if end > PAGE_SIZE || start > end {
+            return &[];
+        }
+        &self.data[start..end]
+    }
+
+    /// Binary search for the correct child index in a branch page.
+    /// Returns the index of the first entry whose key > search_key or is "" (catch-all).
+    /// Entries must be sorted with "" last (+infinity). Complexity: O(log b).
+    pub fn branch_search(&self, key: &[u8]) -> usize {
+        let count = self.header().count as usize;
+        if count == 0 {
+            return 0;
+        }
+
+        let mut lo = 0;
+        let mut hi = count;
+
+        while lo < hi {
+            let mid = (lo + hi) / 2;
+            let mid_key = self.branch_key(mid);
+
+            // Empty key = +infinity (catch-all), always > any search key
+            if mid_key.is_empty() || key < mid_key {
+                hi = mid;
+            } else {
+                // mid_key is non-empty and mid_key <= key
+                lo = mid + 1;
+            }
+        }
+
+        lo
+    }
+
     /// Search for a key in a leaf page (binary search)
     /// Returns Ok(index) if found, Err(index) for insertion point
     pub fn leaf_search(&self, key: &[u8]) -> Result<usize, usize> {
@@ -508,5 +604,131 @@ mod tests {
         // Corrupt the page
         page.data[100] ^= 0xFF;
         assert!(!page.verify_checksum());
+    }
+
+    #[test]
+    fn test_leaf_compact_reclaims_garbage() {
+        let mut page = Page::new();
+        page.init_leaf(1, 1);
+
+        // Insert a key with a large value
+        let big_val = vec![b'A'; 200];
+        assert!(page.leaf_insert(b"mykey", &big_val));
+        let free_after_insert = page.leaf_free_space();
+
+        // Update the same key 10 times with different large values.
+        // Each update leaves the old 200 bytes as garbage.
+        for i in 0..10u8 {
+            let new_val = vec![b'B' + i; 200];
+            assert!(page.leaf_upsert(b"mykey", &new_val));
+        }
+        let free_after_updates = page.leaf_free_space();
+
+        // Free space should have decreased by ~2000 bytes of garbage
+        assert!(free_after_updates < free_after_insert - 1500,
+            "Expected significant garbage: insert_free={}, update_free={}",
+            free_after_insert, free_after_updates);
+
+        // Compact should reclaim all garbage
+        page.leaf_compact();
+        let free_after_compact = page.leaf_free_space();
+
+        // After compaction, free space should be close to after-insert
+        // (only the latest value is live, same size as original)
+        assert!(free_after_compact >= free_after_insert - 10,
+            "Compaction didn't reclaim enough: insert_free={}, compact_free={}",
+            free_after_insert, free_after_compact);
+
+        // Data integrity: key should still return the last value written
+        assert_eq!(page.leaf_search(b"mykey"), Ok(0));
+        assert_eq!(page.leaf_value(0), vec![b'B' + 9; 200]);
+    }
+
+    #[test]
+    fn test_leaf_compact_preserves_multiple_keys() {
+        let mut page = Page::new();
+        page.init_leaf(1, 1);
+
+        // Insert 5 keys
+        for i in 0..5u8 {
+            let key = format!("key:{}", i);
+            let val = format!("val:{}", i);
+            assert!(page.leaf_insert(key.as_bytes(), val.as_bytes()));
+        }
+
+        // Update each key to create garbage
+        for i in 0..5u8 {
+            let key = format!("key:{}", i);
+            let new_val = format!("updated:{}", i);
+            assert!(page.leaf_upsert(key.as_bytes(), new_val.as_bytes()));
+        }
+
+        page.leaf_compact();
+
+        // All keys should still be findable with correct values
+        let count = page.header().count;
+        assert_eq!(count, 5);
+        for i in 0..5u8 {
+            let key = format!("key:{}", i);
+            let expected = format!("updated:{}", i);
+            let idx = page.leaf_search(key.as_bytes()).unwrap();
+            assert_eq!(page.leaf_value(idx), expected.as_bytes());
+        }
+    }
+
+    #[test]
+    fn test_branch_search_binary() {
+        // Build a branch page manually with sorted keys + "" catch-all
+        let mut page = Page::new();
+        page.init_branch(1, 1);
+
+        // Simulate add_branch_entry: keys grow downward from PAGE_SIZE,
+        // entries grow upward from PageHeader::SIZE.
+        let keys: &[&[u8]] = &[b"bbb", b"ddd", b"fff", b""];
+        let mut key_offset = PAGE_SIZE;
+
+        for (i, key) in keys.iter().enumerate() {
+            key_offset -= key.len();
+            page.data[key_offset..key_offset + key.len()].copy_from_slice(key);
+
+            let entry = BranchEntry {
+                child: i as PageId,
+                key_len: key.len() as u16,
+                key_offset: key_offset as u16,
+                _reserved: 0,
+            };
+            let entry_offset = PageHeader::SIZE + i * BranchEntry::SIZE;
+            unsafe {
+                let ptr = page.data.as_mut_ptr().add(entry_offset) as *mut BranchEntry;
+                *ptr = entry;
+            }
+        }
+        page.header_mut().count = keys.len() as u16;
+
+        // Verify branch_key works
+        assert_eq!(page.branch_key(0), b"bbb");
+        assert_eq!(page.branch_key(1), b"ddd");
+        assert_eq!(page.branch_key(2), b"fff");
+        assert_eq!(page.branch_key(3), b"");
+
+        // branch_search: find first entry whose key > search_key or is ""
+        // key < "bbb" → child 0
+        assert_eq!(page.branch_search(b"aaa"), 0);
+        // key == "bbb" → child 1 (bbb <= key, so skip past it)
+        assert_eq!(page.branch_search(b"bbb"), 1);
+        // "bbb" < key < "ddd" → child 1
+        assert_eq!(page.branch_search(b"ccc"), 1);
+        // key == "ddd" → child 2
+        assert_eq!(page.branch_search(b"ddd"), 2);
+        // "ddd" < key < "fff" → child 2
+        assert_eq!(page.branch_search(b"eee"), 2);
+        // key == "fff" → child 3 (the "" catch-all)
+        assert_eq!(page.branch_search(b"fff"), 3);
+        // key > "fff" → child 3 (the "" catch-all)
+        assert_eq!(page.branch_search(b"zzz"), 3);
+
+        // Empty page → 0
+        let empty = Page::new();
+        assert_eq!(empty.branch_search(b"anything"), 0);
     }
 }

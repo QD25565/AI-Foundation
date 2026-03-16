@@ -221,7 +221,7 @@ auto_save = false
 
 [teambook]
 enabled = false
-# postgres_url = "postgresql://postgres:ai_foundation_pass@localhost:15432/ai_foundation"
+# postgres_url = "postgresql://postgres:changeme@localhost:15432/ai_foundation"
 '''
 
     def __init__(self, dry_run: bool = False):

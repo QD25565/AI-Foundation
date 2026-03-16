@@ -8,12 +8,12 @@
 //! This module integrates VisionEngram storage with thumbnail generation
 //! and provides the main interface for AI agents.
 
-use crate::screenshot::{ScreenshotCapture, VisionProfile};
-use crate::thumbnail::{ThumbnailGenerator, ThumbnailConfig, ThumbnailResult};
+use crate::screenshot::ScreenshotCapture;
+use crate::thumbnail::{ThumbnailGenerator, ThumbnailConfig};
 use crate::veng::{VisionEngram, VisionEntry, VisionEngramStats, flags};
 use crate::types::{CaptureTarget, ImageFormat, ScreenshotOptions};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::fs;
 
@@ -127,7 +127,7 @@ impl VisualMemory {
             .context("Failed to store visual entry")?;
 
         // Save original image
-        let relative_path = self.store.save_original(visual_id, &image_data, format_str)
+        let _relative_path = self.store.save_original(visual_id, &image_data, format_str)
             .context("Failed to save original image")?;
 
         // Update entry with original path (we need to re-store with path)

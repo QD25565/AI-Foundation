@@ -136,7 +136,6 @@ impl ThumbnailGenerator {
     /// Apply AI-friendly enhancements
     fn enhance_for_ai(&self, img: &DynamicImage) -> DynamicImage {
         let mut rgba = img.to_rgba8();
-        let (width, height) = (rgba.width(), rgba.height());
 
         if self.config.edge_enhance {
             // Light unsharp masking for edge enhancement

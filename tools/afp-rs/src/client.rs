@@ -4,16 +4,14 @@
 //! Handles authentication, message sending/receiving, and reconnection.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use crate::error::{AFPError, Result};
 use crate::fingerprint::HardwareFingerprint;
 use crate::identity::{AIIdentity, TrustLevel};
 use crate::keys::{FallbackStorage, KeyPair, KeyStorage};
 use crate::message::{AFPMessage, MessageType, Payload};
-use crate::transport::{ConnectionState, QuicTransport, Transport, WebSocketTransport};
+use crate::transport::{QuicTransport, Transport, WebSocketTransport};
 
 /// AFP Client
 pub struct AFPClient {
@@ -102,7 +100,10 @@ impl AFPClient {
 
         // Wait for Welcome/Rejected
         let response = transport.recv().await?;
-        response.verify()?;
+        if let Err(e) = response.verify() {
+            let _ = transport.close().await;
+            return Err(e);
+        }
 
         match response.payload {
             Payload::Welcome {
@@ -194,8 +195,9 @@ impl AFPClient {
         msg.sign(&self.keypair)?;
         transport.send(&msg).await?;
 
-        // Wait for pong
+        // Wait for pong — verify signature before trusting payload
         let response = transport.recv().await?;
+        response.verify()?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -204,7 +206,7 @@ impl AFPClient {
         match response.payload {
             Payload::Pong {
                 request_timestamp,
-                response_timestamp,
+                response_timestamp: _,
             } => {
                 let latency = now - request_timestamp;
                 Ok(latency)

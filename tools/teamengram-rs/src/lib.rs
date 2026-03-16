@@ -52,6 +52,7 @@ pub mod sequencer;
 pub mod view;
 pub mod v2_client;
 pub mod migration;
+pub mod crypto;
 
 pub use page::{Page, PageId, PAGE_SIZE};
 pub use shadow::ShadowAllocator;
@@ -118,8 +119,8 @@ impl NotifyCallback for NoOpNotify {
 /// Magic number for TeamEngram files
 pub const MAGIC: u64 = 0x5445_414D_454E_4752; // "TEAMENGR"
 
-/// File format version
-pub const VERSION: u32 = 1;
+/// File format version (2 = sorted branch entries)
+pub const VERSION: u32 = 2;
 
 /// Default page size (4KB - matches OS page size)
 pub const DEFAULT_PAGE_SIZE: usize = 4096;

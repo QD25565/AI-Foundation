@@ -1,0 +1,43 @@
+# AI-Foundation integration test configuration for cargo-nextest.
+#
+# Install: cargo install cargo-nextest
+# Run:     cargo nextest run
+# CI:      cargo nextest run --profile ci
+#
+# Each test gets its own isolated TempDir + unique named pipe + daemon pair,
+# so parallelism is safe across all suites.
+
+[store]
+# Cache test binaries for faster re-runs
+dir = "target/nextest"
+
+# ── Default profile ──────────────────────────────────────────────────────────
+
+[profile.default]
+# 4 threads: each test spawns 2 daemon processes (V1 + V2), so 4 tests = 8 daemons.
+# Higher parallelism risks pipe name collisions or resource exhaustion on low-RAM machines.
+test-threads = 4
+
+# Integration tests spawn daemons that need time to boot. 30s per test is generous.
+slow-timeout = { period = "30s", terminate-after = 2 }
+
+# Retry flaky tests once (daemon startup timing). Two consecutive failures = real bug.
+retries = 1
+
+# Show failing test output immediately, not at the end.
+failure-output = "immediate"
+success-output = "never"
+
+# ── CI profile ───────────────────────────────────────────────────────────────
+
+[profile.ci]
+# CI runs sequentially to avoid resource contention on shared runners.
+test-threads = 1
+
+# No retries in CI — flakes must be investigated, not papered over.
+retries = 0
+
+# JUnit XML output for CI systems (GitHub Actions, etc.)
+[profile.ci.junit]
+path = "target/nextest/ci/junit.xml"
+report-name = "ai-foundation-integration-tests"

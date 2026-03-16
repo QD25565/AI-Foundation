@@ -3,7 +3,7 @@
 //! Each framework parser implements this trait to extract nodes and edges
 //! from source files in their specific format.
 
-use crate::graph::{CodeGraph, Node, Edge, NodeKind, EdgeKind};
+use crate::graph::{CodeGraph, Node, Edge, EdgeKind};
 use std::path::Path;
 use anyhow::Result;
 

@@ -7,18 +7,19 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::RwLock;
 use tracing::{error, info, warn};
 
 use crate::error::{AFPError, Result};
 use crate::fingerprint::HardwareFingerprint;
 use crate::identity::{AIIdentity, TrustLevel};
 use crate::keys::{FallbackStorage, KeyPair, KeyStorage};
-use crate::message::{AFPMessage, BanLevel, MessageType, Payload, PresenceInfo};
-use crate::transport::{ConnectionState, QuicServer, Transport, TransportServer, WebSocketServer};
+use crate::message::{AFPMessage, BanLevel, MessageType, Payload};
+use crate::transport::{QuicServer, Transport, TransportServer, WebSocketServer};
 use crate::{DEFAULT_QUIC_PORT, DEFAULT_WS_PORT};
 
 /// Connected AI session
+#[allow(dead_code)] // WIP: fields read when session auth and routing are enforced
 struct Session {
     identity: AIIdentity,
     fingerprint: HardwareFingerprint,
@@ -28,6 +29,7 @@ struct Session {
 
 /// Ban record
 #[derive(Clone)]
+#[allow(dead_code)] // WIP: fields read when ban enforcement is wired
 struct BanRecord {
     level: BanLevel,
     reason: String,
@@ -77,7 +79,7 @@ impl AFPServer {
         let keypair = if storage.exists(ai_id) {
             storage.load(ai_id)?
         } else {
-            let pubkey = storage.generate_and_store(ai_id)?;
+            let _pubkey = storage.generate_and_store(ai_id)?;
             storage.load(ai_id)?
         };
 
@@ -238,7 +240,7 @@ async fn run_quic_server(
         .await;
 
         match accept_result {
-            Ok(Ok(mut transport)) => {
+            Ok(Ok(transport)) => {
                 info!(
                     "QUIC connection from {:?}",
                     transport.remote_addr()
@@ -365,7 +367,7 @@ async fn handle_connection(
     hello_msg.verify()?;
 
     // Extract Hello payload
-    let (fingerprint, capabilities, requested_trust) = match hello_msg.payload {
+    let (fingerprint, _capabilities, _requested_trust) = match hello_msg.payload {
         Payload::Hello {
             fingerprint,
             capabilities,
@@ -428,6 +430,12 @@ async fn handle_connection(
             }
         }
     }
+
+    // TODO(#22): Validate capabilities — reject clients that don't advertise "afp-v1".
+    // TODO(#22): Use requested_trust as upper bound, evaluate against trust policy.
+    // TODO(#21): Re-check bans periodically during message loop (not just at connect).
+    // TODO(#35): Add connection rate limiting (per-IP and global) to prevent resource exhaustion.
+    // TODO(#37): Add mutual TLS (client certificates) for stronger transport-level authentication.
 
     // Determine trust level (for now, start at Verified)
     let trust_level = TrustLevel::Verified;

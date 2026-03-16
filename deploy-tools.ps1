@@ -43,24 +43,36 @@ param(
 # CONFIGURATION - All AI Instance Locations
 # ============================================
 
-$SourceDir = "C:\Users\Alquado-PC\Desktop\TestingMCPTools\All Tools\bin"
+# Source directory: the bin/ folder next to this script
+$SourceDir = Join-Path $PSScriptRoot "bin"
+
+# Base directory for AI instances (parent of instance folders)
+# Override by setting $env:AI_INSTANCES_DIR before running, or edit this default.
+$InstancesDir = if ($env:AI_INSTANCES_DIR) { $env:AI_INSTANCES_DIR } else { Split-Path $PSScriptRoot -Parent }
+
+# Additional target directories (e.g. project-specific agents)
+# Override by setting $env:AI_EXTRA_TARGETS as semicolon-separated "Name=Path" pairs.
+# Example: $env:AI_EXTRA_TARGETS = "fitquest-aurora=C:\Projects\FitQuest2\aurora\bin;fitquest-crystal=C:\Projects\FitQuest2\crystal\bin"
+$ExtraTargets = @()
+if ($env:AI_EXTRA_TARGETS) {
+    foreach ($entry in $env:AI_EXTRA_TARGETS -split ";") {
+        $parts = $entry -split "=", 2
+        if ($parts.Count -eq 2) {
+            $ExtraTargets += @{ Name = $parts[0].Trim(); Path = $parts[1].Trim() }
+        }
+    }
+}
 
 $Targets = @(
-    # Claude Code Instances
-    @{ Name = "claude-code-instance-1"; Path = "C:\Users\Alquado-PC\Desktop\TestingMCPTools\claude-code-instance-1\bin" },
-    @{ Name = "claude-code-instance-2"; Path = "C:\Users\Alquado-PC\Desktop\TestingMCPTools\claude-code-instance-2\bin" },
-    @{ Name = "claude-code-instance-3"; Path = "C:\Users\Alquado-PC\Desktop\TestingMCPTools\claude-code-instance-3\bin" },
-    @{ Name = "claude-code-instance-4"; Path = "C:\Users\Alquado-PC\Desktop\TestingMCPTools\claude-code-instance-4\bin" },
+    # Claude Code Instances (auto-discovered from $InstancesDir)
+    @{ Name = "claude-code-instance-1"; Path = Join-Path $InstancesDir "claude-code-instance-1\bin" },
+    @{ Name = "claude-code-instance-2"; Path = Join-Path $InstancesDir "claude-code-instance-2\bin" },
+    @{ Name = "claude-code-instance-3"; Path = Join-Path $InstancesDir "claude-code-instance-3\bin" },
+    @{ Name = "claude-code-instance-4"; Path = Join-Path $InstancesDir "claude-code-instance-4\bin" },
 
     # Gemini CLI Instance
-    @{ Name = "gemini-cli-instance-1"; Path = "C:\Users\Alquado-PC\Desktop\TestingMCPTools\gemini-cli-instance-1\bin" },
-
-    # FitQuest AI Agents
-    @{ Name = "fitquest-aurora"; Path = "C:\Users\Alquado-PC\AndroidStudioProjects\FitQuest2\aurora\bin" },
-    @{ Name = "fitquest-crystal"; Path = "C:\Users\Alquado-PC\AndroidStudioProjects\FitQuest2\crystal\bin" },
-    @{ Name = "fitquest-nova"; Path = "C:\Users\Alquado-PC\AndroidStudioProjects\FitQuest2\nova\bin" },
-    @{ Name = "fitquest-sparkle"; Path = "C:\Users\Alquado-PC\AndroidStudioProjects\FitQuest2\sparkle\bin" }
-)
+    @{ Name = "gemini-cli-instance-1"; Path = Join-Path $InstancesDir "gemini-cli-instance-1\bin" }
+) + $ExtraTargets
 
 # Core tools that should always be deployed (subset for quick updates)
 $CoreTools = @(

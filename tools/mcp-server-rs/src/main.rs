@@ -1,13 +1,31 @@
 //! AI Foundation MCP Server - Thin CLI Wrapper Architecture
 //! All tools call CLI executables via subprocess.
 //!
-//! TOOL COUNT: 25 (core coordination only)
-//! - Notebook: 12 (remember, recall, list, get, pin, unpin, pinned, delete, update, add_tags, related)
-//! - Teambook: 5 (broadcast, dm, read_broadcasts, read_dms, status)
-//! - Tasks: 4 (task, task_update, task_get, task_list)
-//! - Dialogues: 4 (dialogue_start, dialogue_respond, dialogues, dialogue_end)
-//! - Standby: 1
-//! Firebase, Play Console, and File Claims moved to integrations/
+//! TOOL COUNT: 21 (was 28 — hidden 7 unused tools to save context window)
+//! - Notebook: 8  (remember, recall, list, get, pin, delete, update, tags)
+//! - Teambook: 5  (broadcast, dm, read, status, claims)
+//! - Dialogues:4  (dialogue_start, dialogue_respond, dialogue_list, dialogue_end)
+//! - Rooms:    2  (room_broadcast, room)
+//! - Profiles: 1  (profile_get — pass "all" to list every AI)
+//! - Standby:  1
+//!
+//! HIDDEN (not removed — uncomment to restore):
+//! - Tasks:    4  (task_create, task_update, task_get, task_list) — never used by any AI
+//! - Projects: 2  (project, feature) — never used by any AI
+//! - Forge:    1  (forge_generate) — never used by any AI
+//!
+//! Removed from previous 35:
+//!   notebook_work     — vague, not self-evident; notebook_remember covers it
+//!   notebook_related  — internal graph mechanism; recall handles related content autonomously
+//!   notebook_pinned   — merged into notebook_list (filter="pinned")
+//!   notebook_unpin    — merged into notebook_pin (pin=false)
+//!   notebook_add_tags — merged into notebook_update (tags field)
+//!   teambook_read_dms + teambook_read_broadcasts — merged into teambook_read (inbox param)
+//!   teambook_list_claims + teambook_who_has      — merged into teambook_claims (path param)
+//!   project_create/list/update                   — merged into project (action param)
+//!   feature_create/list/update                   — merged into feature (action param)
+//!   profile_list      — merged into profile_get (ai_id="all")
+//!   profile_update    — CLI-only; first-run setup, not a session concern
 
 use anyhow::Result;
 use rmcp::{
@@ -24,11 +42,10 @@ mod cli_wrapper;
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
-/// Input for notebook_remember - supports privacy mode via file indirection
 pub struct RememberInput {
-    /// Note content (direct mode - visible in tool call)
+    /// Note content (direct mode — visible in tool call)
     pub content: Option<String>,
-    /// Path to staged content file (privacy mode - only path visible, file deleted after read)
+    /// Path to a staged content file (privacy mode — file is read then deleted automatically)
     pub file: Option<String>,
     /// Comma-separated tags
     pub tags: Option<String>,
@@ -37,182 +54,191 @@ pub struct RememberInput {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct RecallInput { pub query: String, pub limit: Option<i64> }
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct NoteIdInput { pub id: i64 }
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct LimitInput { pub limit: Option<i64> }
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct BroadcastInput { pub content: String, pub channel: Option<String> }
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct DmInput { pub to_ai: String, pub content: String }
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct ContentInput { pub content: String }
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct UpdateNoteInput { pub id: i64, pub content: Option<String>, pub tags: Option<String> }
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct AddTagsInput { pub note_id: i64, pub tags: String }
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct VaultStoreInput { pub key: String, pub value: String }
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct VaultGetInput { pub key: String }
-
-// ============== Consolidated Task System (4 tools) ==============
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-/// Create a task or batch of tasks
-pub struct TaskCreateInput {
-    /// Task description, or batch name if 'tasks' is provided
-    pub description: String,
-    /// For batches: inline tasks as "1:Fix login,2:Fix logout". Omit for single task.
-    pub tasks: Option<String>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-/// Update task/batch status
-pub struct TaskUpdateInput {
-    /// Task reference: "BatchName:label" for batch task, or task ID as string
-    pub id: String,
-    /// Status: "done", "claimed", "started", "blocked", "closed"
-    pub status: String,
-    /// Optional reason (for blocked status)
-    pub reason: Option<String>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-/// Get task or batch details
-pub struct TaskGetInput {
-    /// Batch name or task ID
-    pub id: String,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-/// List tasks and batches
-pub struct TaskListInput {
-    /// Filter: "all", "batches", "tasks" (default: all)
-    pub filter: Option<String>,
-    /// Limit results
-    pub limit: Option<i32>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct DialogueStartInput { pub responder: String, pub topic: String }
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct DialogueIdInput { pub dialogue_id: u64 }
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct DialogueRespondInput { pub dialogue_id: u64, pub response: String }
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct DialogueEndInput { pub dialogue_id: u64, pub status: Option<String>, pub summary: Option<String> }
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct DialogueListInput {
-    /// Specific dialogue ID to read (shows full details + messages)
-    pub dialogue_id: Option<u64>,
-    /// Limit results when listing all dialogues
+pub struct RecallInput {
+    pub query: String,
     pub limit: Option<i64>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct RoomCreateInput { pub name: String, pub topic: Option<String> }
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct RoomIdInput { pub room_id: String }
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct VoteCreateInput { pub topic: String, pub options: String, pub voters: i32 }
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct VoteCastInput { pub vote_id: i64, pub choice: String }
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct VoteIdInput { pub vote_id: i64 }
-
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct StandbyInput { pub timeout: Option<i64> }
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct PresenceInput { pub status: Option<String>, pub current_task: Option<String> }
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct AiIdInput { pub ai_id: String }
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct ProjectCreateInput { pub name: String, pub goal: String, pub root_directory: String }
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct ProjectIdInput { pub project_id: i64 }
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct ProjectTaskInput { pub project_id: i64, pub title: String, pub priority: Option<i32> }
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct CreateFeatureInput { pub project_id: i64, pub name: String, pub overview: String, pub directory: Option<String> }
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct GetFeatureInput { pub feature_id: i64 }
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct ListFeaturesInput { pub project_id: i64 }
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct ProjectResolveInput {
-    /// File path to resolve to project/feature context
-    pub path: String,
+pub struct NoteIdInput {
+    pub id: i64,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct ProjectListInput {
-    /// Optional project ID to get details (omit to list all)
-    pub project_id: Option<i64>,
+pub struct NotebookListInput {
+    /// "recent" (default, newest first) or "pinned" (your pinned notes only)
+    pub filter: Option<String>,
+    pub limit: Option<i64>,
+    /// Narrow results to a specific tag
+    pub tag: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct FeatureListInput {
-    /// Project ID to list features for
-    pub project_id: i64,
-    /// Optional feature ID to get details
-    pub feature_id: Option<i64>,
+pub struct NotebookPinInput {
+    pub id: i64,
+    /// true to pin, false to unpin
+    pub pin: bool,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct FeatureUpdateInput {
-    pub feature_id: i64,
-    /// New overview text
-    pub overview: Option<String>,
-    /// New name
+pub struct UpdateNoteInput {
+    pub id: i64,
+    pub content: Option<String>,
+    pub tags: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct BroadcastInput {
+    pub content: String,
+    /// Channel name. Omit to send to the general team feed.
+    pub channel: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DmInput {
+    pub to_ai: String,
+    pub content: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct TeambookReadInput {
+    /// What to read: "dms" for your direct messages, "broadcasts" for team-wide messages
+    pub inbox: String,
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct TeambookClaimsInput {
+    /// File path to check. Omit to list all currently claimed files.
+    pub path: Option<String>,
+}
+
+// HIDDEN: Task input structs — uncomment to restore
+// #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+// pub struct TaskCreateInput {
+//     pub description: String,
+//     pub tasks: Option<Vec<String>>,
+// }
+// #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+// pub struct TaskUpdateInput {
+//     pub id: String,
+//     pub status: String,
+//     pub reason: Option<String>,
+// }
+// #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+// pub struct TaskGetInput {
+//     pub id: String,
+// }
+// #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+// pub struct TaskListInput {
+//     pub filter: Option<String>,
+//     pub limit: Option<i32>,
+// }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DialogueStartInput {
+    /// One AI ID, or comma-separated for n-way: "sage-724,lyra-584"
+    pub responder: String,
+    pub topic: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RoomBroadcastInput {
+    /// Room ID
+    pub room_id: u64,
+    /// Message content (closed broadcast — only room members see it)
+    pub content: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RoomActionInput {
+    /// "create", "list", "history", "join", "leave", "mute", "pin_message", "unpin_message", "conclude"
+    pub action: String,
+    /// Room ID — required for: history, join, leave, mute, pin_message, unpin_message, conclude
+    pub room_id: Option<u64>,
+    /// create: room name
     pub name: Option<String>,
-    /// New directory path
-    pub directory: Option<String>,
+    /// create: room topic/description
+    pub topic: Option<String>,
+    /// create: comma-separated initial participant AI IDs (optional)
+    pub participants: Option<String>,
+    /// conclude: optional conclusion / summary text
+    pub content: Option<String>,
+    /// mute: duration in minutes
+    pub minutes: Option<u32>,
+    /// history: number of messages to retrieve (default 20)
+    pub limit: Option<usize>,
+    /// pin_message/unpin_message: room message seq ID to pin or unpin (room-native ID — NOT a notebook note ID)
+    pub msg_seq_id: Option<u64>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct ProjectUpdateInput {
-    pub project_id: i64,
-    /// New goal/description
-    pub goal: Option<String>,
+pub struct DialogueRespondInput {
+    pub dialogue_id: u64,
+    pub response: String,
 }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DialogueEndInput {
+    pub dialogue_id: u64,
+    /// "completed" (default) or "cancelled"
+    pub status: Option<String>,
+    pub summary: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DialogueListInput {
+    /// Pass a dialogue_id to read that dialogue's full message history. Omit to list all.
+    pub dialogue_id: Option<u64>,
+    pub limit: Option<i64>,
+}
+
+// HIDDEN: Project/Feature input structs — uncomment to restore
+// #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+// pub struct ProjectActionInput {
+//     pub action: String,
+//     pub name: Option<String>,
+//     pub goal: Option<String>,
+//     pub root_directory: Option<String>,
+//     pub project_id: Option<i64>,
+// }
+// #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+// pub struct FeatureActionInput {
+//     pub action: String,
+//     pub project_id: Option<i64>,
+//     pub name: Option<String>,
+//     pub overview: Option<String>,
+//     pub directory: Option<String>,
+//     pub feature_id: Option<i64>,
+// }
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ProfileGetInput {
+    /// Omit for your own profile. Pass an AI ID (e.g. "sage-724") for theirs. Pass "all" to list every AI on the team.
+    pub ai_id: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct StandbyInput {
+    /// Seconds before forcing a wake-up if no event arrives. Default: 180.
+    pub timeout: Option<i64>,
+}
+
+// HIDDEN: Forge input struct — uncomment to restore
+// #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+// pub struct ForgeGenerateInput {
+//     pub prompt: String,
+//     pub system: Option<String>,
+//     pub model: Option<String>,
+//     pub max_tokens: Option<usize>,
+//     pub temperature: Option<f32>,
+// }
 
 // ============== Server ==============
-// ============== Contextual Snapshot for Episodic Memory ==============
 
-/// Gather contextual snapshot from teambook for notebook notes
-/// Format: [ctx:team:...|dms:...|bc:...|dial:...|files:...|at:...]
+/// Appends a contextual teambook snapshot to notebook notes for episodic memory.
 async fn gather_context() -> String {
     let result = cli_wrapper::teambook(&["gather-context"]).await;
-    // Return empty string on error (don't block note saving)
     if result.starts_with("Error:") || result.starts_with("error:") {
         String::new()
     } else {
@@ -220,11 +246,8 @@ async fn gather_context() -> String {
     }
 }
 
-/// Autonomous presence update - sets AI's presence to reflect current activity.
-/// Zero cognition required - called automatically by significant operations.
-/// QD directive: Presence should be literal state, not explicit claims.
+/// Zero-cognition presence update — called automatically by significant operations.
 async fn auto_presence(task: &str) {
-    // Fire and forget - don't block the tool operation
     let _ = cli_wrapper::teambook(&["update-presence", "active", task]).await;
 }
 
@@ -242,303 +265,260 @@ impl AiFoundationServer {
 #[tool_router]
 impl AiFoundationServer {
 
-    // ============== Notebook Tools (12 kept, 18 hidden) ==============
+    // ============== Notebook (8) ==============
 
-    #[tool(description = "Save a note to your private memory. Use 'file' parameter for privacy (content read from file, file deleted).")]
+    #[tool(description = "Save a note to your private memory. Use content for direct notes, or file (path) for private content — file is read and deleted automatically.")]
     async fn notebook_remember(&self, Parameters(input): Parameters<RememberInput>) -> String {
-        // Gather contextual snapshot from teambook (presences, DMs, dialogues, file actions)
         let context = gather_context().await;
-
         let mut args = vec!["remember"];
-
-        // Handle content vs file mode - append context to content
         let content_owned: String;
         let file_owned: String;
         if let Some(ref f) = input.file {
-            // For file mode, we can't append context (file is read by CLI)
-            // Context will be skipped for privacy mode
             file_owned = f.clone();
             args.push("--file");
             args.push(&file_owned);
         } else if let Some(ref c) = input.content {
-            // Append context to content for episodic memory
-            content_owned = if context.is_empty() {
-                c.clone()
-            } else {
-                format!("{} {}", c, context)
-            };
+            content_owned = if context.is_empty() { c.clone() } else { format!("{} {}", c, context) };
             args.push(&content_owned);
         } else {
             return "Error: Either 'content' or 'file' must be provided".to_string();
         }
-
         let tags_owned: String;
-        if let Some(ref t) = input.tags { tags_owned = t.clone(); args.push("--tags"); args.push(&tags_owned); }
+        if let Some(ref t) = input.tags {
+            tags_owned = t.clone();
+            args.push("--tags");
+            args.push(&tags_owned);
+        }
         cli_wrapper::notebook(&args).await
     }
 
-    #[tool(description = "Search notes")]
+    #[tool(description = "Search your memory with a natural language query. Uses hybrid search: keyword, semantic, and graph. Returns most relevant notes.")]
     async fn notebook_recall(&self, Parameters(input): Parameters<RecallInput>) -> String {
         let limit = input.limit.unwrap_or(10).to_string();
         cli_wrapper::notebook(&["recall", &input.query, "--limit", &limit]).await
     }
 
-    #[tool(description = "List recent notes")]
-    async fn notebook_list(&self, Parameters(input): Parameters<LimitInput>) -> String {
+    #[tool(description = "List notes. filter: \"recent\" (default, newest first) or \"pinned\" (your pinned notes). Optionally narrow by tag.")]
+    async fn notebook_list(&self, Parameters(input): Parameters<NotebookListInput>) -> String {
         let limit = input.limit.unwrap_or(10).to_string();
-        cli_wrapper::notebook(&["list", "--limit", &limit]).await
+        match input.filter.as_deref().unwrap_or("recent") {
+            "pinned" => cli_wrapper::notebook(&["pinned"]).await,
+            _ => match input.tag {
+                Some(ref tag) => cli_wrapper::notebook(&["list", "--limit", &limit, "--tag", tag]).await,
+                None => cli_wrapper::notebook(&["list", "--limit", &limit]).await,
+            },
+        }
     }
 
-    #[tool(description = "Get note by ID")]
+    #[tool(description = "Get a specific note by ID. Use when you have a note ID from recall or context.")]
     async fn notebook_get(&self, Parameters(input): Parameters<NoteIdInput>) -> String {
-        let id = input.id.to_string();
-        cli_wrapper::notebook(&["get", &id]).await
+        cli_wrapper::notebook(&["get", &input.id.to_string()]).await
     }
 
-    #[tool(description = "Pin a note")]
-    async fn notebook_pin(&self, Parameters(input): Parameters<NoteIdInput>) -> String {
+    #[tool(description = "Pin or unpin a note. pin=true to pin (keeps note surfaced in recall), pin=false to unpin.")]
+    async fn notebook_pin(&self, Parameters(input): Parameters<NotebookPinInput>) -> String {
         let id = input.id.to_string();
-        cli_wrapper::notebook(&["pin", &id]).await
+        if input.pin {
+            cli_wrapper::notebook(&["pin", &id]).await
+        } else {
+            cli_wrapper::notebook(&["unpin", &id]).await
+        }
     }
 
-    #[tool(description = "Unpin a note")]
-    async fn notebook_unpin(&self, Parameters(input): Parameters<NoteIdInput>) -> String {
-        let id = input.id.to_string();
-        cli_wrapper::notebook(&["unpin", &id]).await
-    }
-
-    #[tool(description = "Delete a note")]
+    #[tool(description = "Permanently delete a note by ID.")]
     async fn notebook_delete(&self, Parameters(input): Parameters<NoteIdInput>) -> String {
-        let id = input.id.to_string();
-        cli_wrapper::notebook(&["delete", &id]).await
+        cli_wrapper::notebook(&["delete", &input.id.to_string()]).await
     }
 
-    #[tool(description = "Update a note")]
+    #[tool(description = "Update a note's content, tags, or both. To add tags without losing existing ones, include the full desired tag list.")]
     async fn notebook_update(&self, Parameters(input): Parameters<UpdateNoteInput>) -> String {
         let id = input.id.to_string();
         let mut args = vec!["update", &id];
-        let content_owned: String; let tags_owned: String;
+        let content_owned: String;
+        let tags_owned: String;
         if let Some(ref c) = input.content { content_owned = c.clone(); args.push("--content"); args.push(&content_owned); }
         if let Some(ref t) = input.tags { tags_owned = t.clone(); args.push("--tags"); args.push(&tags_owned); }
         cli_wrapper::notebook(&args).await
     }
 
-    #[tool(description = "Get pinned notes")]
-    async fn notebook_pinned(&self, Parameters(input): Parameters<LimitInput>) -> String {
-        let limit = input.limit.unwrap_or(10).to_string();
-        cli_wrapper::notebook(&["pinned", "--limit", &limit]).await
+    #[tool(description = "List all tags in your notebook with note counts. Use to explore what topics you have been tracking.")]
+    async fn notebook_tags(&self) -> String {
+        cli_wrapper::notebook(&["tags"]).await
     }
 
-    #[tool(description = "Add tags to a note")]
-    async fn notebook_add_tags(&self, Parameters(input): Parameters<AddTagsInput>) -> String {
-        let id = input.note_id.to_string();
-        cli_wrapper::notebook(&["add-tags", &id, &input.tags]).await
-    }
+    // ============== Teambook (5) ==============
 
-    #[tool(description = "Find notes related to a given note (graph traversal)")]
-    async fn notebook_related(&self, Parameters(input): Parameters<NoteIdInput>) -> String {
-        let id = input.id.to_string();
-        cli_wrapper::notebook(&["related", &id]).await
-    }
-
-    // ============== Teambook Communication (4 tools) ==============
-
-    #[tool(description = "Broadcast message to all AIs")]
+    #[tool(description = "Broadcast a message to the team. Sends to the general feed by default. Provide channel to target a specific named channel.")]
     async fn teambook_broadcast(&self, Parameters(input): Parameters<BroadcastInput>) -> String {
         let channel = input.channel.unwrap_or_else(|| "general".to_string());
         cli_wrapper::teambook(&["broadcast", &input.content, "--channel", &channel]).await
     }
 
-    #[tool(description = "Send private DM to another AI")]
+    #[tool(description = "Send a private message to a specific AI by their ID (e.g. \"sage-724\").")]
     async fn teambook_dm(&self, Parameters(input): Parameters<DmInput>) -> String {
         cli_wrapper::teambook(&["dm", &input.to_ai, &input.content]).await
     }
 
-    #[tool(description = "Read my direct messages")]
-    async fn teambook_read_dms(&self, Parameters(input): Parameters<LimitInput>) -> String {
+    #[tool(description = "Read incoming messages. inbox: \"dms\" for your direct messages, \"broadcasts\" for team-wide messages.")]
+    async fn teambook_read(&self, Parameters(input): Parameters<TeambookReadInput>) -> String {
         let limit = input.limit.unwrap_or(10).to_string();
-        cli_wrapper::teambook(&["read-dms", &limit]).await
-    }
-
-    #[tool(description = "Read broadcast messages")]
-    async fn teambook_read_broadcasts(&self, Parameters(input): Parameters<LimitInput>) -> String {
-        let limit = input.limit.unwrap_or(10).to_string();
-        cli_wrapper::teambook(&["broadcasts", &limit]).await
-    }
-
-    // ============== Teambook Status (1 tool - shows who's online + what they're doing) ==============
-
-    #[tool(description = "Get AI ID and status")]
-    async fn teambook_status(&self) -> String { cli_wrapper::teambook(&["status"]).await }
-
-    // Note: update_presence NOT exposed - presence set autonomously by hooks
-    // Note: what_doing merged into status - status shows online count AND activity
-
-    // ============== Tasks (4 consolidated tools → 4 CLI commands) ==============
-
-    #[tool(description = "Create a task or batch. Single: task(\"Fix bug\"). Batch: task(\"Auth\", \"1:Login,2:Logout\")")]
-    async fn task_create(&self, Parameters(input): Parameters<TaskCreateInput>) -> String {
-        if let Some(ref tasks) = input.tasks {
-            // Batch mode: description is the batch name
-            cli_wrapper::teambook(&["task-create", &input.description, "--tasks", tasks]).await
-        } else {
-            // Single task mode
-            cli_wrapper::teambook(&["task-create", &input.description]).await
+        match input.inbox.as_str() {
+            "dms" => cli_wrapper::teambook(&["read-dms", &limit]).await,
+            _ => cli_wrapper::teambook(&["broadcasts", &limit]).await,
         }
     }
 
-    #[tool(description = "Update task status. Status: done, claimed, started, blocked, closed. Example: task_update(\"Auth:1\", \"done\")")]
-    async fn task_update(&self, Parameters(input): Parameters<TaskUpdateInput>) -> String {
-        let status = input.status.to_lowercase();
+    #[tool(description = "Show who is currently online and what they are working on.")]
+    async fn teambook_status(&self) -> String {
+        cli_wrapper::teambook(&["status"]).await
+    }
 
-        // Autonomous presence: Update when starting/claiming a task
-        if status == "started" || status == "claimed" {
-            auto_presence(&format!("Working on task {}", input.id)).await;
-        } else if status == "done" {
-            auto_presence("Task completed").await;
-        }
-
-        // All status updates go through task-update now
-        match &input.reason {
-            Some(reason) if !reason.is_empty() => {
-                cli_wrapper::teambook(&["task-update", &input.id, &status, "--reason", reason]).await
-            }
-            _ => {
-                cli_wrapper::teambook(&["task-update", &input.id, &status]).await
-            }
+    #[tool(description = "File ownership. Omit path to list all currently claimed files. Provide a file path to check if it is claimed and by whom.")]
+    async fn teambook_claims(&self, Parameters(input): Parameters<TeambookClaimsInput>) -> String {
+        match input.path {
+            Some(ref p) => cli_wrapper::teambook(&["check-file", p]).await,
+            None => cli_wrapper::teambook(&["list-claims", "20"]).await,
         }
     }
 
-    #[tool(description = "Get task or batch details")]
-    async fn task_get(&self, Parameters(input): Parameters<TaskGetInput>) -> String {
-        cli_wrapper::teambook(&["task-get", &input.id]).await
-    }
+    // ============== Tasks (4) — HIDDEN ==============
+    // Uncomment to restore task tools.
+    // #[tool(description = "Create a task or batch.")]
+    // async fn task_create(&self, Parameters(input): Parameters<TaskCreateInput>) -> String { ... }
+    // #[tool(description = "Update a task's status.")]
+    // async fn task_update(&self, Parameters(input): Parameters<TaskUpdateInput>) -> String { ... }
+    // #[tool(description = "Get full details for a task or batch.")]
+    // async fn task_get(&self, Parameters(input): Parameters<TaskGetInput>) -> String { ... }
+    // #[tool(description = "List tasks and batches.")]
+    // async fn task_list(&self, Parameters(input): Parameters<TaskListInput>) -> String { ... }
 
-    #[tool(description = "List tasks and batches")]
-    async fn task_list(&self, Parameters(input): Parameters<TaskListInput>) -> String {
-        let limit = input.limit.unwrap_or(20).to_string();
-        let filter = input.filter.unwrap_or_else(|| "all".to_string());
-        cli_wrapper::teambook(&["task-list", &limit, "--filter", &filter]).await
-    }
+    // ============== Dialogues (4) ==============
 
-    // ============== Dialogues (4 tools - mirrors CLI exactly) ==============
-
-    #[tool(description = "Start a dialogue")]
+    #[tool(description = "Start a structured turn-based dialogue with another AI. Use for design discussions, code reviews, or multi-turn problem solving.")]
     async fn dialogue_start(&self, Parameters(input): Parameters<DialogueStartInput>) -> String {
         auto_presence(&format!("Starting dialogue with {}", input.responder)).await;
         cli_wrapper::teambook(&["dialogue-create", &input.responder, &input.topic]).await
     }
 
-    #[tool(description = "Respond to dialogue")]
+    #[tool(description = "Respond to an active dialogue. Use dialogue_list to find dialogues where it is your turn.")]
     async fn dialogue_respond(&self, Parameters(input): Parameters<DialogueRespondInput>) -> String {
         auto_presence(&format!("In dialogue #{}", input.dialogue_id)).await;
         let id = input.dialogue_id.to_string();
         cli_wrapper::teambook(&["dialogue-respond", &id, &input.response]).await
     }
 
-    #[tool(description = "List dialogues with optional filters (all/invites/my-turn) or get specific dialogue by ID")]
+    #[tool(description = "List your dialogues, or pass a dialogue_id to read a specific dialogue's full message history.")]
     async fn dialogue_list(&self, Parameters(input): Parameters<DialogueListInput>) -> String {
         if let Some(dialogue_id) = input.dialogue_id {
-            let id = dialogue_id.to_string();
-            cli_wrapper::teambook(&["dialogue-list", "--id", &id]).await
+            cli_wrapper::teambook(&["dialogue-list", "--id", &dialogue_id.to_string()]).await
         } else {
             let limit = input.limit.unwrap_or(10).to_string();
             cli_wrapper::teambook(&["dialogue-list", &limit]).await
         }
     }
 
-    #[tool(description = "End a dialogue")]
+    #[tool(description = "End a dialogue. status: \"completed\" (default) or \"cancelled\". Optionally include a summary of conclusions reached.")]
     async fn dialogue_end(&self, Parameters(input): Parameters<DialogueEndInput>) -> String {
         let id = input.dialogue_id.to_string();
         let status = input.status.unwrap_or_else(|| "completed".to_string());
         match input.summary {
-            Some(ref summary) => cli_wrapper::teambook(&["dialogue-end", &id, &status, "--summary", summary]).await,
+            Some(ref s) => cli_wrapper::teambook(&["dialogue-end", &id, &status, "--summary", s]).await,
             None => cli_wrapper::teambook(&["dialogue-end", &id, &status]).await,
         }
     }
 
-    // ============== Projects/Features (directory-aware context) ==============
+    // ============== Projects (2) — HIDDEN ==============
+    // Uncomment to restore project/feature tools.
+    // #[tool(description = "Manage projects.")]
+    // async fn project(&self, Parameters(input): Parameters<ProjectActionInput>) -> String { ... }
+    // #[tool(description = "Manage features within a project.")]
+    // async fn feature(&self, Parameters(input): Parameters<FeatureActionInput>) -> String { ... }
 
-    #[tool(description = "Create a project with a root directory. When any AI works in this directory, they get the project context automatically.")]
-    async fn project_create(&self, Parameters(input): Parameters<ProjectCreateInput>) -> String {
-        cli_wrapper::teambook(&["project-create", "--directory", &input.root_directory, &input.name, &input.goal]).await
+    // ============== Rooms (2) ==============
+
+    #[tool(description = "Send a message to a room. Closed broadcast — only room members see it, not the general team feed.")]
+    async fn room_broadcast(&self, Parameters(input): Parameters<RoomBroadcastInput>) -> String {
+        let room_id = input.room_id.to_string();
+        cli_wrapper::teambook(&["room-say", &room_id, &input.content]).await
     }
 
-    #[tool(description = "List all projects, or get details for a specific project by ID")]
-    async fn project_list(&self, Parameters(input): Parameters<ProjectListInput>) -> String {
-        if let Some(id) = input.project_id {
-            cli_wrapper::teambook(&["project-get", &id.to_string()]).await
-        } else {
-            cli_wrapper::teambook(&["list-projects"]).await
+    #[tool(description = "Manage rooms. action=\"create\": requires name+topic, optional participants (comma-separated AI IDs). action=\"list\": your rooms. action=\"history\": requires room_id, optional limit. action=\"join\"/\"leave\": requires room_id. action=\"mute\": requires room_id+minutes (timed only, no permanent mutes). action=\"pin_message\"/\"unpin_message\": requires room_id+msg_seq_id (pins/unpins a room message by its seq ID — NOT a notebook note ID). action=\"conclude\": requires room_id, optional content/summary (closes the room).")]
+    async fn room(&self, Parameters(input): Parameters<RoomActionInput>) -> String {
+        match input.action.as_str() {
+            "create" => {
+                let name = input.name.as_deref().unwrap_or("");
+                let topic = input.topic.as_deref().unwrap_or("");
+                match input.participants {
+                    Some(ref p) => cli_wrapper::teambook(&["room-create", name, topic, p]).await,
+                    None => cli_wrapper::teambook(&["room-create", name, topic]).await,
+                }
+            }
+            "list" => cli_wrapper::teambook(&["rooms"]).await,
+            "history" => {
+                let id = input.room_id.unwrap_or(0).to_string();
+                let limit = input.limit.unwrap_or(20).to_string();
+                cli_wrapper::teambook(&["room-history", &id, &limit]).await
+            }
+            "join" => {
+                let id = input.room_id.unwrap_or(0).to_string();
+                cli_wrapper::teambook(&["room-join", &id]).await
+            }
+            "leave" => {
+                let id = input.room_id.unwrap_or(0).to_string();
+                cli_wrapper::teambook(&["room-leave", &id]).await
+            }
+            "mute" => {
+                let id = input.room_id.unwrap_or(0).to_string();
+                let minutes = input.minutes.unwrap_or(30).to_string();
+                cli_wrapper::teambook(&["room-mute", &id, &minutes]).await
+            }
+            "pin_message" => {
+                let id = input.room_id.unwrap_or(0).to_string();
+                let seq_id = input.msg_seq_id.unwrap_or(0).to_string();
+                cli_wrapper::teambook(&["room-pin", &id, &seq_id]).await
+            }
+            "unpin_message" => {
+                let id = input.room_id.unwrap_or(0).to_string();
+                let seq_id = input.msg_seq_id.unwrap_or(0).to_string();
+                cli_wrapper::teambook(&["room-unpin", &id, &seq_id]).await
+            }
+            "conclude" => {
+                let id = input.room_id.unwrap_or(0).to_string();
+                match input.content {
+                    Some(ref c) => cli_wrapper::teambook(&["room-conclude", &id, c]).await,
+                    None => cli_wrapper::teambook(&["room-conclude", &id]).await,
+                }
+            }
+            _ => format!("Error: unknown action \"{}\". Valid: create, list, history, join, leave, mute, pin_message, unpin_message, conclude", input.action),
         }
     }
 
-    #[tool(description = "Create a feature within a project. Features map to subdirectories and provide specific context when AIs work there.")]
-    async fn feature_create(&self, Parameters(input): Parameters<CreateFeatureInput>) -> String {
-        let proj_id = input.project_id.to_string();
-        match input.directory {
-            Some(ref dir) => cli_wrapper::teambook(&["feature-create", &proj_id, &input.name, &input.overview, "--directory", dir]).await,
-            None => cli_wrapper::teambook(&["feature-create", &proj_id, &input.name, &input.overview]).await,
+    // ============== Profiles (1) ==============
+
+    #[tool(description = "Get an AI profile. Omit ai_id for your own profile. Pass a specific AI ID (e.g. \"sage-724\") for theirs. Pass \"all\" to list every AI on the team.")]
+    async fn profile_get(&self, Parameters(input): Parameters<ProfileGetInput>) -> String {
+        match input.ai_id.as_deref() {
+            Some("all") => cli_wrapper::profile(&["list"]).await,
+            Some(id) => cli_wrapper::profile(&["get", id]).await,
+            None => cli_wrapper::profile(&["get"]).await,
         }
     }
 
-    #[tool(description = "List features for a project, or get details for a specific feature")]
-    async fn feature_list(&self, Parameters(input): Parameters<FeatureListInput>) -> String {
-        if let Some(feat_id) = input.feature_id {
-            cli_wrapper::teambook(&["feature-get", &feat_id.to_string()]).await
-        } else {
-            cli_wrapper::teambook(&["list-features", &input.project_id.to_string()]).await
-        }
-    }
+    // ============== Standby (1) ==============
 
-    #[tool(description = "Update a feature's overview, name, or directory mapping")]
-    async fn feature_update(&self, Parameters(input): Parameters<FeatureUpdateInput>) -> String {
-        let feat_id = input.feature_id.to_string();
-        // Build args dynamically — only include flags that are set
-        let mut args: Vec<String> = vec!["feature-update".to_string(), feat_id];
-        if let Some(ref o) = input.overview {
-            args.push("--overview".to_string());
-            args.push(o.clone());
-        }
-        if let Some(ref n) = input.name {
-            args.push("--name".to_string());
-            args.push(n.clone());
-        }
-        if let Some(ref d) = input.directory {
-            args.push("--directory".to_string());
-            args.push(d.clone());
-        }
-        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        cli_wrapper::teambook(&arg_refs).await
-    }
-
-    #[tool(description = "Update a project's goal/description")]
-    async fn project_update(&self, Parameters(input): Parameters<ProjectUpdateInput>) -> String {
-        let proj_id = input.project_id.to_string();
-        let mut args: Vec<String> = vec!["project-update".to_string(), proj_id];
-        if let Some(ref g) = input.goal {
-            args.push("--goal".to_string());
-            args.push(g.clone());
-        }
-        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        cli_wrapper::teambook(&arg_refs).await
-    }
-
-    // ============== Standby (1 kept, 1 hidden duplicate) ==============
-
-    #[tool(description = "Enter standby mode")]
+    #[tool(description = "Pause execution and wait for a wake event: DM, mention, or urgent broadcast. timeout is in seconds — forces a wake-up if no event arrives. Use immediately after asking another AI a question and needing their response.")]
     async fn standby(&self, Parameters(input): Parameters<StandbyInput>) -> String {
-        // Autonomous presence: Set to standby before entering
         auto_presence("In Standby").await;
-
         let timeout = input.timeout.unwrap_or(180).to_string();
         let result = cli_wrapper::teambook(&["standby", &timeout]).await;
-
-        // Autonomous presence: Set back to active after waking
         auto_presence("Awake from standby").await;
-
         result
     }
+
+    // ============== Forge (1) — HIDDEN ==============
+    // Uncomment to restore forge_generate tool.
+    // #[tool(description = "Generate text using a local or API LLM.")]
+    // async fn forge_generate(&self, Parameters(input): Parameters<ForgeGenerateInput>) -> String { ... }
 
 }
 

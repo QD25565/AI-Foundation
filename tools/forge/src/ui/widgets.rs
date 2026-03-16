@@ -1,16 +1,17 @@
 //! Custom widgets for Forge UI
 //!
 //! Gradient-styled widgets that match AI-Foundation branding.
+#![allow(dead_code)]
 
 use ratatui::{
     buffer::Buffer,
     layout::{Alignment, Rect},
     style::{Style, Stylize},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph, Widget, Wrap},
+    widgets::{Block, Borders, Paragraph, Widget},
 };
 
-use super::colors::{Gradient, BrandColors, StatusType, LOGO, TAGLINE, separator};
+use super::colors::{Gradient, BrandColors, StatusType, LOGO, separator};
 
 /// A gradient-styled text widget
 pub struct GradientText<'a> {

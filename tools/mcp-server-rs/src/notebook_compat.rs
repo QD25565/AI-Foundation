@@ -3,6 +3,9 @@
 //! Wraps Engram to provide API compatibility with the old notebook_core interface.
 //! Missing features return errors - they can be implemented as needed.
 
+// Many types and methods here are WIP compatibility stubs - suppress dead_code for this module.
+#![allow(dead_code)]
+
 use anyhow::{anyhow, Result};
 use engram::{Engram, Note as EngramNote};
 use std::path::Path;

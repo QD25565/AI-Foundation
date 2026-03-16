@@ -4,7 +4,7 @@
 //! Particularly useful for mobile devices and local peer-to-peer connections.
 
 use super::{DiscoveredPeer, DiscoveryEvent, DiscoveryType};
-use crate::{Endpoint, Result, FederationError};
+use crate::{Endpoint, Result};
 use tokio::sync::mpsc;
 use std::collections::HashMap;
 use std::time::Duration;
@@ -169,10 +169,12 @@ pub struct BleDiscovery {
     /// Known devices by MAC
     known_devices: HashMap<[u8; 6], BleDevice>,
 
-    /// Scan duration
+    /// Scan duration (used when btleplug integration is added)
+    #[allow(dead_code)]
     scan_duration: Duration,
 
-    /// Is scanning
+    /// Is scanning (used when btleplug integration is added)
+    #[allow(dead_code)]
     scanning: bool,
 }
 
@@ -256,7 +258,7 @@ impl BleDiscovery {
 ///
 /// This function would use the `btleplug` crate in a real implementation.
 pub async fn start_ble_scan(
-    local_node_id: &str,
+    _local_node_id: &str,
     event_tx: mpsc::Sender<DiscoveryEvent>,
     duration: Duration,
 ) -> Result<()> {
@@ -294,7 +296,7 @@ pub async fn start_ble_scan(
 }
 
 /// Start BLE advertising
-pub async fn start_ble_advertising(advertisement: BleAdvertisement) -> Result<()> {
+pub async fn start_ble_advertising(_advertisement: BleAdvertisement) -> Result<()> {
     // Note: Full implementation would use btleplug for peripheral mode
     // This is platform-dependent and may require native integration on some platforms
 

@@ -5,8 +5,8 @@
 //! - composable(Screen.Route.route) { ... }
 //! - navigation(route = "parent") { composable("child") { } }
 
-use crate::graph::{CodeGraph, Node, Edge, EdgeKind};
-use crate::parser::{Parser, RouteDefinition, NavigationLink};
+use crate::graph::{CodeGraph, Edge, EdgeKind};
+use crate::parser::{Parser, RouteDefinition};
 use std::path::Path;
 use std::fs;
 use walkdir::WalkDir;
@@ -23,6 +23,7 @@ pub struct ComposeParser {
     /// Regex for navController.navigate("route") pattern
     navigate_regex: Regex,
     /// Regex for popBackStack()
+    #[allow(dead_code)]
     pop_back_regex: Regex,
 }
 
@@ -146,7 +147,7 @@ impl Parser for ComposeParser {
         let mut graph = CodeGraph::new(name, "compose", &root.to_string_lossy());
 
         // Search patterns for navigation files
-        let nav_patterns = [
+        let _nav_patterns = [
             "NavHost",
             "NavGraph",
             "Navigation",

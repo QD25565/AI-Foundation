@@ -2,7 +2,7 @@
 
 use crate::config::Config;
 use crate::registry::{self, BinaryInfo};
-use anyhow::{Result, bail};
+use anyhow::Result;
 use colored::*;
 use std::path::Path;
 
@@ -15,6 +15,7 @@ pub struct DriftReport {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct OutdatedFile {
     pub name: String,
     pub source_modified: String,
@@ -28,6 +29,7 @@ impl DriftReport {
         !self.missing.is_empty() || !self.outdated.is_empty()
     }
 
+    #[allow(dead_code)]
     pub fn total_drift(&self) -> usize {
         self.missing.len() + self.outdated.len()
     }

@@ -12,8 +12,7 @@
 //! - GET  /federation/team - Get team status
 
 use axum::{
-    extract::{Path, Query, State},
-    http::StatusCode,
+    extract::{Query, State},
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
@@ -29,11 +28,11 @@ use tokio::net::TcpListener;
 use tokio::sync::RwLock;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
-use tracing::{info, error, warn};
+use tracing::{info, error};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use teamengram::{TeamEngram, DirectMessage as TeambookDM, Broadcast as TeambookBroadcast, Presence, RecordData};
+use teamengram::{TeamEngram, RecordData};
 
 /// Format a u64 timestamp to RFC3339 string
 fn format_timestamp(ts: u64) -> String {

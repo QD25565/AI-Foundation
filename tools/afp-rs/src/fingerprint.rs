@@ -237,12 +237,14 @@ impl std::fmt::Display for HardwareFingerprint {
     }
 }
 
-/// Collect MAC addresses from network interfaces
+/// Collect MAC addresses from network interfaces.
+///
+/// SAFETY: All subprocess commands use hardcoded names and arguments only.
+/// `std::process::Command` does not invoke a shell, so even if arguments
+/// were dynamic, shell injection is not possible. Output is parsed from
+/// stdout as read-only data. Do NOT add user-controlled arguments to
+/// these commands without audit.
 fn collect_mac_addresses() -> Vec<String> {
-    // Note: sysinfo doesn't provide MAC addresses directly
-    // On Windows, we'd use ipconfig /all or WMI
-    // On Linux, we'd read /sys/class/net/*/address
-    // For now, return empty - this will be enhanced per-platform
 
     #[cfg(target_os = "windows")]
     {
@@ -288,7 +290,9 @@ fn collect_mac_addresses() -> Vec<String> {
     vec![]
 }
 
-/// Collect disk serial numbers (platform-specific)
+/// Collect disk serial numbers (platform-specific).
+///
+/// SAFETY: See `collect_mac_addresses` — same hardcoded-command invariant.
 fn collect_disk_serials() -> Vec<String> {
     #[cfg(target_os = "windows")]
     {

@@ -121,6 +121,9 @@ credentials.json
 **/*.rs.bk
 Cargo.lock
 
+# Cargo config (machine-specific linker paths)
+**/.cargo/config.toml
+
 # Daemon PID files
 *.pid
 tools_daemon_*.pid
@@ -211,3 +214,4 @@ target/
 # FitQuest (separate project)
 **/fitquest/
 **/FitQuest/
+target2/

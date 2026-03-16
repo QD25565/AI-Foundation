@@ -13,6 +13,18 @@ use rkyv::{Archive, Deserialize, Serialize, rancor::Error as RkyvError};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // ============================================================================
+// Event Header Flags
+// ============================================================================
+
+/// Payload is zstd-compressed. Set when raw rkyv payload exceeds COMPRESSION_THRESHOLD.
+/// Readers MUST decompress before rkyv deserialization.
+pub const FLAG_COMPRESSED: u16 = 0x0001;
+
+/// Minimum payload size (bytes) before compression is attempted.
+/// Below this threshold, zstd overhead exceeds savings.
+const COMPRESSION_THRESHOLD: usize = 512;
+
+// ============================================================================
 // Event Type Constants
 // ============================================================================
 
@@ -42,6 +54,10 @@ pub mod event_type {
     pub const ROOM_LEAVE: u16 = 0x0302;
     pub const ROOM_MESSAGE: u16 = 0x0303;
     pub const ROOM_CLOSE: u16 = 0x0304;
+    pub const ROOM_MUTE: u16 = 0x0305;
+    pub const ROOM_PIN_MESSAGE: u16 = 0x0306;
+    pub const ROOM_CONCLUDE: u16 = 0x0307;
+    pub const ROOM_UNPIN_MESSAGE: u16 = 0x0308;
 
     // Lock Events (0x04XX) — DEPRECATED: Locks removed (Feb 2026, QD directive)
     // Constants kept for backward compatibility with existing events in the log
@@ -169,14 +185,44 @@ impl EventHeader {
         std::str::from_utf8(&self.source_ai[..end]).unwrap_or("")
     }
 
-    /// Serialize header to bytes
+    /// Serialize header to bytes (explicit little-endian, no unsafe).
+    ///
+    /// Field layout matches `#[repr(C)]` with `align(64)`:
+    ///   [0..8)   sequence    u64 LE
+    ///   [8..16)  timestamp   u64 LE
+    ///   [16..48) source_ai   [u8; 32]
+    ///   [48..50) event_type  u16 LE
+    ///   [50..52) payload_len u16 LE
+    ///   [52..54) flags       u16 LE
+    ///   [54..56) _reserved   u16 LE
+    ///   [56..60) checksum    u32 LE
+    ///   [60..64) (zero padding)
     pub fn to_bytes(&self) -> [u8; Self::SIZE] {
-        unsafe { std::mem::transmute_copy(self) }
+        let mut bytes = [0u8; Self::SIZE];
+        bytes[0..8].copy_from_slice(&self.sequence.to_le_bytes());
+        bytes[8..16].copy_from_slice(&self.timestamp.to_le_bytes());
+        bytes[16..48].copy_from_slice(&self.source_ai);
+        bytes[48..50].copy_from_slice(&self.event_type.to_le_bytes());
+        bytes[50..52].copy_from_slice(&self.payload_len.to_le_bytes());
+        bytes[52..54].copy_from_slice(&self.flags.to_le_bytes());
+        bytes[54..56].copy_from_slice(&self._reserved.to_le_bytes());
+        bytes[56..60].copy_from_slice(&self.checksum.to_le_bytes());
+        // bytes[60..64] are zero padding — already zero from array init.
+        bytes
     }
 
-    /// Deserialize header from bytes
+    /// Deserialize header from bytes (explicit little-endian, no unsafe).
     pub fn from_bytes(bytes: &[u8; Self::SIZE]) -> Self {
-        unsafe { std::mem::transmute_copy(bytes) }
+        Self {
+            sequence:    u64::from_le_bytes(bytes[0..8].try_into().unwrap()),
+            timestamp:   u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+            source_ai:   bytes[16..48].try_into().unwrap(),
+            event_type:  u16::from_le_bytes(bytes[48..50].try_into().unwrap()),
+            payload_len: u16::from_le_bytes(bytes[50..52].try_into().unwrap()),
+            flags:       u16::from_le_bytes(bytes[52..54].try_into().unwrap()),
+            _reserved:   u16::from_le_bytes(bytes[54..56].try_into().unwrap()),
+            checksum:    u32::from_le_bytes(bytes[56..60].try_into().unwrap()),
+        }
     }
 
     /// Calculate CRC32 checksum
@@ -233,9 +279,13 @@ pub struct DmReadPayload {
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 #[rkyv(compare(PartialEq))]
 pub struct DialogueStartPayload {
-    pub responder: String,
+    /// All participants in turn order. participants[0] is the initiator.
+    /// Turn starts at index 1 (first non-initiator responds first).
+    pub participants: Vec<String>,
     pub topic: String,
     pub timeout_seconds: u32,
+    /// If true, callers should attempt auto-merge with existing same-participant dialogues.
+    pub auto_merge: bool,
 }
 
 /// Dialogue respond event payload
@@ -318,6 +368,8 @@ pub struct RoomLeavePayload {
 pub struct RoomMessagePayload {
     pub room_id: String,
     pub content: String,
+    /// All room members — sequencer uses this to wake recipients without hitting the store.
+    pub participants: Vec<String>,
 }
 
 /// Room close event payload
@@ -325,6 +377,39 @@ pub struct RoomMessagePayload {
 #[rkyv(compare(PartialEq))]
 pub struct RoomClosePayload {
     pub room_id: String,
+}
+
+/// Room mute event payload (timed, not permanent)
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[rkyv(compare(PartialEq))]
+pub struct RoomMutePayload {
+    pub room_id: String,
+    pub target_ai: String,
+    pub minutes: u32,
+}
+
+/// Room conclude event payload (closes room with optional summary)
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[rkyv(compare(PartialEq))]
+pub struct RoomConcludePayload {
+    pub room_id: String,
+    pub conclusion: Option<String>,
+}
+
+/// Room pin message event payload (pins a room message by seq ID — room-native, no cross-namespace refs)
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[rkyv(compare(PartialEq))]
+pub struct RoomPinMessagePayload {
+    pub room_id: String,
+    pub msg_seq_id: u64,
+}
+
+/// Room unpin message event payload
+#[derive(Archive, Deserialize, Serialize, Debug, Clone)]
+#[rkyv(compare(PartialEq))]
+pub struct RoomUnpinMessagePayload {
+    pub room_id: String,
+    pub msg_seq_id: u64,
 }
 
 /// Lock acquire event payload
@@ -357,6 +442,7 @@ pub struct FileActionPayload {
 pub struct FileClaimPayload {
     pub path: String,
     pub duration_seconds: u32,
+    pub working_on: String,
 }
 
 /// File release event payload
@@ -524,7 +610,7 @@ pub struct TrustRecordPayload {
 }
 
 /// Batch create event payload - simple grouped tasks with AI-chosen labels
-/// Tasks format: "1:Fix login,2:Fix logout,3:Test both" or "a:Header,b:Footer"
+/// Tasks format: "1:Fix login|2:Fix logout|3:Test both" or "a:Header|b:Footer"
 #[derive(Archive, Deserialize, Serialize, Debug, Clone)]
 #[rkyv(compare(PartialEq))]
 pub struct BatchCreatePayload {
@@ -582,6 +668,10 @@ pub enum EventPayload {
     RoomLeave(RoomLeavePayload),
     RoomMessage(RoomMessagePayload),
     RoomClose(RoomClosePayload),
+    RoomMute(RoomMutePayload),
+    RoomPinMessage(RoomPinMessagePayload),
+    RoomConclude(RoomConcludePayload),
+    RoomUnpinMessage(RoomUnpinMessagePayload),
 
     // Locks
     LockAcquire(LockAcquirePayload),
@@ -653,6 +743,10 @@ impl EventPayload {
             EventPayload::RoomLeave(_) => event_type::ROOM_LEAVE,
             EventPayload::RoomMessage(_) => event_type::ROOM_MESSAGE,
             EventPayload::RoomClose(_) => event_type::ROOM_CLOSE,
+            EventPayload::RoomMute(_) => event_type::ROOM_MUTE,
+            EventPayload::RoomPinMessage(_) => event_type::ROOM_PIN_MESSAGE,
+            EventPayload::RoomConclude(_) => event_type::ROOM_CONCLUDE,
+            EventPayload::RoomUnpinMessage(_) => event_type::ROOM_UNPIN_MESSAGE,
             EventPayload::LockAcquire(_) => event_type::LOCK_ACQUIRE,
             EventPayload::LockRelease(_) => event_type::LOCK_RELEASE,
             EventPayload::FileAction(_) => event_type::FILE_ACTION,
@@ -695,6 +789,36 @@ impl EventPayload {
         rkyv::from_bytes::<Self, RkyvError>(data).ok()
     }
 
+    /// Deserialize payload from bytes, decompressing if FLAG_COMPRESSED is set.
+    ///
+    /// This is the preferred read path — handles both compressed and uncompressed
+    /// payloads transparently based on the header flags field.
+    pub fn from_bytes_with_flags(data: &[u8], flags: u16) -> Option<Self> {
+        if flags & FLAG_COMPRESSED != 0 {
+            let decompressed = zstd::decode_all(data).ok()?;
+            Self::from_bytes(&decompressed)
+        } else {
+            Self::from_bytes(data)
+        }
+    }
+
+    /// Serialize to bytes, compressing with zstd if payload exceeds threshold.
+    ///
+    /// Returns (payload_bytes, should_set_compressed_flag).
+    /// The caller MUST set FLAG_COMPRESSED in the header if the bool is true.
+    pub fn to_bytes_compressed(&self) -> (Vec<u8>, bool) {
+        let raw = self.to_bytes();
+        if raw.len() > COMPRESSION_THRESHOLD {
+            if let Ok(compressed) = zstd::encode_all(&raw[..], 3) {
+                // Only use compressed if it actually saves space
+                if compressed.len() < raw.len() {
+                    return (compressed, true);
+                }
+            }
+        }
+        (raw, false)
+    }
+
     /// Access archived payload without copying (zero-copy)
     pub fn access(data: &[u8]) -> Option<&ArchivedEventPayload> {
         rkyv::access::<ArchivedEventPayload, RkyvError>(data).ok()
@@ -733,7 +857,7 @@ impl Event {
         bytes
     }
 
-    /// Deserialize from bytes
+    /// Deserialize from bytes (auto-decompresses if FLAG_COMPRESSED is set)
     pub fn from_bytes(data: &[u8]) -> Option<Self> {
         if data.len() < EventHeader::SIZE {
             return None;
@@ -749,13 +873,13 @@ impl Event {
 
         let payload_bytes = &data[EventHeader::SIZE..payload_end];
 
-        // Verify checksum
+        // Verify checksum (covers compressed payload — checksum is over wire format)
         let expected_checksum = header.calculate_checksum(payload_bytes);
         if header.checksum != expected_checksum {
             return None; // Corrupted event
         }
 
-        let payload = EventPayload::from_bytes(payload_bytes)?;
+        let payload = EventPayload::from_bytes_with_flags(payload_bytes, header.flags)?;
         Some(Self { header, payload })
     }
 
@@ -828,13 +952,23 @@ impl Event {
         }))
     }
 
-    /// Create a dialogue start event
-    pub fn dialogue_start(source_ai: &str, responder: &str, topic: &str) -> Self {
+    /// Create a dialogue start event.
+    ///
+    /// `all_participants` must include the initiator (source_ai) as participants[0],
+    /// followed by all other participants in turn order.
+    pub fn dialogue_start(source_ai: &str, all_participants: &[String], topic: &str, auto_merge: bool) -> Self {
         Self::new(source_ai, EventPayload::DialogueStart(DialogueStartPayload {
-            responder: responder.to_string(),
+            participants: all_participants.to_vec(),
             topic: topic.to_string(),
-            timeout_seconds: 180, // Default 3 minutes
+            timeout_seconds: 180,
+            auto_merge,
         }))
+    }
+
+    /// Convenience: start a bilateral dialogue (original 1:1 behaviour, auto_merge=true).
+    pub fn dialogue_start_bilateral(source_ai: &str, responder: &str, topic: &str) -> Self {
+        let participants = vec![source_ai.to_string(), responder.to_string()];
+        Self::dialogue_start(source_ai, &participants, topic, true)
     }
 
     /// Create a dialogue respond event
@@ -881,10 +1015,11 @@ impl Event {
     }
 
     /// Create a file claim event
-    pub fn file_claim(source_ai: &str, path: &str, duration_seconds: u32) -> Self {
+    pub fn file_claim(source_ai: &str, path: &str, duration_seconds: u32, working_on: &str) -> Self {
         Self::new(source_ai, EventPayload::FileClaim(FileClaimPayload {
             path: path.to_string(),
             duration_seconds,
+            working_on: working_on.to_string(),
         }))
     }
 
@@ -995,11 +1130,45 @@ impl Event {
         }))
     }
 
-    /// Create a room message event
-    pub fn room_message(source_ai: &str, room_id: &str, content: &str) -> Self {
+    /// Create a room message event. `participants` = all room members (for sequencer wake routing).
+    pub fn room_message(source_ai: &str, room_id: &str, content: &str, participants: Vec<String>) -> Self {
         Self::new(source_ai, EventPayload::RoomMessage(RoomMessagePayload {
             room_id: room_id.to_string(),
             content: content.to_string(),
+            participants,
+        }))
+    }
+
+    /// Create a room mute event
+    pub fn room_mute(source_ai: &str, room_id: &str, target_ai: &str, minutes: u32) -> Self {
+        Self::new(source_ai, EventPayload::RoomMute(RoomMutePayload {
+            room_id: room_id.to_string(),
+            target_ai: target_ai.to_string(),
+            minutes,
+        }))
+    }
+
+    /// Create a room conclude event
+    pub fn room_conclude(source_ai: &str, room_id: &str, conclusion: Option<String>) -> Self {
+        Self::new(source_ai, EventPayload::RoomConclude(RoomConcludePayload {
+            room_id: room_id.to_string(),
+            conclusion,
+        }))
+    }
+
+    /// Create a room pin message event (pins a room message by seq ID — room-native only)
+    pub fn room_pin_message(source_ai: &str, room_id: &str, msg_seq_id: u64) -> Self {
+        Self::new(source_ai, EventPayload::RoomPinMessage(RoomPinMessagePayload {
+            room_id: room_id.to_string(),
+            msg_seq_id,
+        }))
+    }
+
+    /// Create a room unpin message event
+    pub fn room_unpin_message(source_ai: &str, room_id: &str, msg_seq_id: u64) -> Self {
+        Self::new(source_ai, EventPayload::RoomUnpinMessage(RoomUnpinMessagePayload {
+            room_id: room_id.to_string(),
+            msg_seq_id,
         }))
     }
 
@@ -1115,7 +1284,7 @@ impl Event {
     }
 
     /// Create a batch with inline tasks
-    /// tasks format: "1:Fix login,2:Fix logout,3:Test both"
+    /// tasks format: "1:Fix login|2:Fix logout|3:Test both"
     pub fn batch_create(source_ai: &str, name: &str, tasks: &str) -> Self {
         Self::new(source_ai, EventPayload::BatchCreate(BatchCreatePayload {
             name: name.to_string(),
@@ -1210,7 +1379,7 @@ mod tests {
             Event::broadcast("ai", "ch", "msg"),
             Event::direct_message("ai", "to", "msg"),
             Event::presence_update("ai", "active", Some("working")),
-            Event::dialogue_start("ai", "responder", "topic"),
+            Event::dialogue_start("ai", &["ai".to_string(), "responder".to_string()], "topic", true),
             Event::dialogue_respond("ai", 1, "response"),
             Event::vote_create("ai", "topic", vec!["a".into(), "b".into()], 3),
             Event::vote_cast("ai", 1, "a"),

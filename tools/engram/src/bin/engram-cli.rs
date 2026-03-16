@@ -63,6 +63,12 @@ enum Commands {
         /// Tags (comma-separated)
         #[arg(short, long, value_delimiter = ',')]
         tags: Vec<String>,
+
+        /// Trigger keywords for prospective memory (comma-separated).
+        /// Adds bloom bits for keywords not in the content, causing the note
+        /// to surface automatically when your working context matches.
+        #[arg(long, value_delimiter = ',')]
+        trigger: Vec<String>,
     },
 
     /// Retrieve a memory by ID
@@ -156,6 +162,32 @@ enum Commands {
 
     /// Sync and update memory map
     Sync,
+
+    /// Rebuild fingerprint index from all existing notes
+    /// Run after upgrading to fingerprint support, or when .engram.fp sidecar is missing
+    #[command(alias = "rebuild-fingerprints")]
+    BackfillFingerprints,
+
+    /// Scan fingerprint index with a query — calibration tool for threshold tuning
+    /// Shows top-K matches with Hamming distance, bloom overlap, and scores
+    #[command(alias = "fp-scan", alias = "fp-search")]
+    FingerprintScan {
+        /// Query text to fingerprint and search against
+        #[arg(value_name = "QUERY")]
+        query: String,
+
+        /// Optional tags to include in the query fingerprint (comma-separated)
+        #[arg(short, long, value_delimiter = ',')]
+        tags: Vec<String>,
+
+        /// Maximum number of results to show
+        #[arg(short = 'k', long, default_value = "10")]
+        top_k: usize,
+
+        /// Maximum Hamming distance to accept (lower = stricter)
+        #[arg(long, default_value = "32")]
+        max_hd: u32,
+    },
 
     /// Backfill embeddings for notes that don't have them
     /// Foundational for exceptional recall (keyword + semantic + graph)
@@ -256,10 +288,15 @@ fn main() -> anyhow::Result<()> {
     let database = cli.database.unwrap_or_else(get_default_database_path);
 
     match cli.command {
-        Commands::Remember { content, tags } => {
+        Commands::Remember { content, tags, trigger } => {
             let mut db = Engram::open(&database)?;
             let tag_refs: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
-            let id = db.remember(&content, &tag_refs)?;
+            let id = if trigger.is_empty() {
+                db.remember(&content, &tag_refs)?
+            } else {
+                let trigger_refs: Vec<&str> = trigger.iter().map(|s| s.as_str()).collect();
+                db.remember_with_triggers(&content, &tag_refs, &trigger_refs)?
+            };
 
             // Generate embedding for the new note (foundational for exceptional recall)
             if let Some(model_path) = EmbeddingGenerator::find_model("embeddinggemma-300M-Q8_0.gguf") {
@@ -371,14 +408,17 @@ fn main() -> anyhow::Result<()> {
             let results = db.recall(&query, query_embedding.as_deref(), limit)?;
             println!("recall/{}", results.len());
             for result in results {
-                let preview: String = result.note.content.chars().take(60).collect();
-                println!("{}|{:.3}|{:.3}|{:.3}|{:.3}|{:.3}|{}",
+                let preview: String = result.note.content.chars().take(80).collect();
+                let tags = &result.note.tags;
+                let tag_str = if tags.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", tags.join(","))
+                };
+                println!("{}|{:.0}%{}|{}",
                     result.note.id,
-                    result.final_score,
-                    result.vector_score,
-                    result.keyword_score,
-                    result.graph_score,
-                    result.recency_score,
+                    result.final_score * 100.0,
+                    tag_str,
                     preview.replace('\n', " ")
                 );
             }
@@ -418,6 +458,7 @@ fn main() -> anyhow::Result<()> {
             let mut db = Engram::open(&database)?;
             let stats = db.stats();
             print_stats(&stats);
+            println!("fingerprints/{}", db.fingerprint_count());
         }
 
         Commands::Verify => {
@@ -446,6 +487,95 @@ fn main() -> anyhow::Result<()> {
             let mut db = Engram::open(&database)?;
             db.sync()?;
             println!("sync/ok");
+        }
+
+        Commands::BackfillFingerprints => {
+            let start = std::time::Instant::now();
+            let mut db = Engram::open(&database)?;
+            let count = db.backfill_fingerprints()?;
+            let elapsed = start.elapsed();
+            println!("backfill-fingerprints/ok count={} time={}ms", count, elapsed.as_millis());
+        }
+
+        Commands::FingerprintScan { query, tags, top_k, max_hd } => {
+            let start = std::time::Instant::now();
+            let mut db = Engram::open(&database)?;
+
+            let fp_count = db.fingerprint_count();
+            if fp_count == 0 {
+                eprintln!("No fingerprints in index. Run `engram backfill-fingerprints` first.");
+                std::process::exit(1);
+            }
+
+            // Build 256-bit query fingerprint (128-bit SimHash + 128-bit Bloom)
+            let tag_refs: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
+            let context = engram::fingerprint::Fingerprint256::from_text(&query, &tag_refs);
+
+            // Use adaptive threshold if max_hd not explicitly overridden
+            let effective_max_hd = if max_hd == 32 {
+                // Default value — use adaptive threshold for 128-bit SimHash
+                engram::fingerprint::adaptive_max_hd_128(fp_count as u32)
+            } else {
+                max_hd
+            };
+
+            // Scan top-K
+            let results = db.fingerprint_scan_top_k(&context, top_k, Some(effective_max_hd));
+            let scan_time = start.elapsed();
+
+            // Print header
+            println!("fingerprint-scan | query=\"{}\" tags={:?} max_hd={} (adaptive={}) index_size={}",
+                query, tags, max_hd, effective_max_hd, fp_count);
+            println!("context | simhash=[{:016x},{:016x}] bloom=[{:016x},{:016x}]",
+                context.simhash[0], context.simhash[1], context.bloom[0], context.bloom[1]);
+            println!("---");
+
+            if results.is_empty() {
+                println!("No matches found within HD <= {}", max_hd);
+            } else {
+                // Print results with note content preview
+                for (rank, sr) in results.iter().enumerate() {
+                    let similarity_pct = ((128 - sr.hamming_distance) as f64 / 128.0 * 100.0) as u32;
+                    let bloom_overlap = sr.score.saturating_sub(128 - sr.hamming_distance);
+
+                    // Try to get note content for preview
+                    let preview = match db.get(sr.note_id) {
+                        Ok(Some(note)) => {
+                            let content = &note.content;
+                            let truncated = if content.len() > 80 {
+                                format!("{}...", &content[..content.char_indices().take_while(|(i,_)| *i < 80).last().map(|(i,c)| i + c.len_utf8()).unwrap_or(80)])
+                            } else {
+                                content.clone()
+                            };
+                            let tags_str = if note.tags.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" [{}]", note.tags.join(","))
+                            };
+                            format!("{}{}", truncated.replace('\n', " "), tags_str)
+                        }
+                        _ => "(note not found)".to_string(),
+                    };
+
+                    // Show flags if present (from V2 sidecar — check via fingerprint index)
+                    let flags_str = {
+                        let entry = db.fingerprint_entries().iter().find(|e| e.note_id == sr.note_id);
+                        match entry.map(|e| e.flags) {
+                            Some(f) if f & 0x01 != 0 && f & 0x02 != 0 => " [PINNED|TOMBSTONED]",
+                            Some(f) if f & 0x01 != 0 => " [PINNED]",
+                            Some(f) if f & 0x02 != 0 => " [TOMBSTONED]",
+                            _ => "",
+                        }
+                    };
+
+                    println!("#{:<2} note={:<5} score={:<4} HD={:<3} sim={}% bloom={:<3}{} | {}",
+                        rank + 1, sr.note_id, sr.score, sr.hamming_distance,
+                        similarity_pct, bloom_overlap, flags_str, preview);
+                }
+            }
+
+            println!("---");
+            println!("scan_time={}us results={}/{}", scan_time.as_micros(), results.len(), fp_count);
         }
 
         Commands::Backfill { model, batch_size } => {

@@ -1,4 +1,5 @@
 //! Provider trait and factory
+#![allow(dead_code)]
 
 use std::pin::Pin;
 use async_trait::async_trait;

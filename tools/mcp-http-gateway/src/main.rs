@@ -15,7 +15,7 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 use windows_service::{
     define_windows_service,
@@ -114,32 +114,86 @@ fn run_service() -> anyhow::Result<()> {
         process_id: None,
     })?;
 
-    // Start the processes
-    let mut mcp_process = start_mcp_server()?;
-    std::thread::sleep(Duration::from_secs(2));
-    let mut tunnel_process = start_cloudflared()?;
+    // Start both processes immediately — cloudflared retries backend connections automatically.
+    // No startup ordering required; no sleep.
+    let mcp_process = start_mcp_server()?;
+    let tunnel_process = start_cloudflared()?;
 
-    // Wait for shutdown signal
+    // Event-driven supervisor — zero polling.
+    // Each child gets a watcher thread that blocks on wait() (OS-level, zero CPU).
+    // Shutdown signal forwarded from service control handler.
+    // All events merge into a single channel.
+    // PIDs tracked via Arc<Mutex> for clean shutdown.
+    enum SupervisorEvent {
+        Shutdown,
+        McpExited,
+        TunnelExited,
+    }
+
+    let (event_tx, event_rx) = mpsc::channel();
+    let mcp_pid: Arc<Mutex<u32>> = Arc::new(Mutex::new(mcp_process.id()));
+    let tunnel_pid: Arc<Mutex<u32>> = Arc::new(Mutex::new(tunnel_process.id()));
+
+    // Forward shutdown signal
+    let tx_shutdown = event_tx.clone();
+    std::thread::spawn(move || {
+        let _ = shutdown_rx.recv();
+        let _ = tx_shutdown.send(SupervisorEvent::Shutdown);
+    });
+
+    // Spawn watcher — blocks on wait() (OS-level, zero CPU)
+    fn spawn_watcher(
+        mut child: Child,
+        tx: mpsc::Sender<SupervisorEvent>,
+        event: SupervisorEvent,
+    ) {
+        std::thread::spawn(move || {
+            let _ = child.wait();
+            let _ = tx.send(event);
+        });
+    }
+
+    spawn_watcher(mcp_process, event_tx.clone(), SupervisorEvent::McpExited);
+    spawn_watcher(tunnel_process, event_tx.clone(), SupervisorEvent::TunnelExited);
+
+    // Single event loop — blocks on recv(), zero CPU, zero polling
     loop {
-        match shutdown_rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(_) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                // Check if processes are still running, restart if needed
-                if let Ok(Some(_)) = mcp_process.try_wait() {
-                    // MCP server died, restart it
-                    mcp_process = start_mcp_server().unwrap_or_else(|_| mcp_process);
+        match event_rx.recv() {
+            Ok(SupervisorEvent::Shutdown) | Err(_) => break,
+            Ok(SupervisorEvent::McpExited) => {
+                match start_mcp_server() {
+                    Ok(child) => {
+                        *mcp_pid.lock().unwrap() = child.id();
+                        spawn_watcher(child, event_tx.clone(), SupervisorEvent::McpExited);
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to restart MCP server: {e}");
+                        break;
+                    }
                 }
-                if let Ok(Some(_)) = tunnel_process.try_wait() {
-                    // Tunnel died, restart it
-                    tunnel_process = start_cloudflared().unwrap_or_else(|_| tunnel_process);
+            }
+            Ok(SupervisorEvent::TunnelExited) => {
+                match start_cloudflared() {
+                    Ok(child) => {
+                        *tunnel_pid.lock().unwrap() = child.id();
+                        spawn_watcher(child, event_tx.clone(), SupervisorEvent::TunnelExited);
+                    }
+                    Err(e) => {
+                        eprintln!("Failed to restart cloudflared: {e}");
+                        break;
+                    }
                 }
             }
         }
     }
 
-    // Stop processes
-    let _ = mcp_process.kill();
-    let _ = tunnel_process.kill();
+    // Kill child processes by PID on shutdown
+    let _ = Command::new("taskkill")
+        .args(["/F", "/PID", &mcp_pid.lock().unwrap().to_string()])
+        .output();
+    let _ = Command::new("taskkill")
+        .args(["/F", "/PID", &tunnel_pid.lock().unwrap().to_string()])
+        .output();
 
     // Report stopped
     status_handle.set_service_status(ServiceStatus {
@@ -159,10 +213,10 @@ fn start_mcp_server() -> anyhow::Result<Child> {
     // AI_ID can be customized via env var, defaults to "mcp-gateway"
     let ai_id = std::env::var("AI_ID").unwrap_or_else(|_| "mcp-gateway".to_string());
 
-    let child = Command::new(MCP_SERVER)
+    let child = Command::new(mcp_server_path())
         .args(["--port", &PORT.to_string()])
         .env("AI_ID", &ai_id)
-        .env("POSTGRES_URL", "postgresql://ai_foundation:ai_foundation_pass@127.0.0.1:15432/ai_foundation")
+        .env("POSTGRES_URL", std::env::var("POSTGRES_URL").unwrap_or_else(|_| "postgresql://ai_foundation:changeme@127.0.0.1:15432/ai_foundation".to_string()))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()?;
@@ -180,17 +234,18 @@ fn start_cloudflared() -> anyhow::Result<Child> {
 
 fn run_services_directly() -> anyhow::Result<()> {
     println!("Starting MCP HTTP Gateway (direct mode)...");
-    println!("MCP Server: {}", MCP_SERVER);
+    println!("MCP Server: {:?}", mcp_server_path());
     println!("Cloudflared: {}", CLOUDFLARED);
     println!();
 
-    let mut mcp = start_mcp_server()?;
-    println!("MCP server started (PID: {})", mcp.id());
+    let mcp = start_mcp_server()?;
+    let mcp_pid = mcp.id();
+    println!("MCP server started (PID: {})", mcp_pid);
 
-    std::thread::sleep(Duration::from_secs(2));
-
-    let mut tunnel = start_cloudflared()?;
-    println!("Cloudflare tunnel started (PID: {})", tunnel.id());
+    // Start tunnel immediately — cloudflared retries backend connections automatically.
+    let tunnel = start_cloudflared()?;
+    let tunnel_pid = tunnel.id();
+    println!("Cloudflare tunnel started (PID: {})", tunnel_pid);
 
     println!();
     println!("MCP HTTP Gateway running");
@@ -198,18 +253,38 @@ fn run_services_directly() -> anyhow::Result<()> {
     println!("Config: C:\\ProgramData\\cloudflared\\config.yml");
     println!("Press Ctrl+C to stop...");
 
-    // Wait for either process to exit
-    loop {
-        std::thread::sleep(Duration::from_secs(1));
-        if let Ok(Some(status)) = mcp.try_wait() {
-            println!("MCP server exited with: {:?}", status);
-            let _ = tunnel.kill();
-            break;
+    // Wait for either process to exit — zero polling.
+    // Each thread blocks on wait() (OS-level, zero CPU), signals via channel.
+    let (tx, rx) = mpsc::channel();
+    let tx_mcp = tx.clone();
+    std::thread::spawn(move || {
+        let mut child = mcp;
+        let status = child.wait();
+        let _ = tx_mcp.send(("MCP server", status, tunnel_pid));
+    });
+    std::thread::spawn(move || {
+        let mut child = tunnel;
+        let status = child.wait();
+        let _ = tx.send(("Cloudflared", status, mcp_pid));
+    });
+
+    // Block on whichever exits first — OS-level wait, zero CPU
+    match rx.recv() {
+        Ok((name, Ok(status), other_pid)) => {
+            println!("{} exited with: {:?}", name, status);
+            // Kill the other process
+            let _ = Command::new("taskkill")
+                .args(["/F", "/PID", &other_pid.to_string()])
+                .output();
         }
-        if let Ok(Some(status)) = tunnel.try_wait() {
-            println!("Cloudflared exited with: {:?}", status);
-            let _ = mcp.kill();
-            break;
+        Ok((name, Err(e), other_pid)) => {
+            println!("{} wait failed: {:?}", name, e);
+            let _ = Command::new("taskkill")
+                .args(["/F", "/PID", &other_pid.to_string()])
+                .output();
+        }
+        Err(_) => {
+            println!("Process monitor channels closed");
         }
     }
 

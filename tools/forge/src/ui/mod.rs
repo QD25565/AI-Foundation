@@ -1,6 +1,7 @@
 //! Terminal UI components for Forge
 //!
 //! Beautiful ratatui-based interface with AI-Foundation branding.
+#![allow(unused_imports)]
 
 pub mod colors;
 pub mod widgets;

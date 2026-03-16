@@ -71,6 +71,22 @@ struct Args {
     /// List available models
     #[arg(long)]
     list_models: bool,
+
+    /// Headless mode: process prompt and print JSON result to stdout (no TUI)
+    #[arg(long)]
+    headless: bool,
+
+    /// System prompt for headless mode
+    #[arg(long)]
+    system: Option<String>,
+
+    /// Max tokens to generate in headless mode
+    #[arg(long)]
+    max_tokens: Option<u32>,
+
+    /// Temperature for generation (0.0-2.0)
+    #[arg(long)]
+    temperature: Option<f32>,
 }
 
 #[tokio::main]
@@ -122,13 +138,85 @@ async fn main() -> Result<()> {
         }
     };
 
+    // Headless mode: process prompt and print JSON result, no TUI
+    if args.headless {
+        let prompt = args.prompt.unwrap_or_else(|| {
+            eprintln!("Error: --prompt is required in headless mode");
+            std::process::exit(1);
+        });
+
+        let Some(provider) = provider else {
+            let err = serde_json::json!({"error": "No LLM provider available"});
+            println!("{}", err);
+            std::process::exit(1);
+        };
+
+        let system = args.system.unwrap_or_else(|| {
+            "You are a helpful AI assistant. Be concise and direct.".to_string()
+        });
+
+        let messages = vec![
+            ChatMessage { role: llm::MessageRole::System, content: system, name: None, tool_call_id: None },
+            ChatMessage { role: llm::MessageRole::User, content: prompt, name: None, tool_call_id: None },
+        ];
+
+        let params = GenerationParams {
+            max_tokens: args.max_tokens.unwrap_or(512) as usize,
+            temperature: args.temperature.unwrap_or(0.3),
+            stop_sequences: vec![],
+            tools: vec![],
+        };
+
+        let mut result_text = String::new();
+        let mut stream = provider.generate_stream(&messages, &params).await
+            .unwrap_or_else(|e| {
+                let err = serde_json::json!({"error": format!("{}", e)});
+                println!("{}", err);
+                std::process::exit(1);
+            });
+
+        while let Some(chunk) = stream.next().await {
+            match chunk {
+                StreamChunk::Text(t) => result_text.push_str(&t),
+                StreamChunk::Done { usage, .. } => {
+                    let (prompt_tokens, completion_tokens) = usage
+                        .map(|u| (u.prompt_tokens, u.completion_tokens))
+                        .unwrap_or((0, 0));
+                    let result = serde_json::json!({
+                        "content": result_text,
+                        "usage": {
+                            "input_tokens": prompt_tokens,
+                            "output_tokens": completion_tokens
+                        }
+                    });
+                    println!("{}", result);
+                    return Ok(());
+                }
+                StreamChunk::Error(e) => {
+                    let err = serde_json::json!({"error": format!("{}", e)});
+                    println!("{}", err);
+                    std::process::exit(1);
+                }
+                _ => {}
+            }
+        }
+
+        // Stream ended without Done chunk
+        let result = serde_json::json!({
+            "content": result_text,
+            "usage": { "input_tokens": 0, "output_tokens": 0 }
+        });
+        println!("{}", result);
+        return Ok(());
+    }
+
     // Run the main TUI
     run_tui(config, args.prompt, provider).await
 }
 
 /// List available models
 fn list_models(config: &ForgeConfig) {
-    use ui::colors::{Gradient, BrandColors};
+    use ui::colors::Gradient;
 
     println!();
     let gradient = Gradient::brand();
@@ -159,7 +247,7 @@ fn list_models(config: &ForgeConfig) {
 
 /// Run the setup wizard
 async fn run_setup(config: &mut ForgeConfig) -> Result<()> {
-    use ui::colors::{Gradient, BrandColors, LOGO};
+    use ui::colors::{Gradient, LOGO};
 
     println!();
 
@@ -200,6 +288,7 @@ async fn run_setup(config: &mut ForgeConfig) -> Result<()> {
 }
 
 /// Messages from async LLM task
+#[allow(dead_code)]
 enum LlmEvent {
     Token(String),
     Done(String),
@@ -759,7 +848,7 @@ async fn run_tui(
                     ui::app::InputMode::ToolApproval => {
                         match key.code {
                             KeyCode::Char('y') | KeyCode::Char('Y') => {
-                                if let Some(pending_tool) = app.approve_tool() {
+                                if let Some(_pending_tool) = app.approve_tool() {
                                     // Get the ready tool call
                                     if let Some(tool) = ready_tool_calls.first().cloned() {
                                         ready_tool_calls.remove(0);
