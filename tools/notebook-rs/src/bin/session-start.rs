@@ -712,7 +712,7 @@ fn fetch_awareness(ai_id: &str) -> AwarenessData {
     let now = Utc::now();
 
     // DMs
-    if let Ok(dms) = v2.recent_dms(10) {
+    if let Ok(dms) = v2.recent_dms(5) {
         data.direct_messages = dms.into_iter()
             .map(|dm| {
                 let age_secs = now.signed_duration_since(dm.timestamp).num_seconds();
