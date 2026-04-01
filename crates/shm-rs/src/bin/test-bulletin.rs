@@ -1,4 +1,4 @@
-use shm::bulletin::BulletinBoard;
+use shm_rs::bulletin::BulletinBoard;
 
 fn main() {
     println!("Opening bulletin...");

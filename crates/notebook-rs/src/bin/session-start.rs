@@ -28,9 +28,9 @@ use teamengram::v2_client::V2Client;
 // Configuration
 // ============================================================================
 
-/// Session injection limits
-const MAX_INJECTED: usize = 40;
-const MAX_PINNED: usize = 25;
+/// Session injection limits (scaled for 1M context window, Apr 2026)
+const MAX_INJECTED: usize = 60;
+const MAX_PINNED: usize = 40;
 const MIN_RECENT: usize = 15;
 
 /// Supported output formats
@@ -712,7 +712,7 @@ fn fetch_awareness(ai_id: &str) -> AwarenessData {
     let now = Utc::now();
 
     // DMs
-    if let Ok(dms) = v2.recent_dms(10) {
+    if let Ok(dms) = v2.recent_dms(5) {
         data.direct_messages = dms.into_iter()
             .map(|dm| {
                 let age_secs = now.signed_duration_since(dm.timestamp).num_seconds();

@@ -4,13 +4,13 @@ version = "0.1.0"
 edition = "2021"
 description = "Ultra-low-latency shared memory IPC for AI-Foundation"
 
-[lib]
-name = "shm"
-crate-type = ["rlib"]
-
 [[bin]]
 name = "shm-bench"
 path = "src/bin/shm-bench.rs"
+
+[[bin]]
+name = "context-bench"
+path = "src/bin/context-bench.rs"
 
 [[bin]]
 name = "hook-bulletin"
@@ -42,6 +42,10 @@ bytemuck = { version = "1.14", features = ["derive"] }
 
 # Directory utilities
 dirs = "5"
+
+# Fingerprint computation (SimHash + Bloom) for hook associative recall
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+rust-stemmers = "1.2"
 
 # TTY detection for stdin check
 atty = "0.2"

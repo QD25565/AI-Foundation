@@ -4,7 +4,7 @@
 //!   1. App calls POST /api/pair/request with { h_id } (or empty to auto-assign)
 //!   2. Server generates a 6-char code (e.g. "QD7X3K") stored with 10-min TTL
 //!   3. Human sees the code on-screen and approves by running:
-//!        teambook mobile-pair <code>    (on the AI server machine)
+//!      teambook mobile-pair <code>    (on the AI server machine)
 //!      OR the code is accepted without approval in --open mode
 //!   4. App polls POST /api/pair/validate with { code }
 //!   5. On success: returns { h_id, token } — token used for all future requests

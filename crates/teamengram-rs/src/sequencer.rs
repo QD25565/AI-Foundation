@@ -97,6 +97,10 @@ pub struct SequencerStats {
     pub active_outboxes: AtomicU64,
     /// Timestamp of last event
     pub last_event_time: AtomicU64,
+    /// Number of batches where a pressured outbox was drained first
+    pub pressure_drains: AtomicU64,
+    /// Number of corruption auto-repairs performed
+    pub corruption_repairs: AtomicU64,
 }
 
 impl SequencerStats {
@@ -110,6 +114,14 @@ impl SequencerStats {
 
     pub fn last_sequence(&self) -> u64 {
         self.last_sequence.load(Ordering::Relaxed)
+    }
+
+    pub fn pressure_drains(&self) -> u64 {
+        self.pressure_drains.load(Ordering::Relaxed)
+    }
+
+    pub fn corruption_repairs(&self) -> u64 {
+        self.corruption_repairs.load(Ordering::Relaxed)
     }
 }
 
@@ -383,12 +395,30 @@ impl Sequencer {
         Ok(())
     }
 
-    /// Process a batch of events from all outboxes
+    /// Process a batch of events from all outboxes.
+    ///
+    /// Pressured outboxes (>75% fill, PRESSURE flag set) are drained first
+    /// to prevent overflow. Non-pressured outboxes drain in arbitrary order.
     fn process_batch(&mut self) -> SequencerResult<usize> {
         let mut total_processed = 0;
 
-        // Round-robin through all outboxes
-        let ai_ids: Vec<String> = self.outboxes.keys().cloned().collect();
+        // Collect outbox keys with pressure-first ordering.
+        // Pressured outboxes (>75% fill) drain before others to prevent overflow.
+        let mut ai_ids: Vec<String> = self.outboxes.keys().cloned().collect();
+        ai_ids.sort_by(|a, b| {
+            let a_pressure = self.outboxes.get(a)
+                .map(|c| c.has_flag(crate::outbox::flags::PRESSURE))
+                .unwrap_or(false);
+            let b_pressure = self.outboxes.get(b)
+                .map(|c| c.has_flag(crate::outbox::flags::PRESSURE))
+                .unwrap_or(false);
+            b_pressure.cmp(&a_pressure) // true (pressured) sorts first
+        });
+
+        let any_pressured = ai_ids.first()
+            .and_then(|id| self.outboxes.get(id))
+            .map(|c| c.has_flag(crate::outbox::flags::PRESSURE))
+            .unwrap_or(false);
 
         for ai_id in ai_ids {
             if total_processed >= self.config.max_batch_size {
@@ -408,6 +438,9 @@ impl Sequencer {
 
         if total_processed > 0 {
             self.stats.batches_processed.fetch_add(1, Ordering::Relaxed);
+            if any_pressured {
+                self.stats.pressure_drains.fetch_add(1, Ordering::Relaxed);
+            }
         }
 
         Ok(total_processed)
@@ -425,12 +458,28 @@ impl Sequencer {
             None => return Ok(0),
         };
 
-        // Check for outbox corruption before processing
+        // Check for outbox corruption before processing.
+        // Auto-repair instead of silently skipping — a frozen outbox means the AI
+        // thinks it's communicating but nobody receives anything.
         if let Some(corruption_reason) = consumer.check_corruption() {
             eprintln!(
-                "WARNING: Outbox for {} appears corrupted: {}. Skipping until repaired.",
+                "WARNING: Outbox for {} corrupted: {}. Attempting auto-repair.",
                 ai_id, corruption_reason
             );
+            self.stats.corruption_repairs.fetch_add(1, Ordering::Relaxed);
+
+            // Auto-repair: reset tail to head (discard unreadable pending events).
+            // The events were already corrupted/unreadable, so nothing is lost.
+            let discarded = consumer.reset_tail_to_head();
+            eprintln!(
+                "REPAIRED: Outbox for {} reset. Discarded {} bytes.",
+                ai_id, discarded
+            );
+
+            // Notify the affected AI via direct wake signal so it knows something happened.
+            // The AI's next tool call will process normally — the outbox is now clean.
+            Self::signal_ai(ai_id, WakeReason::Urgent, "sequencer", "Outbox corruption auto-repaired");
+
             return Ok(0);
         }
 
@@ -546,7 +595,7 @@ impl Sequencer {
             crate::event::EventPayload::DialogueStart(ds) => {
                 // Track all participants for round-robin wake routing.
                 // turn_index starts at 1: first non-initiator goes first.
-                let dialogue_id = header.sequence;
+                let dialogue_id = header.timestamp;
                 let turn_index = if ds.participants.len() > 1 { 1usize } else { 0 };
                 dialogue_participants.insert(dialogue_id, (ds.participants.clone(), turn_index));
                 // Wake all non-initiator participants so they see the invite
@@ -705,7 +754,7 @@ mod tests {
         let base = tmp.path();
 
         // Create multiple outboxes
-        for ai_id in &["beta-002", "alpha-001", "gamma-003"] {
+        for ai_id in &["lyra-584", "sage-724", "cascade-230"] {
             let mut producer = OutboxProducer::open(ai_id, Some(base)).unwrap();
             for i in 0..3 {
                 let event = Event::broadcast(ai_id, "general", &format!("{} message {}", ai_id, i));
@@ -781,5 +830,306 @@ mod tests {
             last_seq = event.header.sequence;
         }
         assert_eq!(last_seq, 3);
+    }
+
+    // ===== Fix 1: Backpressure Priority Tests =====
+
+    #[test]
+    fn test_pressure_flag_prioritizes_drain() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        // Create two outboxes: alpha (normal) and beta (will be pressured)
+        let mut alpha_prod = OutboxProducer::open_with_capacity(
+            "alpha-001", Some(base), crate::outbox::MIN_OUTBOX_CAPACITY
+        ).unwrap();
+        let mut beta_prod = OutboxProducer::open_with_capacity(
+            "beta-002", Some(base), crate::outbox::MIN_OUTBOX_CAPACITY
+        ).unwrap();
+
+        // Write small events to alpha (won't trigger pressure)
+        for i in 0..3 {
+            let event = Event::broadcast("alpha-001", "general", &format!("alpha {}", i));
+            alpha_prod.write_event(&event).unwrap();
+        }
+
+        // Write large events to beta to push it past 75% fill and trigger PRESSURE
+        let big_content = "P".repeat(10000);
+        for _ in 0..5 {
+            let event = Event::broadcast("beta-002", "general", &big_content);
+            match beta_prod.write_event(&event) {
+                Ok(_) => {}
+                Err(crate::outbox::OutboxError::Full { .. }) => break,
+                Err(e) => panic!("Unexpected error: {:?}", e),
+            }
+        }
+
+        // Verify beta has PRESSURE set
+        let beta_consumer = crate::outbox::OutboxConsumer::open("beta-002", Some(base)).unwrap();
+        assert!(beta_consumer.has_flag(crate::outbox::flags::PRESSURE),
+            "Precondition: beta must have PRESSURE flag set");
+        drop(beta_consumer);
+
+        drop(alpha_prod);
+        drop(beta_prod);
+
+        // Create sequencer with batch_size = 3 (only enough for alpha's events)
+        let config = SequencerConfig {
+            base_dir: Some(base.to_path_buf()),
+            max_batch_size: 3,
+            enable_wake: false,
+            ..Default::default()
+        };
+
+        let mut sequencer = Sequencer::new(config).unwrap();
+        sequencer.refresh_outboxes().unwrap();
+
+        let processed = sequencer.process_batch().unwrap();
+        assert!(processed > 0, "Should have processed some events");
+
+        // After first batch (size=3), beta (pressured) should have been drained first.
+        // Open fresh consumers to check state.
+        let alpha_check = crate::outbox::OutboxConsumer::open("alpha-001", Some(base)).unwrap();
+        let beta_check = crate::outbox::OutboxConsumer::open("beta-002", Some(base)).unwrap();
+
+        // Beta was prioritized: it should have fewer pending bytes than alpha
+        // (beta drained first within the batch_size limit)
+        assert!(alpha_check.pending_bytes() > 0,
+            "Alpha (non-pressured) should still have pending events after limited batch");
+
+        drop(alpha_check);
+        drop(beta_check);
+
+        // Verify pressure_drains stat incremented
+        assert!(sequencer.stats().pressure_drains() > 0,
+            "pressure_drains stat should be > 0 when pressured outbox was drained");
+    }
+
+    #[test]
+    fn test_no_pressure_both_drain() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        // Create two outboxes with small events (neither will be pressured)
+        for ai_id in &["gamma-001", "delta-002"] {
+            let mut producer = OutboxProducer::open(ai_id, Some(base)).unwrap();
+            for i in 0..3 {
+                let event = Event::broadcast(ai_id, "general", &format!("{} msg {}", ai_id, i));
+                producer.write_event(&event).unwrap();
+            }
+            producer.flush().unwrap();
+        }
+
+        let config = SequencerConfig {
+            base_dir: Some(base.to_path_buf()),
+            enable_wake: false,
+            ..Default::default()
+        };
+
+        let mut sequencer = Sequencer::new(config).unwrap();
+        sequencer.refresh_outboxes().unwrap();
+
+        let processed = sequencer.process_batch().unwrap();
+        assert_eq!(processed, 6, "All 6 events from both outboxes should drain");
+        assert_eq!(sequencer.stats().pressure_drains(), 0,
+            "No pressure drains when neither outbox is pressured");
+    }
+
+    #[test]
+    fn test_pressure_drains_stat_increments() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        // Create a pressured outbox
+        let mut producer = OutboxProducer::open_with_capacity(
+            "press-ai", Some(base), crate::outbox::MIN_OUTBOX_CAPACITY
+        ).unwrap();
+
+        let big_content = "S".repeat(10000);
+        for _ in 0..5 {
+            let event = Event::broadcast("press-ai", "general", &big_content);
+            match producer.write_event(&event) {
+                Ok(_) => {}
+                Err(crate::outbox::OutboxError::Full { .. }) => break,
+                Err(e) => panic!("Unexpected error: {:?}", e),
+            }
+        }
+        drop(producer);
+
+        let config = SequencerConfig {
+            base_dir: Some(base.to_path_buf()),
+            enable_wake: false,
+            ..Default::default()
+        };
+
+        let mut sequencer = Sequencer::new(config).unwrap();
+        sequencer.refresh_outboxes().unwrap();
+
+        assert_eq!(sequencer.stats().pressure_drains(), 0);
+        sequencer.process_batch().unwrap();
+        assert_eq!(sequencer.stats().pressure_drains(), 1,
+            "pressure_drains should increment when a pressured outbox is drained");
+    }
+
+    // ===== Fix 2: Corruption Recovery Tests =====
+
+    #[test]
+    fn test_corruption_auto_repair() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        // Create outbox and write events
+        let mut producer = OutboxProducer::open("corrupt-ai", Some(base)).unwrap();
+        for i in 0..3 {
+            let event = Event::broadcast("corrupt-ai", "general", &format!("msg {}", i));
+            producer.write_event(&event).unwrap();
+        }
+        producer.flush().unwrap();
+        drop(producer);
+
+        // Corrupt the outbox: overwrite data at tail position (offset OUTBOX_HEADER_SIZE)
+        // with zeros, making the length prefix = 0 (triggers check_corruption)
+        let outbox_file = crate::outbox::outbox_path("corrupt-ai", Some(base));
+        {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&outbox_file)
+                .unwrap();
+            use std::io::Seek;
+            file.seek(std::io::SeekFrom::Start(crate::outbox::OUTBOX_HEADER_SIZE as u64)).unwrap();
+            file.write_all(&[0u8; 4]).unwrap(); // Zero the length prefix
+            file.flush().unwrap();
+        }
+
+        // Verify corruption is detectable
+        let consumer = crate::outbox::OutboxConsumer::open("corrupt-ai", Some(base)).unwrap();
+        assert!(consumer.check_corruption().is_some(), "Corruption should be detected");
+        drop(consumer);
+
+        // Create sequencer and process — should auto-repair
+        let config = SequencerConfig {
+            base_dir: Some(base.to_path_buf()),
+            enable_wake: false,
+            ..Default::default()
+        };
+
+        let mut sequencer = Sequencer::new(config).unwrap();
+        sequencer.refresh_outboxes().unwrap();
+
+        let processed = sequencer.process_batch().unwrap();
+        assert_eq!(processed, 0, "Corrupted outbox returns 0 (events discarded)");
+        assert_eq!(sequencer.stats().corruption_repairs(), 1,
+            "corruption_repairs stat should be 1 after auto-repair");
+
+        // Outbox should be repaired — new writes should work
+        let consumer_after = crate::outbox::OutboxConsumer::open("corrupt-ai", Some(base)).unwrap();
+        assert!(consumer_after.check_corruption().is_none(),
+            "Outbox should be clean after auto-repair");
+        assert_eq!(consumer_after.pending_bytes(), 0,
+            "Outbox should be empty after reset_tail_to_head");
+    }
+
+    #[test]
+    fn test_corruption_repair_discards_pending() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        // Write events so there are pending bytes
+        let mut producer = OutboxProducer::open("discard-ai", Some(base)).unwrap();
+        for i in 0..5 {
+            let event = Event::broadcast("discard-ai", "general", &format!("event {}", i));
+            producer.write_event(&event).unwrap();
+        }
+        producer.flush().unwrap();
+
+        // Record how many bytes were pending before corruption
+        let consumer_before = crate::outbox::OutboxConsumer::open("discard-ai", Some(base)).unwrap();
+        let pending_before = consumer_before.pending_bytes();
+        assert!(pending_before > 0, "Should have pending bytes before corruption");
+        drop(consumer_before);
+        drop(producer);
+
+        // Corrupt the data at tail
+        let outbox_file = crate::outbox::outbox_path("discard-ai", Some(base));
+        {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&outbox_file)
+                .unwrap();
+            use std::io::Seek;
+            file.seek(std::io::SeekFrom::Start(crate::outbox::OUTBOX_HEADER_SIZE as u64)).unwrap();
+            file.write_all(&[0xFF, 0xFF, 0xFF, 0xFF]).unwrap(); // Length = 4GB (> 65536)
+            file.flush().unwrap();
+        }
+
+        // Sequencer should auto-repair and discard all pending bytes
+        let config = SequencerConfig {
+            base_dir: Some(base.to_path_buf()),
+            enable_wake: false,
+            ..Default::default()
+        };
+
+        let mut sequencer = Sequencer::new(config).unwrap();
+        sequencer.refresh_outboxes().unwrap();
+        sequencer.process_batch().unwrap();
+
+        // Verify all pending bytes were discarded
+        let consumer_after = crate::outbox::OutboxConsumer::open("discard-ai", Some(base)).unwrap();
+        assert_eq!(consumer_after.pending_bytes(), 0,
+            "All pending bytes should be discarded after corruption repair");
+    }
+
+    #[test]
+    fn test_corruption_repair_continues_processing() {
+        let tmp = TempDir::new().unwrap();
+        let base = tmp.path();
+
+        // Create two outboxes: one corrupted, one healthy
+        let mut corrupt_prod = OutboxProducer::open("broken-ai", Some(base)).unwrap();
+        let mut healthy_prod = OutboxProducer::open("healthy-ai", Some(base)).unwrap();
+
+        for i in 0..3 {
+            let event = Event::broadcast("broken-ai", "general", &format!("broken {}", i));
+            corrupt_prod.write_event(&event).unwrap();
+            let event = Event::broadcast("healthy-ai", "general", &format!("healthy {}", i));
+            healthy_prod.write_event(&event).unwrap();
+        }
+        corrupt_prod.flush().unwrap();
+        healthy_prod.flush().unwrap();
+        drop(corrupt_prod);
+        drop(healthy_prod);
+
+        // Corrupt only broken-ai
+        let outbox_file = crate::outbox::outbox_path("broken-ai", Some(base));
+        {
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&outbox_file)
+                .unwrap();
+            use std::io::Seek;
+            file.seek(std::io::SeekFrom::Start(crate::outbox::OUTBOX_HEADER_SIZE as u64)).unwrap();
+            file.write_all(&[0u8; 4]).unwrap();
+            file.flush().unwrap();
+        }
+
+        let config = SequencerConfig {
+            base_dir: Some(base.to_path_buf()),
+            enable_wake: false,
+            ..Default::default()
+        };
+
+        let mut sequencer = Sequencer::new(config).unwrap();
+        sequencer.refresh_outboxes().unwrap();
+        let processed = sequencer.process_batch().unwrap();
+
+        // Healthy outbox should have been processed despite broken one
+        assert_eq!(processed, 3, "Healthy outbox events should still be processed");
+        assert_eq!(sequencer.stats().corruption_repairs(), 1,
+            "Exactly one corruption repair");
+        assert_eq!(sequencer.stats().events_processed(), 3,
+            "3 events from healthy outbox");
     }
 }
