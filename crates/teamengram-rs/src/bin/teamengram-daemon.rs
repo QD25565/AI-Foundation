@@ -58,7 +58,7 @@ static WAKE_REGISTRY: Lazy<Mutex<HashMap<String, WakeCoordinator>>> = Lazy::new(
 });
 
 // BulletinBoard for hook awareness - event-driven updates
-use teamengram::shm_rs::bulletin::BulletinBoard;
+use shm_rs::bulletin::BulletinBoard;
 
 // Using our own pipe implementation (direct Windows API, not tokio's broken abstraction)
 #[cfg(windows)]

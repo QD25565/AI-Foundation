@@ -30,9 +30,6 @@
 //! - Old pages added to free list after readers finish
 //! - No write-ahead log needed!
 
-// Re-export shm-rs for bulletin board access
-pub extern crate shm_rs;
-
 pub mod page;
 pub mod shadow;
 pub mod btree;
