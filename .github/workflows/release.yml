@@ -52,6 +52,8 @@ jobs:
 
       - name: Generate manifest
         shell: pwsh
+        env:
+          PYTHONUTF8: "1"
         run: |
           $version = (Get-Content version.txt).Trim()
           python sign.py --bin-dir "staging/ai-foundation-v$version/bin"
