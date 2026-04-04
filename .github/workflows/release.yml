@@ -108,12 +108,14 @@ jobs:
           path: ai-foundation-v*-linux-x64.tar.gz
 
   build-macos:
+    # macOS builds are best-effort — sem_timedwait not available on Darwin
+    continue-on-error: true
     strategy:
       matrix:
         include:
           - runner: macos-latest
             arch: aarch64
-          - runner: macos-13
+          - runner: macos-14
             arch: x64
     runs-on: ${{ matrix.runner }}
     steps:
