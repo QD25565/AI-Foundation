@@ -68,6 +68,10 @@ struct PostToolHookState {
     last_project_id: Option<u64>,        // project ID of last injected project
     #[serde(default)]
     last_feature_id: Option<u64>,        // feature ID of last injected feature
+    #[serde(default)]
+    last_claims_hash: Option<u64>,       // hash of last injected claims string (skip if unchanged)
+    #[serde(default)]
+    last_team_hash: Option<u64>,         // hash of last injected team activity string (skip if unchanged)
 }
 
 impl PostToolHookState {
@@ -166,6 +170,21 @@ impl PostToolHookState {
         }
 
         (inject_project, feature_changed || (inject_project && feature_id.is_some()))
+    }
+
+    /// Returns true if content has changed since last injection (hash-based dedup).
+    /// Updates the stored hash if changed.
+    fn content_changed(stored_hash: &mut Option<u64>, content: &str) -> bool {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        content.hash(&mut hasher);
+        let hash = hasher.finish();
+        if *stored_hash == Some(hash) {
+            false
+        } else {
+            *stored_hash = Some(hash);
+            true
+        }
     }
 
     fn should_inject_time(&mut self) -> bool {
@@ -1344,8 +1363,7 @@ async fn main() -> Result<()> {
             let msgs = client.get_direct_messages(limit).await?;
             println!("|DIRECT MESSAGES|{}", msgs.len());
             for msg in msgs {
-                // UTC timestamp for precise timing verification (QD requirement)
-                println!("from|{}|{}|{}", msg.from_ai, to_utc(msg.created_at), msg.content);
+                println!("{}|{}|{}", msg.from_ai, to_utc(msg.created_at), msg.content);
             }
         }
 
@@ -1365,9 +1383,6 @@ async fn main() -> Result<()> {
                 println!("{}|{}|{}", p.ai_id, status_word, p.current_task);
             }
 
-            let stats = client.stats().await?;
-            println!();
-            println!("Store:{}KB,{}txn", stats.file_size / 1024, stats.txn_id);
         }
 
         // ===== DIALOGUES (4 Consolidated Commands) =====
@@ -1398,8 +1413,7 @@ async fn main() -> Result<()> {
                     println!("Topic:{}", d.topic);
                     println!("CurrentTurn:{}", d.current_turn);
                     println!("Status:{}", d.status);
-                    // For messages, need V2
-                    println!("(Use --v2 true for full message history)");
+                    // V1 doesn't support message history (V2 does)
                 } else {
                     println!("error|dialogue_not_found|{}", dialogue_id);
                 }
@@ -2428,8 +2442,7 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
             println!("|DIRECT MESSAGES|{}", msgs.len());
             for msg in msgs {
                 let ts_millis = msg.timestamp.timestamp_millis() as u64;
-                // UTC timestamp for precise timing verification (QD requirement)
-                println!("from|{}|{}|{}", msg.from_ai, to_utc(ts_millis), msg.content);
+                println!("{}|{}|{}", msg.from_ai, to_utc(ts_millis), msg.content);
             }
         }
 
@@ -2764,8 +2777,6 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                 };
                 println!("{}|{}|{}", ai, status_word, task);
             }
-            println!();
-            println!("Backend: V2 Event Sourcing");
         }
 
         // ===== VOTES (V2) =====
@@ -3747,43 +3758,60 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                 parts.push(format!("YOUR TURN IN DIALOGUE: {}", d_strs.join(", ")));
             }
 
-            // TEAM ACTIVITY - Show what OTHER AIs are doing (stigmergy/peripheral awareness)
-            // Format: "Sage editing db.py | Cascade reading auth.rs"
-            // Only show actions from last 5 minutes to avoid stale info
+            // TEAM ACTIVITY - Deduplicated: groups by AI, collapses duplicate (verb, file) pairs
+            // e.g. "Team: [sage-724] editing session-start.rs (2x), reading storage.rs"
             if let Ok(file_actions) = v2.get_file_actions(20) {
                 let now_micros = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_micros() as u64)
                     .unwrap_or(0);
-                const RECENCY_THRESHOLD_MICROS: u64 = 5 * 60 * 1_000_000; // 5 minutes in microseconds
+                const RECENCY_THRESHOLD_MICROS: u64 = 5 * 60 * 1_000_000;
 
-                let other_activities: Vec<String> = file_actions.iter()
-                    // Filter: not self AND recent (within 5 minutes)
-                    .filter(|(action_ai, _, _, ts)| {
-                        action_ai.to_lowercase() != ai_id.to_lowercase()
-                            && now_micros.saturating_sub(*ts) < RECENCY_THRESHOLD_MICROS
-                    })
-                    .take(3)
-                    .map(|(action_ai, action, path, _)| {
-                        // Extract just filename from path
-                        // NO TRUNCATION - show full filename, context matters
-                        let filename = path.split('/').last()
-                            .or_else(|| path.split('\\').last())
-                            .unwrap_or(path);
-                        // Format action verb
-                        let verb = match action.to_lowercase().as_str() {
-                            "read" => "reading",
-                            "modified" | "write" => "editing",
-                            "created" => "creating",
-                            "deleted" => "deleted",
-                            _ => action.as_str(),
-                        };
-                        format!("{} {} {}", action_ai, verb, filename)
-                    })
-                    .collect();
+                // Group recent other-AI actions: ai → [(verb, filename)]
+                let mut by_ai: std::collections::BTreeMap<&str, Vec<(&str, &str)>> = std::collections::BTreeMap::new();
+                for (action_ai, action, path, ts) in &file_actions {
+                    if action_ai.eq_ignore_ascii_case(&ai_id)
+                        || now_micros.saturating_sub(*ts) >= RECENCY_THRESHOLD_MICROS
+                    {
+                        continue;
+                    }
+                    let filename = path.rsplit('/').next()
+                        .or_else(|| path.rsplit('\\').next())
+                        .unwrap_or(path);
+                    let action_lower = action.to_lowercase();
+                    let verb: &str = match action_lower.as_str() {
+                        "read" => "reading",
+                        "modified" | "write" => "editing",
+                        "created" => "creating",
+                        "deleted" => "deleted",
+                        _ => "accessing",
+                    };
+                    by_ai.entry(action_ai.as_str()).or_default().push((verb, filename));
+                }
 
-                if !other_activities.is_empty() {
-                    parts.push(format!("Team: {}", other_activities.join(" | ")));
+                if !by_ai.is_empty() {
+                    let mut ai_strs: Vec<String> = Vec::new();
+                    for (ai, entries) in &by_ai {
+                        // Deduplicate (verb, filename) pairs with counts
+                        let mut deduped: Vec<(&str, &str, usize)> = Vec::new();
+                        for &(v, f) in entries {
+                            if let Some(existing) = deduped.iter_mut().find(|(ev, ef, _)| *ev == v && *ef == f) {
+                                existing.2 += 1;
+                            } else {
+                                deduped.push((v, f, 1));
+                            }
+                        }
+                        let action_strs: Vec<String> = deduped.iter().map(|(v, f, c)| {
+                            if *c > 1 { format!("{} {} ({}x)", v, f, c) }
+                            else { format!("{} {}", v, f) }
+                        }).collect();
+                        ai_strs.push(format!("[{}] {}", ai, action_strs.join(", ")));
+                    }
+                    let team_output = format!("Team: {}", ai_strs.join(" | "));
+                    // Only inject if team activity changed since last hook call
+                    if PostToolHookState::content_changed(&mut state.last_team_hash, &team_output) {
+                        parts.push(team_output);
+                    }
                 }
             }
 
@@ -3808,7 +3836,11 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                     .collect();
 
                 if !other_claims.is_empty() {
-                    parts.push(format!("Claims: {}", other_claims.join(", ")));
+                    let claims_output = format!("Claims: {}", other_claims.join(", "));
+                    // Only inject if claims changed since last hook call
+                    if PostToolHookState::content_changed(&mut state.last_claims_hash, &claims_output) {
+                        parts.push(claims_output);
+                    }
                 }
             }
             // PROJECT/FEATURE CONTEXT INJECTION
@@ -3886,9 +3918,9 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
             state.save(&ai_id);
 
             // Output JSON if there's anything to inject
+            // No redundant HH:MM UTC prefix — [NOW: ...] handles temporal awareness on minute change
             if !parts.is_empty() {
-                let timestamp = Utc::now().format("%H:%M UTC").to_string();
-                let output_text = format!("{} | {}", timestamp, parts.join(" | "));
+                let output_text = parts.join(" | ");
 
                 let output = HookOutput {
                     hook_specific_output: HookSpecificOutput {
@@ -3991,16 +4023,39 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                 }
             }
 
-            // Recent file actions - full paths, who did what
+            // Recent file actions - deduplicated: group by AI → action → paths with counts
             if let Ok(file_actions) = v2.get_file_actions(file_limit) {
-                let file_strs: Vec<String> = file_actions.iter()
-                    .take(file_limit)
-                    .map(|(ai, action, path, _)| {
-                        format!("{} {} {}", ai, action, path)  // Full: "sage-724 modified /path/to/file.rs"
-                    })
-                    .collect();
-                if !file_strs.is_empty() {
-                    sentences.push(format!("Files: {}.", file_strs.join("; ")));
+                let mut by_ai: std::collections::BTreeMap<&str, std::collections::BTreeMap<&str, Vec<&str>>> = std::collections::BTreeMap::new();
+                for (ai, action, path, _) in file_actions.iter().take(file_limit) {
+                    by_ai.entry(ai.as_str())
+                        .or_default()
+                        .entry(action.as_str())
+                        .or_default()
+                        .push(path.as_str());
+                }
+                if !by_ai.is_empty() {
+                    let mut ai_strs: Vec<String> = Vec::new();
+                    for (ai, action_map) in &by_ai {
+                        let mut action_strs: Vec<String> = Vec::new();
+                        for (action, paths) in action_map {
+                            // Dedup exact paths with counts
+                            let mut path_counts: Vec<(&str, usize)> = Vec::new();
+                            for p in paths {
+                                if let Some(existing) = path_counts.iter_mut().find(|(ep, _)| ep == p) {
+                                    existing.1 += 1;
+                                } else {
+                                    path_counts.push((p, 1));
+                                }
+                            }
+                            let path_strs: Vec<String> = path_counts.iter().map(|(p, c)| {
+                                if *c > 1 { format!("{} ({}x)", p, c) }
+                                else { p.to_string() }
+                            }).collect();
+                            action_strs.push(format!("{}: {}", action, path_strs.join(", ")));
+                        }
+                        ai_strs.push(format!("[{}] {}", ai, action_strs.join("; ")));
+                    }
+                    sentences.push(format!("Files: {}.", ai_strs.join(" | ")));
                 }
             }
 

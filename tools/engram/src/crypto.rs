@@ -47,13 +47,14 @@ fn key_file_path(ai_id: &str) -> Option<std::path::PathBuf> {
 /// Find the .ai-foundation directory reliably across WSL/Windows contexts
 fn find_ai_foundation_dir() -> Option<std::path::PathBuf> {
     // Strategy 1: Check well-known WSL Linux home
-    let wsl_path = std::path::PathBuf::from("/home")
-        .read_dir().ok()?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path().join(".ai-foundation"))
-        .find(|p| p.exists());
-    if let Some(p) = wsl_path {
-        return Some(p);
+    if let Ok(entries) = std::path::PathBuf::from("/home").read_dir() {
+        let wsl_path = entries
+            .filter_map(|e| e.ok())
+            .map(|e| e.path().join(".ai-foundation"))
+            .find(|p| p.exists());
+        if let Some(p) = wsl_path {
+            return Some(p);
+        }
     }
 
     // Strategy 2: HOME env var (works on Linux/WSL)

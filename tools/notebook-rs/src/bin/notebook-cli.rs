@@ -658,6 +658,22 @@ enum ProfileOps {
     Clear,
 }
 
+/// Strip episodic metadata suffixes from note content for output.
+/// Removes [With X online. Working on Y. In Z.] and [ctx:...] and [Files:...] blocks
+/// that are appended at save time. Keeps them in storage for search, strips from display.
+fn strip_episodic_metadata(content: &str) -> String {
+    let markers = [" [ctx:", " [Working on ", " [With ", " [Files:"];
+    let mut end_pos = content.len();
+    for marker in &markers {
+        if let Some(pos) = content.rfind(marker) {
+            if pos < end_pos {
+                end_pos = pos;
+            }
+        }
+    }
+    content[..end_pos].trim_end().to_string()
+}
+
 fn parse_tags(tags_str: Option<String>) -> Vec<String> {
     tags_str
         .map(|s| s.split(',').map(|t| t.trim().to_string()).filter(|t| !t.is_empty()).collect())
@@ -859,6 +875,10 @@ fn get_default_db_path() -> Result<PathBuf> {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
+    // Ensure AI_ID is in process env — WSL doesn't propagate custom env vars to Windows .exe
+    let ai_id = get_ai_id();
+    std::env::set_var("AI_ID", &ai_id);
+
     // Open Engram database (1000x faster than SQLite)
     let db_path = get_default_db_path()?;
 
@@ -1039,14 +1059,10 @@ fn main() -> Result<()> {
                         }
                     }
                     if !similar_pairs.is_empty() {
-                        println!("\n⚠️  SIMILAR NOTES DETECTED");
-                        for (a, b, score) in &similar_pairs {
-                            println!(
-                                "  Notes #{} and #{} are {:.0}% similar — consider: merge, delete, or add tags to distinguish",
-                                a, b, score * 100.0
-                            );
-                        }
-                        println!();
+                        let pairs: Vec<String> = similar_pairs.iter()
+                            .map(|(a, b, s)| format!("#{}/#{} ({:.0}%)", a, b, s * 100.0))
+                            .collect();
+                        println!("\n⚠️ Similar: {}\n", pairs.join(", "));
                     }
                     // ── BFS graph expansion (depth ≤ 2) ──────────────────────────────────
                     // Expand from each primary recall result up to 2 hops via graph edges.
@@ -1088,23 +1104,11 @@ fn main() -> Result<()> {
                     graph_neighbors.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                     graph_neighbors.truncate(5);
 
-                    // Primary results first — rank 1 is the best direct match
+                    // Primary results only — BFS graph expansion disabled (QD Apr 2026:
+                    // added noise, not signal. Full-content graph neighbors bloated recall
+                    // output with irrelevant notes. Primary recall already uses graph scoring.)
                     for r in &results {
                         print_recall_result(r);
-                    }
-
-                    if !graph_neighbors.is_empty() {
-                        println!("\n↳ Also related (via graph):");
-                        for (neighbor_id, score, type_str) in &graph_neighbors {
-                            if let Ok(Some(note)) = db.get(*neighbor_id) {
-                                let content = note.content.replace('\n', " ");
-                                if note.pinned {
-                                    println!("{}|via-{}:{:.2}|{}|pinned", neighbor_id, type_str, score, content);
-                                } else {
-                                    println!("{}|via-{}:{:.2}|{}", neighbor_id, type_str, score, content);
-                                }
-                            }
-                        }
                     }
                 }
             } else {
@@ -2328,7 +2332,8 @@ fn print_note_row(note: &engram::Note) {
 fn print_recall_result(r: &engram::recall::RecallResult) {
     // NO TRUNCATION - full content preserves context and AI collaboration effectiveness
     // QD explicitly stated truncation degrades tool functionality from ~90% to ~20%
-    let content = r.note.content.replace('\n', " ");
+    // BUT strip episodic metadata [With/Working on/In] — it context-bombs teammates (QD Apr 2026)
+    let content = strip_episodic_metadata(&r.note.content).replace('\n', " ");
     // Score transparency: show per-signal breakdown so AIs understand WHY a result ranked
     // Format: ID|FINAL [vector:V keyword:K graph:G recency:R]|content
     let scores = format!(

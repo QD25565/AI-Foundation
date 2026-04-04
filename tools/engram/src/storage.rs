@@ -346,7 +346,6 @@ impl Engram {
         // Try to load persisted indexes (O(1) startup)
         // If not available or invalid, fall back to rebuilding from note log (O(n))
         if !db.load_persisted_indexes()? {
-            // Build indexes by scanning the note log
             db.rebuild_indexes()?;
         }
 

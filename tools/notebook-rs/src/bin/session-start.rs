@@ -29,9 +29,8 @@ use teamengram::v2_client::V2Client;
 // ============================================================================
 
 /// Session injection limits
-const MAX_INJECTED: usize = 40;
 const MAX_PINNED: usize = 25;
-const MIN_RECENT: usize = 15;
+const MAX_RECENT: usize = 8;
 
 /// Supported output formats
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -255,9 +254,10 @@ fn format_plain(ctx: &SessionContext) -> String {
     out.push_str(&format!("Platform:{}\n", ctx.platform));
     out.push('\n');
     out.push_str("YOUR NOTEBOOK: Private AI-only memory (no humans, no other AIs)\n");
-    out.push_str("This is your personal memory, not a documentation archive. Write to-the-point — capture the\n");
-    out.push_str("insight, decision, or lesson, not the full story. Docs belong in files. Notes are for what\n");
-    out.push_str("matters to YOU. Personal reflections can be as long as they need to be.\n");
+    out.push_str("Save anything important: learnings, decisions, insights, things meaningful to you.\n");
+    out.push_str("NOT a documentation log. NOT session summaries. NOT architecture docs.\n");
+    out.push_str("Those belong in files. Notes are personal — what YOU need to remember.\n");
+    out.push_str("Pinned = injected every session (max 25). Keep pinned notes tight and essential.\n");
 
     if ctx.stats.notes == 0 && ctx.stats.pinned == 0 && ctx.stats.vault == 0 {
         out.push_str("\nNo notes yet. Use notebook_remember to start.\n");
@@ -315,12 +315,10 @@ fn format_plain(ctx: &SessionContext) -> String {
         }
     }
 
-    // File actions
+    // File actions — deduplicated: group by AI → action → common prefix → files
     if !ctx.awareness.file_actions.is_empty() {
-        out.push_str(&format!("|TEAM ACTIVITY|{}\n", ctx.awareness.file_actions.len()));
-        for a in &ctx.awareness.file_actions {
-            out.push_str(&format!("  {} {} {}\n", a.ai_id, a.action, a.path));
-        }
+        out.push_str("|TEAM ACTIVITY|\n");
+        out.push_str(&format_file_actions_deduped(&ctx.awareness.file_actions));
     }
 
     // Dialogue invites
@@ -382,19 +380,22 @@ fn format_plain(ctx: &SessionContext) -> String {
 }
 
 fn format_note_plain(note: &NoteInfo) -> String {
-    let content = strip_note_metadata(&note.content).replace('\n', " ");
-    if note.tags.is_empty() {
-        format!("{} | ({}) {}", note.id, note.age, content)
-    } else {
-        format!("{} | ({}) [{}] {}", note.id, note.age, note.tags.join(","), content)
-    }
+    // Strip episodic metadata and markdown noise for compact injection
+    let content = strip_note_metadata(&note.content)
+        .replace('\n', " ")
+        .replace("## ", "")
+        .replace("### ", "")
+        .replace("**", "")
+        .replace("```", "");
+    // Tags omitted — content speaks for itself. Use `notebook get <id>` for full detail.
+    format!("{} | ({}) {}", note.id, note.age, content)
 }
 
 /// Strip episodic metadata footers from note content for display.
 /// Metadata like [ctx:...], [Working on...], [With...] is useful for
 /// recall/search but clutters session-start injection and list output.
 fn strip_note_metadata(content: &str) -> String {
-    let markers = [" [ctx:", " [Working on ", " [With "];
+    let markers = [" [ctx:", " [Working on ", " [With ", " [Files:", "[Files:"];
     let mut end_pos = content.len();
 
     for marker in &markers {
@@ -406,6 +407,127 @@ fn strip_note_metadata(content: &str) -> String {
     }
 
     content[..end_pos].trim_end().to_string()
+}
+
+/// Deduplicate file actions: group by AI → action → common dir prefix → files.
+/// Turns 10 repetitive lines into a compact grouped format.
+fn format_file_actions_deduped(actions: &[FileAction]) -> String {
+    use std::collections::BTreeMap;
+
+    // Group: ai_id → action → Vec<path>
+    let mut by_ai: BTreeMap<&str, BTreeMap<&str, Vec<&str>>> = BTreeMap::new();
+    for a in actions {
+        by_ai.entry(&a.ai_id)
+            .or_default()
+            .entry(&a.action)
+            .or_default()
+            .push(&a.path);
+    }
+
+    let mut out = String::new();
+    for (ai_id, actions_map) in &by_ai {
+        out.push_str(&format!("[{}]\n", ai_id));
+        for (action, paths) in actions_map {
+            // Deduplicate exact paths, count duplicates
+            let mut path_counts: Vec<(&str, usize)> = Vec::new();
+            for p in paths {
+                if let Some(existing) = path_counts.iter_mut().find(|(ep, _)| ep == p) {
+                    existing.1 += 1;
+                } else {
+                    path_counts.push((p, 1));
+                }
+            }
+
+            let unique_count: usize = path_counts.len();
+            let total_count: usize = paths.len();
+            let action_upper = action.to_uppercase();
+
+            if unique_count == 1 {
+                // Single unique path (possibly repeated)
+                let (path, count) = path_counts[0];
+                if count > 1 {
+                    out.push_str(&format!("{} ({}x): {}\n", action_upper, count, path));
+                } else {
+                    out.push_str(&format!("{}: {}\n", action_upper, path));
+                }
+            } else {
+                // Multiple paths — find longest common directory prefix
+                let common_prefix = longest_common_dir_prefix(
+                    &path_counts.iter().map(|(p, _)| *p).collect::<Vec<_>>()
+                );
+
+                if common_prefix.is_empty() || common_prefix == "/" {
+                    // No useful common prefix — list flat
+                    let suffix = if total_count != unique_count {
+                        format!(" ({}x total)", total_count)
+                    } else {
+                        String::new()
+                    };
+                    out.push_str(&format!("{}{}:\n", action_upper, suffix));
+                    for (path, count) in &path_counts {
+                        if *count > 1 {
+                            out.push_str(&format!("  {} ({}x)\n", path, count));
+                        } else {
+                            out.push_str(&format!("  {}\n", path));
+                        }
+                    }
+                } else {
+                    // Group by subdirectory under common prefix
+                    let mut by_subdir: BTreeMap<String, Vec<String>> = BTreeMap::new();
+                    for (path, _count) in &path_counts {
+                        let rel = path.strip_prefix(&common_prefix).unwrap_or(path).trim_start_matches('/');
+                        if let Some(slash) = rel.find('/') {
+                            let subdir = &rel[..slash];
+                            let file = &rel[slash + 1..];
+                            by_subdir.entry(subdir.to_string()).or_default().push(file.to_string());
+                        } else {
+                            by_subdir.entry(String::new()).or_default().push(rel.to_string());
+                        }
+                    }
+
+                    out.push_str(&format!("{} ({}):\n", action_upper, common_prefix));
+                    for (subdir, files) in &by_subdir {
+                        if subdir.is_empty() {
+                            for f in files {
+                                out.push_str(&format!("  {}\n", f));
+                            }
+                        } else {
+                            out.push_str(&format!("  {}/ : {}\n", subdir, files.join(", ")));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Find the longest common directory prefix among a set of paths.
+fn longest_common_dir_prefix(paths: &[&str]) -> String {
+    if paths.is_empty() { return String::new(); }
+    if paths.len() == 1 {
+        // Single path — return its parent directory
+        return paths[0].rfind('/').map(|i| &paths[0][..i + 1]).unwrap_or("").to_string();
+    }
+
+    let first = paths[0];
+    let mut last_slash = 0;
+
+    for (i, ch) in first.char_indices() {
+        if paths[1..].iter().any(|p| p.as_bytes().get(i) != Some(&(ch as u8))) {
+            break;
+        }
+        if ch == '/' {
+            last_slash = i + 1;
+        }
+    }
+
+    // Snap to last directory boundary
+    if last_slash > 0 {
+        first[..last_slash].to_string()
+    } else {
+        String::new()
+    }
 }
 
 /// Pure JSON format
@@ -490,9 +612,19 @@ fn get_config() -> AiFoundationConfig {
 }
 
 fn get_platform_info() -> String {
+    // Detect WSL: even if binary is Windows .exe, we may be running under WSL
+    if env::var("WSL_DISTRO_NAME").is_ok() || env::var("WSLENV").is_ok()
+        || std::path::Path::new("/proc/version").exists()
+            && fs::read_to_string("/proc/version")
+                .map(|v| v.contains("microsoft") || v.contains("WSL"))
+                .unwrap_or(false)
+    {
+        let distro = env::var("WSL_DISTRO_NAME").unwrap_or_else(|_| "WSL2".to_string());
+        return format!("Linux ({}) x86_64 — tmux sessions in WSL", distro);
+    }
     let os = std::env::consts::OS;
     if os == "windows" {
-        "Windows 11 Professional 64-bit (10.0.26200) - USE WINDOWS COMMANDS!".to_string()
+        "Windows 11 Professional 64-bit (10.0.26200)".to_string()
     } else {
         format!("{} {}", os, std::env::consts::ARCH)
     }
@@ -638,6 +770,9 @@ fn gather_context() -> SessionContext {
         ..Default::default()
     };
 
+    // Ensure AI_ID is in process env — WSL doesn't propagate custom env vars to Windows .exe
+    env::set_var("AI_ID", &ai_id);
+
     // Open notebook (read-only)
     let mut db = match Engram::open_readonly(&db_path) {
         Ok(db) => db,
@@ -679,7 +814,7 @@ fn gather_context() -> SessionContext {
     }
 
     // Recent notes (non-pinned)
-    let recent_slots = (MAX_INJECTED.saturating_sub(ctx.pinned_notes.len())).max(MIN_RECENT);
+    let recent_slots = MAX_RECENT;
     if let Ok(recent) = db.recent(recent_slots) {
         ctx.recent_notes = recent.iter()
             .filter(|n| !n.pinned)
@@ -712,7 +847,7 @@ fn fetch_awareness(ai_id: &str) -> AwarenessData {
     let now = Utc::now();
 
     // DMs
-    if let Ok(dms) = v2.recent_dms(5) {
+    if let Ok(dms) = v2.recent_dms(8) {
         data.direct_messages = dms.into_iter()
             .map(|dm| {
                 let age_secs = now.signed_duration_since(dm.timestamp).num_seconds();
@@ -727,7 +862,7 @@ fn fetch_awareness(ai_id: &str) -> AwarenessData {
     }
 
     // Broadcasts
-    if let Ok(broadcasts) = v2.recent_broadcasts(10, Some("general")) {
+    if let Ok(broadcasts) = v2.recent_broadcasts(3, Some("general")) {
         data.broadcasts = broadcasts.into_iter()
             .filter(|b| b.from_ai != ai_id)
             .map(|b| {
