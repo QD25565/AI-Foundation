@@ -39,8 +39,8 @@ jobs:
           $outDir = "staging/ai-foundation-v$version/bin"
           New-Item -ItemType Directory -Path $outDir -Force
           $binaries = @(
-            "notebook-cli", "teambook", "session-start",
-            "v2-daemon", "ai-foundation-mcp", "forge", "forge-local"
+            "notebook-cli", "teambook-engram", "session-start",
+            "v2-daemon", "teamengram-daemon", "ai-foundation-mcp", "forge", "forge-local"
           )
           foreach ($bin in $binaries) {
             $src = "target/release/$bin.exe"
@@ -51,7 +51,10 @@ jobs:
           }
 
       - name: Generate manifest
-        run: python sign.py --bin-dir staging/ai-foundation-v*/bin
+        shell: pwsh
+        run: |
+          $version = (Get-Content version.txt).Trim()
+          python sign.py --bin-dir "staging/ai-foundation-v$version/bin"
 
       - name: Create archive
         shell: pwsh
