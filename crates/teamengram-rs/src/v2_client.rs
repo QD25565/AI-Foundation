@@ -382,16 +382,48 @@ impl V2Client {
     // ========== FILE CLAIMS ==========
 
     /// Claim a file for exclusive work
+    ///
+    /// Pre-checks for conflicting claims before emitting the event.
+    /// Returns error if another AI holds an active (non-expired) claim.
+    /// Same-AI reclaims are allowed (extends/updates the existing claim).
     pub fn claim_file(&mut self, path: &str, duration_secs: u32, working_on: &str) -> V2Result<u64> {
+        // Sync view to get current claim state before checking
+        self.sync()?;
+
+        // Pre-check: reject if another AI holds an active claim on this file
+        if let Some(existing) = self.view.check_claim(path) {
+            if existing.holder != self.ai_id {
+                return Err(V2Error::InvalidState(
+                    format!("already_claimed|{}|{}|{}", existing.holder, existing.working_on, path)
+                ));
+            }
+        }
+
         let event = Event::file_claim(&self.ai_id, path, duration_secs, working_on);
-        let timestamp = event.header.timestamp; // Use as claim ID
+        let timestamp = event.header.timestamp;
         self.outbox.write_event(&event)
             .map_err(|e| V2Error::Outbox(e.to_string()))?;
         Ok(timestamp)
     }
 
     /// Release a file claim
+    ///
+    /// Pre-checks ownership before emitting the release event.
+    /// Returns error if another AI holds the claim (not_owner).
+    /// Releasing an unclaimed file is a no-op (idempotent).
     pub fn release_file(&mut self, path: &str) -> V2Result<u64> {
+        // Sync view to get current claim state
+        self.sync()?;
+
+        // Pre-check: only the holder can release their own claim
+        if let Some(existing) = self.view.check_claim(path) {
+            if existing.holder != self.ai_id {
+                return Err(V2Error::InvalidState(
+                    format!("not_owner|{}|{}", existing.holder, path)
+                ));
+            }
+        }
+
         let event = Event::file_release(&self.ai_id, path);
         let timestamp = event.header.timestamp;
         self.outbox.write_event(&event)
@@ -412,11 +444,14 @@ impl V2Client {
     }
 
     /// Check if a specific file is claimed
+    ///
+    /// Uses ViewEngine's check_claim which handles path canonicalization
+    /// internally, ensuring consistent matching regardless of input path form.
     pub fn check_claim(&mut self, path: &str) -> V2Result<Option<(String, u64, u32, String)>> {
-        let claims = self.get_claims()?;
-        Ok(claims.into_iter()
-            .find(|(p, _, _, _, _)| p == path)
-            .map(|(_, ai, ts, duration, working_on)| (ai, ts, duration, working_on)))
+        self.sync()?;
+        Ok(self.view.check_claim(path).map(|c| {
+            (c.holder.clone(), c.claimed_at, c.duration_seconds, c.working_on.clone())
+        }))
     }
 
     // ========== TASKS ==========

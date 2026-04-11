@@ -376,7 +376,10 @@ impl TeamEngram {
         // Try to load from meta key
         let persisted_id = if let Some(value) = tree.get(b"meta:next_id")? {
             if value.len() >= 8 {
-                u64::from_le_bytes(value[..8].try_into().unwrap())
+                u64::from_le_bytes(
+                    value[..8].try_into()
+                        .map_err(|e| anyhow::anyhow!("corrupted next_id: {e}"))?
+                )
             } else {
                 0
             }

@@ -691,7 +691,12 @@ impl OutboxConsumer {
         }
 
         // Parse header
-        let header_bytes: [u8; 64] = raw[..64].try_into().unwrap();
+        let header_bytes: [u8; 64] = match raw[..64].try_into() {
+            Ok(h) => h,
+            Err(_) => return Some(Err(OutboxError::Deserialization(
+                "Header slice conversion failed".to_string()
+            ))),
+        };
         let header = EventHeader::from_bytes(&header_bytes);
 
         // Parse payload (auto-decompress if FLAG_COMPRESSED is set)
@@ -839,7 +844,16 @@ impl OutboxConsumer {
 
             // Parse event
             if event_data.len() >= 64 {
-                let header_bytes: [u8; 64] = event_data[..64].try_into().unwrap();
+                let header_bytes: [u8; 64] = match event_data[..64].try_into() {
+                    Ok(h) => h,
+                    Err(_) => {
+                        events.push(Err(OutboxError::Deserialization(
+                            "Header slice conversion failed".to_string()
+                        )));
+                        pos += 4 + len;
+                        continue;
+                    }
+                };
                 let header = EventHeader::from_bytes(&header_bytes);
                 let payload_bytes = &event_data[64..];
                 match EventPayload::from_bytes_with_flags(payload_bytes, header.flags) {

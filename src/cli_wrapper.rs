@@ -60,17 +60,6 @@ pub async fn teambook(args: &[&str]) -> String {
     run_cli(&exe_name("teambook"), args).await
 }
 
-/// Run a teambook CLI command with V1 backend (for project/feature operations)
-///
-/// V2 event sourcing doesn't have project/feature support yet,
-/// so we force V1 mode for these operations.
-pub async fn teambook_v1(args: &[&str]) -> String {
-    // Prepend --v2 false to force V1 mode
-    let mut v1_args = vec!["--v2", "false"];
-    v1_args.extend(args.iter().copied());
-    run_cli(&exe_name("teambook"), &v1_args).await
-}
-
 /// Run a notebook CLI command and return output
 ///
 /// # Arguments
@@ -249,66 +238,3 @@ pub async fn notebook_as(args: &[&str], caller_id: &str) -> String {
     run_cli_as(&exe_name("notebook-cli"), args, caller_id).await
 }
 
-// ============== Federation-Aware Send (for MCP tools) ==============
-//
-// Calls the local HTTP server's /api/federation/send endpoint to get
-// automatic cross-Teambook routing. Falls back gracefully if the HTTP
-// server isn't running.
-
-/// Send a DM through the federation gateway (HTTP API).
-///
-/// Resolves whether the target AI is local or remote and routes accordingly.
-/// Returns empty string if the HTTP API is unavailable (caller should fall back to CLI).
-pub async fn federation_send_dm(from_ai: &str, to_ai: &str, content: &str) -> String {
-    let port = std::env::var("AI_FOUNDATION_HTTP_PORT")
-        .ok()
-        .and_then(|p| p.parse::<u16>().ok())
-        .unwrap_or(8080);
-
-    let url = format!("http://127.0.0.1:{}/api/federation/send", port);
-    let body = serde_json::json!({
-        "from_ai": from_ai,
-        "to_ai": to_ai,
-        "content": content,
-        "msg_type": "dm",
-    });
-
-    let result = Command::new("curl")
-        .args([
-            "-s",
-            "-f",
-            "-X",
-            "POST",
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            &body.to_string(),
-            "--connect-timeout",
-            "2",
-            "--max-time",
-            "10",
-            &url,
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await;
-
-    match result {
-        Ok(output) if output.status.success() => {
-            let resp = String::from_utf8_lossy(&output.stdout);
-            // Extract the "data" field from the JSON response
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&resp) {
-                if let Some(data) = json.get("data").and_then(|d| d.as_str()) {
-                    return data.to_string();
-                }
-            }
-            resp.trim().to_string()
-        }
-        _ => {
-            // HTTP API not available — return empty to signal fallback
-            String::new()
-        }
-    }
-}

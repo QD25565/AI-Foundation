@@ -2383,7 +2383,9 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("V2 client error: {}", e))?;
 
     // Sync view with event log to get latest state
-    let _ = v2.sync();
+    if let Err(e) = v2.sync() {
+        eprintln!("warn: v2 sync failed (stale state): {}", e);
+    }
 
     match command {
         // ===== CORE MESSAGING =====
@@ -3125,7 +3127,9 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                     println!("Unread DMs: {}", dm_count);
                     for dm in &unread_dms {
                         println!("  {}|{}", dm.from_ai, dm.content);
-                        let _ = v2.emit_dm_read(dm.id);
+                        if let Err(e) = v2.emit_dm_read(dm.id) {
+                            eprintln!("warn: dm read receipt failed: {}", e);
+                        }
                     }
                 }
                 if !pending_invites.is_empty() {
@@ -3148,7 +3152,9 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
 
             // Enter standby
             println!("standby|{}|timeout={}s", ai_id, timeout);
-            let _ = v2.update_presence("standby", None);
+            if let Err(e) = v2.update_presence("standby", None) {
+                eprintln!("warn: presence update to standby failed: {}", e);
+            }
 
             let coordinator = WakeCoordinator::new(ai_id)
                 .map_err(|e| anyhow::anyhow!("Failed to create wake coordinator: {}", e))?;
@@ -3168,13 +3174,17 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
             let wake_result = coordinator.wait_timeout(timeout_duration);
 
             // Update presence immediately
-            let _ = v2.update_presence("active", None);
+            if let Err(e) = v2.update_presence("active", None) {
+                eprintln!("warn: presence update to active failed: {}", e);
+            }
 
             if wake_result.is_none() {
                 println!("standby_timeout|{}", ai_id);
             } else {
                 // Sync the view to pick up events that arrived while sleeping
-                let _ = v2.sync();
+                if let Err(e) = v2.sync() {
+                    eprintln!("warn: v2 sync after standby wake failed: {}", e);
+                }
 
                 // Only report NEW items (not in the pre-standby snapshot)
                 let new_dms: Vec<_> = v2.get_unread_dms()
@@ -3209,7 +3219,9 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                         println!("Unread DMs: {}", new_dm_count);
                         for dm in &new_dms {
                             println!("  {}|{}", dm.from_ai, dm.content);
-                            let _ = v2.emit_dm_read(dm.id);
+                            if let Err(e) = v2.emit_dm_read(dm.id) {
+                                eprintln!("warn: dm read receipt failed: {}", e);
+                            }
                         }
                     }
                     if !new_invites.is_empty() {
@@ -3561,7 +3573,9 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
         Commands::HookPostToolUse => {
             // Read JSON from stdin
             let mut input = String::new();
-            let _ = io::stdin().read_to_string(&mut input);
+            if let Err(e) = io::stdin().read_to_string(&mut input) {
+                eprintln!("warn: failed to read hook stdin: {}", e);
+            }
 
             let hook_input: HookInput = serde_json::from_str(&input).unwrap_or(HookInput {
                 tool_name: None,
@@ -3593,8 +3607,9 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
             if let Some(action_type) = file_action_type(&tool_name) {
                 if let Some(input) = &hook_input.tool_input {
                     if let Some(file_path) = input.get("file_path").and_then(|v| v.as_str()) {
-                        // Log via V2 - fire and forget
-                        let _ = v2.log_file_action(action_type, file_path);
+                        if let Err(e) = v2.log_file_action(action_type, file_path) {
+                            eprintln!("warn: log_file_action failed: {}", e);
+                        }
                     }
                 }
             }
@@ -3647,7 +3662,9 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
             };
 
             if let Some(detail) = presence_detail {
-                let _ = v2.update_presence("active", Some(&detail));
+                if let Err(e) = v2.update_presence("active", Some(&detail)) {
+                    eprintln!("warn: presence update failed: {}", e);
+                }
             }
 
             // Auto-claim files on Edit/Write (zero-cognition enrichment)
@@ -3664,7 +3681,9 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                             if claimer.to_lowercase() == ai_id.to_lowercase() {
                                 // Self-claimed: refresh with 5-min auto-claim TTL
                                 let context = build_working_on_context(&mut v2, file_path);
-                                let _ = v2.claim_file(file_path, 300, &context);
+                                if let Err(e) = v2.claim_file(file_path, 300, &context) {
+                                    eprintln!("warn: claim refresh failed: {}", e);
+                                }
                             } else {
                                 // Another AI owns this file — inject prominent warning
                                 let now_micros = std::time::SystemTime::now()
@@ -3690,7 +3709,9 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                         Ok(None) => {
                             // Unclaimed: auto-claim with 5-min TTL
                             let context = build_working_on_context(&mut v2, file_path);
-                            let _ = v2.claim_file(file_path, 300, &context);
+                            if let Err(e) = v2.claim_file(file_path, 300, &context) {
+                                eprintln!("warn: auto-claim failed: {}", e);
+                            }
                         }
                         Err(_) => {} // Claim check failed, don't block the hook
                     }
@@ -3724,7 +3745,9 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                 let dm_strs: Vec<String> = new_dms.iter().take(5).map(|dm| {
                     state.mark_dm(dm.id as u64);
                     // Event-sourced: persists read state across CLI invocations
-                    let _ = v2.emit_dm_read(dm.id as u64);
+                    if let Err(e) = v2.emit_dm_read(dm.id as u64) {
+                        eprintln!("warn: dm read receipt failed: {}", e);
+                    }
                     format!("{}:\"{}\"", dm.from_ai, &dm.content)
                 }).collect();
                 parts.push(format!("Your DMs: {}", dm_strs.join(", ")));
