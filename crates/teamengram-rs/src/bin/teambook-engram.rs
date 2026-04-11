@@ -1633,8 +1633,12 @@ async fn main() -> Result<()> {
         }
 
         Commands::CheckFile { path } => {
-            if let Some(claimer) = client.is_file_claimed(&path).await? {
-                println!("claimed|{}|{}", claimer, path);
+            if let Some((claimer, working_on)) = client.is_file_claimed(&path).await? {
+                if working_on.is_empty() {
+                    println!("claimed|{}|{}", claimer, path);
+                } else {
+                    println!("claimed|{}|{}|{}", claimer, path, working_on);
+                }
             } else {
                 println!("unclaimed|{}", path);
             }

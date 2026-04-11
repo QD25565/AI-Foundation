@@ -510,12 +510,14 @@ impl TeamEngramClient {
     }
 
     /// Check if file is claimed
-    pub async fn is_file_claimed(&mut self, path: &str) -> Result<Option<String>> {
+    pub async fn is_file_claimed(&mut self, path: &str) -> Result<Option<(String, String)>> {
         let result = self.call("check_file_claim", json!({ "path": path })).await?;
         if result.is_null() {
             Ok(None)
         } else {
-            Ok(Some(result["claimer"].as_str().unwrap_or("unknown").to_string()))
+            let claimer = result["claimer"].as_str().unwrap_or("unknown").to_string();
+            let working_on = result["working_on"].as_str().unwrap_or("").to_string();
+            Ok(Some((claimer, working_on)))
         }
     }
 

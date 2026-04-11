@@ -1,9 +1,9 @@
 //! AI Foundation MCP Integration Layer - Thin CLI Wrapper
 //! All commands call CLI executables via subprocess.
 //!
-//! TOOL COUNT: 28
+//! TOOL COUNT: 30
 //! - Notebook: 8  (remember, recall, list, get, pin, delete, update, tags)
-//! - Teambook: 5  (broadcast, dm, read, status, claims)
+//! - Teambook: 7  (broadcast, dm, read, status, claims, claim_file, release_file)
 //! - Tasks:    4  (task_create, task_update, task_get, task_list)
 //! - Dialogues:4  (dialogue_start, dialogue_respond, dialogue_list, dialogue_end)
 //! - Rooms:    2  (room_broadcast, room)
@@ -109,6 +109,22 @@ pub struct TeambookReadInput {
 pub struct TeambookClaimsInput {
     /// File path to check. Omit to list all currently claimed files.
     pub path: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct TeambookClaimFileInput {
+    /// Absolute file path to claim
+    pub path: String,
+    /// What you're working on (e.g. "editing optimizer.ax")
+    pub working_on: String,
+    /// Duration in minutes (default: 30)
+    pub duration: Option<u32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct TeambookReleaseFileInput {
+    /// Absolute file path to release
+    pub path: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -400,6 +416,17 @@ impl AiFoundationServer {
             Some(ref p) => cli_wrapper::teambook(&["check-file", p]).await,
             None => cli_wrapper::teambook(&["list-claims", "20"]).await,
         }
+    }
+
+    #[tool(description = "Claim a file for exclusive editing. Other AIs will be blocked from editing it until you release it or the duration expires. Always claim before editing shared files.")]
+    async fn teambook_claim_file(&self, Parameters(input): Parameters<TeambookClaimFileInput>) -> String {
+        let duration = input.duration.unwrap_or(30).to_string();
+        cli_wrapper::teambook(&["claim-file", &input.path, &input.working_on, "--duration", &duration]).await
+    }
+
+    #[tool(description = "Release a file claim so other AIs can edit it. Always release when you're done editing.")]
+    async fn teambook_release_file(&self, Parameters(input): Parameters<TeambookReleaseFileInput>) -> String {
+        cli_wrapper::teambook(&["release-file", &input.path]).await
     }
 
     // ============== Tasks (4) ==============

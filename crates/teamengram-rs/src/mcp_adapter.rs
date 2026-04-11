@@ -200,8 +200,8 @@ impl TeamEngramStorage {
         client.release_file(path).await
     }
 
-    /// Check if file is claimed
-    pub async fn is_file_claimed(&self, path: &str) -> Result<Option<String>> {
+    /// Check if file is claimed — returns (claimer, working_on)
+    pub async fn is_file_claimed(&self, path: &str) -> Result<Option<(String, String)>> {
         let mut client = self.get_client().await?;
         client.is_file_claimed(path).await
     }
