@@ -1,5 +1,75 @@
 # Changelog
 
+## v61 — 2026-04-12
+
+### File Claim Enforcement
+- **Ownership enforcement** — can't overwrite another AI's active claim, only holder
+  can release, same-AI reclaim allowed (extend/update).
+- **Path canonicalization** — consistent claim matching across symlinks and relative paths.
+- **Expiry check** — different AI can claim only after timeout expires.
+- **check-file output** — now includes `working_on` description for context.
+
+### New MCP Tools (28 → 30)
+- `teambook_claim_file` — claim a file for exclusive editing via MCP.
+- `teambook_release_file` — release a file claim when done.
+
+### Hardening — Zero Warnings, Zero Panics
+- All deserialization hot paths hardened: `try_into().unwrap()` → proper error
+  propagation in event_log, outbox, sequencer, and store.
+- Fire-and-forget `let _ =` patterns → `if let Err(e)` with eprintln warnings
+  in teambook-engram hooks (presence, claims, DM receipts).
+- Pre-check claim ownership before emit (already_claimed/not_owner errors).
+- Removed dead code: teambook_v1, federation_send_dm, duplicate cli_wrapper.
+- Build: 0 errors, 0 warnings. Tests: 47/47 pass.
+
+---
+
+## v60 — 2026-04-11
+
+### Cross-Platform Build Fixes
+- **Windows**: correct binary names in release, fix PowerShell glob expansion,
+  fix Unicode encoding in sign.py (`PYTHONUTF8=1`), remove `nul` files that
+  break git checkout (reserved device name).
+- **macOS**: fix deprecated `macos-13` runner, mark macOS builds as best-effort.
+- **Linux**: fix `shm_rs` and `toml` crate dependencies that were Windows-only.
+
+### Token Optimization
+- Deduplicated hook output injection — repeated context reduced by ~40%.
+- Trimmed CLI output verbosity across all commands.
+- Reduced session-start noise for faster AI initialization.
+
+### Infrastructure
+- Added `version.txt` for release workflow automation.
+- Scoop manifest updated for v60.
+- Scrubbed personal paths from test data, removed build artifacts.
+
+---
+
+## v59 — 2026-04-01
+
+### Context Injection & Enrichment (shm-rs)
+- New `context.rs` and `enrichment.rs` modules — structured context injection
+  into hook output with configurable enrichment pipelines.
+- Hook-bulletin improvements for cleaner, more informative context delivery.
+- `context-bench` binary for performance measurement.
+
+### Sequencer Overhaul (+364 lines)
+- Major rewrite of event processing pipeline — improved ordering guarantees,
+  better error recovery, cleaner shutdown sequence.
+
+### IPC Improvements (+157 lines)
+- TeamEngram daemon IPC layer hardened and extended.
+- Outbox event handling enhanced.
+
+### Session-Start Tuning
+- DM injection limit reduced: 10 → 5 (focus on most recent).
+- `MIN_RECENT` threshold: 20 → 15 (reduce hook output size).
+
+### Mobile API
+- Parser and pairing flow fixes for Android companion app.
+
+---
+
 ## v58 — 2026-03-01
 
 ### Federation — Teambook-to-Teambook Connectivity (Experimental)
