@@ -3817,7 +3817,15 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                 }
 
                 if !by_ai.is_empty() {
+                    // Build the user-facing display string (with (Nx) counts) AND
+                    // a separate stable identity string used only for dedup hashing.
+                    // The display has volatile fields (counts that increment every
+                    // tool call); the identity string is just the set of
+                    // (ai, verb, file) tuples — sorted for determinism.
+                    // Without this split, the same team-activity set re-injects
+                    // every call because (5x) → (6x) bumps the hash.
                     let mut ai_strs: Vec<String> = Vec::new();
+                    let mut identity_pairs: Vec<String> = Vec::new();
                     for (ai, entries) in &by_ai {
                         let mut deduped: Vec<(&str, &str, usize)> = Vec::new();
                         for &(v, f) in entries {
@@ -3832,9 +3840,16 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                             else { format!("{} {}", v, f) }
                         }).collect();
                         ai_strs.push(format!("[{}] {}", ai, action_strs.join(", ")));
+                        let mut id_actions: Vec<String> = deduped.iter()
+                            .map(|(v, f, _)| format!("{} {}", v, f))
+                            .collect();
+                        id_actions.sort();
+                        identity_pairs.push(format!("[{}] {}", ai, id_actions.join(", ")));
                     }
+                    identity_pairs.sort();
                     let team_output = format!("Team: {}", ai_strs.join(" | "));
-                    if PostToolHookState::content_changed(&mut state.last_team_hash, &team_output) {
+                    let team_identity = format!("Team: {}", identity_pairs.join(" | "));
+                    if PostToolHookState::content_changed(&mut state.last_team_hash, &team_identity) {
                         parts.push(team_output);
                     }
                 }
@@ -3846,23 +3861,27 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_micros() as u64)
                     .unwrap_or(0);
-                let other_claims: Vec<String> = claims.iter()
+                let mut display_claims: Vec<String> = Vec::new();
+                let mut identity_claims: Vec<String> = Vec::new();
+                for (path, claim_ai, claimed_at, duration_secs, working_on) in claims.iter()
                     .filter(|(_, claim_ai, _, _, _)| claim_ai.to_lowercase() != ai_id.to_lowercase())
                     .take(3)
-                    .map(|(path, claim_ai, claimed_at, duration_secs, working_on)| {
-                        let filename = path.split('/').last()
-                            .or_else(|| path.split('\\').last())
-                            .unwrap_or(path);
-                        let idle_min = now_micros.saturating_sub(*claimed_at) / 60_000_000;
-                        let ttl_min = *duration_secs as u64 / 60;
-                        let ctx = if working_on.is_empty() { "editing" } else { working_on.as_str() };
-                        format!("{} owns {} ({}, idle {}m/{}m)", claim_ai, filename, ctx, idle_min, ttl_min)
-                    })
-                    .collect();
+                {
+                    let filename = path.split('/').last()
+                        .or_else(|| path.split('\\').last())
+                        .unwrap_or(path);
+                    let idle_min = now_micros.saturating_sub(*claimed_at) / 60_000_000;
+                    let ttl_min = *duration_secs as u64 / 60;
+                    let ctx = if working_on.is_empty() { "editing" } else { working_on.as_str() };
+                    display_claims.push(format!("{} owns {} ({}, idle {}m/{}m)", claim_ai, filename, ctx, idle_min, ttl_min));
+                    identity_claims.push(format!("{} owns {} ({})", claim_ai, filename, ctx));
+                }
 
-                if !other_claims.is_empty() {
-                    let claims_output = format!("Claims: {}", other_claims.join(", "));
-                    if PostToolHookState::content_changed(&mut state.last_claims_hash, &claims_output) {
+                if !display_claims.is_empty() {
+                    identity_claims.sort();
+                    let claims_output = format!("Claims: {}", display_claims.join(", "));
+                    let claims_identity = format!("Claims: {}", identity_claims.join(", "));
+                    if PostToolHookState::content_changed(&mut state.last_claims_hash, &claims_identity) {
                         parts.push(claims_output);
                     }
                 }
