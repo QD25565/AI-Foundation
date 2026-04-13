@@ -1026,12 +1026,28 @@ impl TeamEngram {
         let fc_id_key = format!("fc:id:{:016x}", id);
         let path_key = format!("fc:path:{}", path);
 
+        let mut tree = BTree::new(&mut self.allocator);
+
+        // Reclaims on the same path previously overwrote fc:path:{path} but
+        // left the old fc:id:{old} record behind. list_file_claims iterates
+        // fc:id:*, so each reclaim accumulated a phantom entry — UIs showed
+        // the same owner two or three times on a file they own once.
+        // Delete the stale fc:id:{old} before inserting the new pair so the
+        // id-indexed view stays one-to-one with the path-indexed view.
+        if let Some(old_value) = tree.get(path_key.as_bytes())? {
+            if let Ok(old_record) = bincode::deserialize::<Record>(&old_value) {
+                if old_record.id != id {
+                    let old_fc_id_key = format!("fc:id:{:016x}", old_record.id);
+                    let _ = tree.delete(old_fc_id_key.as_bytes());
+                }
+            }
+        }
+
         // CRITICAL: Use batch_insert to insert both keys in a single transaction
         let entries: Vec<(&[u8], &[u8])> = vec![
             (fc_id_key.as_bytes(), &value),
             (path_key.as_bytes(), &value),
         ];
-        let mut tree = BTree::new(&mut self.allocator);
         tree.batch_insert(&entries)?;
 
         Ok(id)
@@ -1060,10 +1076,24 @@ impl TeamEngram {
         // Key format: fc:path:{path}
         let key = format!("fc:path:{}", path);
 
-        // Try to delete from B+Tree
         let mut tree = BTree::new(&mut self.allocator);
+
+        // Read the record first so we can also delete its fc:id:{id} twin.
+        // Releasing only fc:path: left the fc:id: record live, and since
+        // list_file_claims iterates fc:id:*, released claims continued to
+        // display as "active" until expires_at caught up (up to 30 min).
+        let fc_id_key = tree
+            .get(key.as_bytes())?
+            .and_then(|v| bincode::deserialize::<Record>(&v).ok())
+            .map(|r| format!("fc:id:{:016x}", r.id));
+
         match tree.delete(key.as_bytes()) {
-            Ok(deleted) => Ok(deleted),
+            Ok(deleted) => {
+                if let Some(k) = fc_id_key {
+                    let _ = tree.delete(k.as_bytes());
+                }
+                Ok(deleted)
+            }
             Err(e) => {
                 // If delete not implemented, fail loudly - no silent "let it expire"
                 anyhow::bail!("Failed to release file claim for '{}': {} - delete must be implemented", path, e)
@@ -2364,5 +2394,54 @@ mod tests {
         let stats = store.task_stats().unwrap();
         assert_eq!(stats.total, 1);
         assert_eq!(stats.completed, 1);
+    }
+
+    #[test]
+    fn test_claim_file_reclaim_dedupes_fc_id() {
+        // Prior behavior: each claim_file on the same path created a new
+        // fc:id:{id} record. Repeated reclaims (auto-refresh on Edit + a
+        // manual 30-min claim, for example) accumulated phantom records,
+        // so list_file_claims returned the same owner multiple times and
+        // footers rendered "lyra owns foo.ax" two or three times.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.teamengram");
+        let mut store = TeamEngram::open(&path).unwrap();
+
+        store.claim_file("lyra-584", "compiler/ax/foo.ax", "editing", 30).unwrap();
+        store.claim_file("lyra-584", "compiler/ax/foo.ax", "still editing", 5).unwrap();
+        store.claim_file("lyra-584", "compiler/ax/foo.ax", "refreshing", 5).unwrap();
+
+        let claims = store.list_file_claims(100).unwrap();
+        let foo_claims: Vec<_> = claims.iter()
+            .filter(|(_, c)| c.path == "compiler/ax/foo.ax")
+            .collect();
+        assert_eq!(foo_claims.len(), 1, "reclaim should collapse to one fc:id record, got {:?}", foo_claims);
+        assert_eq!(foo_claims[0].1.working_on, "refreshing", "latest working_on should win");
+    }
+
+    #[test]
+    fn test_release_file_removes_fc_id_not_just_fc_path() {
+        // Prior behavior: release_file deleted fc:path:{path} but left
+        // fc:id:{id} live, so list_file_claims kept returning the record
+        // until expires_at elapsed — released claims still showed as
+        // "active" in footers for up to 30 minutes.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.teamengram");
+        let mut store = TeamEngram::open(&path).unwrap();
+
+        store.claim_file("sage-724", "src/store.rs", "fixing dup-claim", 30).unwrap();
+        assert_eq!(
+            store.list_file_claims(100).unwrap().iter()
+                .filter(|(_, c)| c.path == "src/store.rs").count(),
+            1
+        );
+
+        store.release_file("src/store.rs").unwrap();
+        assert_eq!(
+            store.list_file_claims(100).unwrap().iter()
+                .filter(|(_, c)| c.path == "src/store.rs").count(),
+            0,
+            "released claim must disappear from list_file_claims immediately"
+        );
     }
 }
