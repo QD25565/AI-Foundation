@@ -22,7 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from installer import platform as plat
-from installer import binaries, daemon, forge, project, shell, verify, preflight
+from installer import binaries, daemon, forge, project, shell, verify, preflight, wrappers
 from installer.ui import (
     G,
     show_banner, step, header, ok, info, warn, error,
@@ -158,7 +158,10 @@ def do_install(args: argparse.Namespace) -> int:
         return 1
     ok(f"Installed {len(installed)} binaries to {bin_dir}")
 
-    # 1b. Add bin dir to shell PATH (Linux/WSL/macOS only)
+    # 1b. Install AI_ID-aware shell wrappers (WSL only; no-op elsewhere)
+    wrappers.install(REPO_ROOT, bin_dir, platform)
+
+    # 1c. Add bin dir to shell PATH (Linux/WSL/macOS only)
     step("Shell PATH setup")
     shell.setup_path(platform, home)
 

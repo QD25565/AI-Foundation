@@ -45,6 +45,7 @@ SYNC_BINARIES = [
 # Files/dirs included in the release zip
 DIST_INCLUDES = [
     "bin/windows",
+    "bin/wrappers",
     "config",
     "crates",
     "src",
