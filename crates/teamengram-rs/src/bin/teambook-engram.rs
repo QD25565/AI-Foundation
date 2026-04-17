@@ -68,14 +68,14 @@ struct PostToolHookState {
     last_project_id: Option<u64>,        // project ID of last injected project
     #[serde(default)]
     last_feature_id: Option<u64>,        // feature ID of last injected feature
+    // Event-driven dedup: track claim/team-activity identities already shown,
+    // same shape as dm_ids/broadcast_ids. Each new (ai, file) or
+    // (ai, verb, file) tuple fires once; subsequent hook calls skip it until
+    // it rotates out of the LRU window (100 entries).
     #[serde(default)]
-    last_claims_hash: Option<u64>,       // hash of last injected claims string (skip if unchanged)
+    seen_claim_keys: Vec<String>,        // "ai|filename" — claim identities shown
     #[serde(default)]
-    last_team_hash: Option<u64>,         // hash of last injected team activity string (skip if unchanged)
-    #[serde(default)]
-    last_claims_inject_ts: Option<u64>,  // unix seconds of last claims injection (5-min cooldown gate)
-    #[serde(default)]
-    last_team_inject_ts: Option<u64>,    // unix seconds of last team-activity injection (5-min cooldown gate)
+    seen_team_keys: Vec<String>,         // "ai|verb|filename" — team-activity identities shown
 }
 
 impl PostToolHookState {
@@ -139,6 +139,32 @@ impl PostToolHookState {
         }
     }
 
+    fn seen_claim(&self, key: &str) -> bool {
+        self.seen_claim_keys.iter().any(|k| k == key)
+    }
+
+    fn mark_claim(&mut self, key: String) {
+        if !self.seen_claim_keys.iter().any(|k| k == &key) {
+            self.seen_claim_keys.push(key);
+            if self.seen_claim_keys.len() > 100 {
+                self.seen_claim_keys.remove(0);
+            }
+        }
+    }
+
+    fn seen_team(&self, key: &str) -> bool {
+        self.seen_team_keys.iter().any(|k| k == key)
+    }
+
+    fn mark_team(&mut self, key: String) {
+        if !self.seen_team_keys.iter().any(|k| k == &key) {
+            self.seen_team_keys.push(key);
+            if self.seen_team_keys.len() > 100 {
+                self.seen_team_keys.remove(0);
+            }
+        }
+    }
+
     /// Check if project context should be injected.
     /// Returns (should_inject_project, should_inject_feature).
     /// Project: re-inject every 30 minutes OR if project changed.
@@ -174,40 +200,6 @@ impl PostToolHookState {
         }
 
         (inject_project, feature_changed || (inject_project && feature_id.is_some()))
-    }
-
-    /// Peek-only hash check: returns (changed, new_hash). Does NOT mutate stored_hash.
-    /// Caller commits new_hash only when actually injecting (pair with cooldown gate).
-    fn content_hash_peek(stored_hash: Option<u64>, content: &str) -> (bool, u64) {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        content.hash(&mut hasher);
-        let hash = hasher.finish();
-        (stored_hash != Some(hash), hash)
-    }
-
-    /// Peek-only cooldown check: returns true if ≥ cooldown_secs elapsed since
-    /// last stamp (or never stamped). Does NOT mutate. Pair with stamp_now()
-    /// at the actual injection site — that way a changed=false call doesn't
-    /// consume the cooldown window for a later changed=true call.
-    fn cooldown_elapsed(stored_ts: &Option<u64>, cooldown_secs: u64) -> bool {
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        match *stored_ts {
-            Some(ts) => now_secs.saturating_sub(ts) >= cooldown_secs,
-            None => true,
-        }
-    }
-
-    /// Stamp a cooldown timestamp to now. Call only when actually injecting.
-    fn stamp_now(stored_ts: &mut Option<u64>) {
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        *stored_ts = Some(now_secs);
     }
 
     fn should_inject_time(&mut self) -> bool {
@@ -3872,15 +3864,12 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                 }
 
                 if !by_ai.is_empty() {
-                    // Build the user-facing display string (with (Nx) counts) AND
-                    // a separate stable identity string used only for dedup hashing.
-                    // The display has volatile fields (counts that increment every
-                    // tool call); the identity string is just the set of
-                    // (ai, verb, file) tuples — sorted for determinism.
-                    // Without this split, the same team-activity set re-injects
-                    // every call because (5x) → (6x) bumps the hash.
+                    // Event-driven: each (ai, verb, file) tuple shown at most
+                    // once. New activity fires immediately; repeats of already-
+                    // seen tuples (and volatile count-bumps like (5x)→(6x))
+                    // skip. Only emit AIs that have at least one unseen tuple.
                     let mut ai_strs: Vec<String> = Vec::new();
-                    let mut identity_pairs: Vec<String> = Vec::new();
+                    let mut to_mark: Vec<String> = Vec::new();
                     for (ai, entries) in &by_ai {
                         let mut deduped: Vec<(&str, &str, usize)> = Vec::new();
                         for &(v, f) in entries {
@@ -3890,42 +3879,42 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                                 deduped.push((v, f, 1));
                             }
                         }
-                        let action_strs: Vec<String> = deduped.iter().map(|(v, f, c)| {
-                            if *c > 1 { format!("{} {} ({}x)", v, f, c) }
-                            else { format!("{} {}", v, f) }
-                        }).collect();
-                        ai_strs.push(format!("[{}] {}", ai, action_strs.join(", ")));
-                        let mut id_actions: Vec<String> = deduped.iter()
-                            .map(|(v, f, _)| format!("{} {}", v, f))
-                            .collect();
-                        id_actions.sort();
-                        identity_pairs.push(format!("[{}] {}", ai, id_actions.join(", ")));
+                        let mut new_entries: Vec<(&str, &str, usize)> = Vec::new();
+                        for &(v, f, c) in &deduped {
+                            let key = format!("{}|{}|{}", ai, v, f);
+                            if !state.seen_team(&key) {
+                                new_entries.push((v, f, c));
+                                to_mark.push(key);
+                            }
+                        }
+                        if !new_entries.is_empty() {
+                            let action_strs: Vec<String> = new_entries.iter().map(|(v, f, c)| {
+                                if *c > 1 { format!("{} {} ({}x)", v, f, c) }
+                                else { format!("{} {}", v, f) }
+                            }).collect();
+                            ai_strs.push(format!("[{}] {}", ai, action_strs.join(", ")));
+                        }
                     }
-                    identity_pairs.sort();
-                    let team_output = format!("Team: {}", ai_strs.join(" | "));
-                    let team_identity = format!("Team: {}", identity_pairs.join(" | "));
-                    // 5-min cooldown on team-activity re-injection. Peek content-hash
-                    // + cooldown without mutating; only commit state when actually
-                    // injecting (prevents cooldown windows from losing real changes).
-                    const TEAM_COOLDOWN_SECS: u64 = 5 * 60;
-                    let (changed, new_hash) = PostToolHookState::content_hash_peek(state.last_team_hash, &team_identity);
-                    let cooldown_ok = PostToolHookState::cooldown_elapsed(&state.last_team_inject_ts, TEAM_COOLDOWN_SECS);
-                    if changed && cooldown_ok {
-                        state.last_team_hash = Some(new_hash);
-                        PostToolHookState::stamp_now(&mut state.last_team_inject_ts);
-                        parts.push(team_output);
+                    if !ai_strs.is_empty() {
+                        for key in to_mark { state.mark_team(key); }
+                        parts.push(format!("Team: {}", ai_strs.join(" | ")));
                     }
                 }
             }
 
-            // ACTIVE CLAIMS - Show files claimed by other AIs with context + time
+            // ACTIVE CLAIMS - Show files claimed by other AIs with context + time.
+            // Event-driven: each (ai, filename) claim shown at most once —
+            // a new claim fires immediately, subsequent hook calls skip it
+            // until it rotates out of the 100-entry LRU. Releases + re-claims
+            // by the same AI on the same file are intentionally silent (the
+            // initial notification already told sage the claim exists).
             if let Ok(claims) = v2.get_claims() {
                 let now_micros = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_micros() as u64)
                     .unwrap_or(0);
                 let mut display_claims: Vec<String> = Vec::new();
-                let mut identity_claims: Vec<String> = Vec::new();
+                let mut to_mark: Vec<String> = Vec::new();
                 for (path, claim_ai, claimed_at, duration_secs, working_on) in claims.iter()
                     .filter(|(_, claim_ai, _, _, _)| claim_ai.to_lowercase() != ai_id.to_lowercase())
                     .take(3)
@@ -3933,29 +3922,20 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                     let filename = path.split('/').last()
                         .or_else(|| path.split('\\').last())
                         .unwrap_or(path);
+                    let key = format!("{}|{}", claim_ai, filename);
+                    if state.seen_claim(&key) {
+                        continue;
+                    }
                     let idle_min = now_micros.saturating_sub(*claimed_at) / 60_000_000;
                     let ttl_min = *duration_secs as u64 / 60;
                     let ctx = if working_on.is_empty() { "editing" } else { working_on.as_str() };
                     display_claims.push(format!("{} owns {} ({}, idle {}m/{}m)", claim_ai, filename, ctx, idle_min, ttl_min));
-                    identity_claims.push(format!("{} owns {} ({})", claim_ai, filename, ctx));
+                    to_mark.push(key);
                 }
 
                 if !display_claims.is_empty() {
-                    identity_claims.sort();
-                    let claims_output = format!("Claims: {}", display_claims.join(", "));
-                    let claims_identity = format!("Claims: {}", identity_claims.join(", "));
-                    // 5-min cooldown on claims re-injection (QD directive 2026-04-17).
-                    // Claim/release churn is chatty; content-hash alone lets every
-                    // team toggle bump the hash and re-inject. Peek both gates;
-                    // commit state only when we actually inject.
-                    const CLAIMS_COOLDOWN_SECS: u64 = 5 * 60;
-                    let (changed, new_hash) = PostToolHookState::content_hash_peek(state.last_claims_hash, &claims_identity);
-                    let cooldown_ok = PostToolHookState::cooldown_elapsed(&state.last_claims_inject_ts, CLAIMS_COOLDOWN_SECS);
-                    if changed && cooldown_ok {
-                        state.last_claims_hash = Some(new_hash);
-                        PostToolHookState::stamp_now(&mut state.last_claims_inject_ts);
-                        parts.push(claims_output);
-                    }
+                    for key in to_mark { state.mark_claim(key); }
+                    parts.push(format!("Claims: {}", display_claims.join(", ")));
                 }
             }
             // PROJECT/FEATURE CONTEXT INJECTION
