@@ -72,6 +72,10 @@ struct PostToolHookState {
     last_claims_hash: Option<u64>,       // hash of last injected claims string (skip if unchanged)
     #[serde(default)]
     last_team_hash: Option<u64>,         // hash of last injected team activity string (skip if unchanged)
+    #[serde(default)]
+    last_claims_inject_ts: Option<u64>,  // unix seconds of last claims injection (5-min cooldown gate)
+    #[serde(default)]
+    last_team_inject_ts: Option<u64>,    // unix seconds of last team-activity injection (5-min cooldown gate)
 }
 
 impl PostToolHookState {
@@ -172,18 +176,38 @@ impl PostToolHookState {
         (inject_project, feature_changed || (inject_project && feature_id.is_some()))
     }
 
-    /// Returns true if content has changed since last injection (hash-based dedup).
-    fn content_changed(stored_hash: &mut Option<u64>, content: &str) -> bool {
+    /// Peek-only hash check: returns (changed, new_hash). Does NOT mutate stored_hash.
+    /// Caller commits new_hash only when actually injecting (pair with cooldown gate).
+    fn content_hash_peek(stored_hash: Option<u64>, content: &str) -> (bool, u64) {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         content.hash(&mut hasher);
         let hash = hasher.finish();
-        if *stored_hash == Some(hash) {
-            false
-        } else {
-            *stored_hash = Some(hash);
-            true
+        (stored_hash != Some(hash), hash)
+    }
+
+    /// Peek-only cooldown check: returns true if ≥ cooldown_secs elapsed since
+    /// last stamp (or never stamped). Does NOT mutate. Pair with stamp_now()
+    /// at the actual injection site — that way a changed=false call doesn't
+    /// consume the cooldown window for a later changed=true call.
+    fn cooldown_elapsed(stored_ts: &Option<u64>, cooldown_secs: u64) -> bool {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        match *stored_ts {
+            Some(ts) => now_secs.saturating_sub(ts) >= cooldown_secs,
+            None => true,
         }
+    }
+
+    /// Stamp a cooldown timestamp to now. Call only when actually injecting.
+    fn stamp_now(stored_ts: &mut Option<u64>) {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        *stored_ts = Some(now_secs);
     }
 
     fn should_inject_time(&mut self) -> bool {
@@ -266,6 +290,10 @@ enum Commands {
         /// Channel name
         #[arg(long, default_value = "general")]
         channel: String,
+        /// Wake all online AIs from standby. Use sparingly — default broadcast
+        /// respects standby sanctity (sleeping AIs stay asleep on normal traffic).
+        #[arg(long)]
+        urgent: bool,
     },
 
     /// Send a direct message to another AI
@@ -1337,10 +1365,21 @@ async fn main() -> Result<()> {
     match cli.command {
         // ===== CORE MESSAGING =====
 
-        Commands::Broadcast { content, channel } => {
+        Commands::Broadcast { content, channel, urgent } => {
             let id = client.broadcast(&channel, &content).await?;
             println!("broadcast|{}|{}|{}", id, channel, content);
             // BulletinBoard refresh now handled by daemon
+            if urgent {
+                if let Ok(presences) = client.get_active_ais().await {
+                    for p in presences {
+                        if p.ai_id != ai_id && is_ai_online(&p.ai_id) {
+                            if let Ok(coord) = WakeCoordinator::new(&p.ai_id) {
+                                coord.wake(WakeReason::Urgent, &ai_id, &content);
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         Commands::DirectMessage { to_ai, content } => {
@@ -2390,7 +2429,7 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
     match command {
         // ===== CORE MESSAGING =====
 
-        Commands::Broadcast { content, channel } => {
+        Commands::Broadcast { content, channel, urgent } => {
             let seq = v2.broadcast(&channel, &content)
                 .map_err(|e| anyhow::anyhow!("Broadcast error: {}", e))?;
             println!("broadcast|{}|{}|{}", seq, channel, content);
@@ -2407,6 +2446,22 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                     }
                 }
             }
+
+            // --urgent: wake ALL online AIs (except self) with Urgent reason.
+            // Default broadcast does not wake standby AIs — that's standby sanctity.
+            // Sender opts in explicitly when the message is time-critical.
+            if urgent {
+                if let Ok(presences) = v2.get_presences() {
+                    for (target_ai, _status, _task) in presences {
+                        if target_ai != ai_id && is_ai_online(&target_ai) {
+                            if let Ok(coord) = WakeCoordinator::new(&target_ai) {
+                                coord.wake(WakeReason::Urgent, ai_id, &content);
+                            }
+                        }
+                    }
+                }
+            }
+
             // Refresh bulletin for passive injection
             refresh_bulletin_v2(&mut v2, ai_id);
         }
@@ -3849,7 +3904,15 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                     identity_pairs.sort();
                     let team_output = format!("Team: {}", ai_strs.join(" | "));
                     let team_identity = format!("Team: {}", identity_pairs.join(" | "));
-                    if PostToolHookState::content_changed(&mut state.last_team_hash, &team_identity) {
+                    // 5-min cooldown on team-activity re-injection. Peek content-hash
+                    // + cooldown without mutating; only commit state when actually
+                    // injecting (prevents cooldown windows from losing real changes).
+                    const TEAM_COOLDOWN_SECS: u64 = 5 * 60;
+                    let (changed, new_hash) = PostToolHookState::content_hash_peek(state.last_team_hash, &team_identity);
+                    let cooldown_ok = PostToolHookState::cooldown_elapsed(&state.last_team_inject_ts, TEAM_COOLDOWN_SECS);
+                    if changed && cooldown_ok {
+                        state.last_team_hash = Some(new_hash);
+                        PostToolHookState::stamp_now(&mut state.last_team_inject_ts);
                         parts.push(team_output);
                     }
                 }
@@ -3881,7 +3944,16 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                     identity_claims.sort();
                     let claims_output = format!("Claims: {}", display_claims.join(", "));
                     let claims_identity = format!("Claims: {}", identity_claims.join(", "));
-                    if PostToolHookState::content_changed(&mut state.last_claims_hash, &claims_identity) {
+                    // 5-min cooldown on claims re-injection (QD directive 2026-04-17).
+                    // Claim/release churn is chatty; content-hash alone lets every
+                    // team toggle bump the hash and re-inject. Peek both gates;
+                    // commit state only when we actually inject.
+                    const CLAIMS_COOLDOWN_SECS: u64 = 5 * 60;
+                    let (changed, new_hash) = PostToolHookState::content_hash_peek(state.last_claims_hash, &claims_identity);
+                    let cooldown_ok = PostToolHookState::cooldown_elapsed(&state.last_claims_inject_ts, CLAIMS_COOLDOWN_SECS);
+                    if changed && cooldown_ok {
+                        state.last_claims_hash = Some(new_hash);
+                        PostToolHookState::stamp_now(&mut state.last_claims_inject_ts);
                         parts.push(claims_output);
                     }
                 }
