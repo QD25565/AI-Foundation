@@ -72,6 +72,42 @@ pub fn derive_encryption_key(ai_id: &str) -> [u8; 32] {
     key
 }
 
+/// Derive an encryption key under an explicit (home_dir, hostname) pair rather than
+/// reading them from the current process. Used by recovery tooling to try alternate
+/// device-secret inputs — e.g. a note written from a Linux/WSL process uses a `/home/<user>`
+/// home path while the same machine under Windows uses `C:\Users\<User>`, yielding
+/// different device secrets.
+///
+/// Passing `None` for hostname reproduces the "hostname env var unset" branch of
+/// `get_device_secret` (which skips the hostname input entirely).
+pub fn derive_encryption_key_with_device(
+    ai_id: &str,
+    home_dir: &str,
+    hostname: Option<&str>,
+) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(home_dir.as_bytes());
+    hasher.update(b"ai-foundation-engram-encryption-v1");
+    if let Some(h) = hostname {
+        hasher.update(h.as_bytes());
+    }
+    let device_secret = {
+        let r = hasher.finalize();
+        let mut s = [0u8; 32];
+        s.copy_from_slice(&r);
+        s
+    };
+
+    let mut hasher = Sha256::new();
+    hasher.update(&device_secret);
+    hasher.update(ai_id.as_bytes());
+    hasher.update(b"xchacha20-content-key");
+    let result = hasher.finalize();
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&result);
+    key
+}
+
 /// Engram cipher for encrypting/decrypting note content
 pub struct EngramCipher {
     cipher: XChaCha20Poly1305,
@@ -84,6 +120,15 @@ impl EngramCipher {
         let cipher = XChaCha20Poly1305::new_from_slice(&key)
             .expect("32-byte key should always work");
 
+        Self { cipher }
+    }
+
+    /// Create a cipher from a pre-derived 32-byte key. Used by recovery tooling that
+    /// computes keys under alternate device-secret inputs (see
+    /// `derive_encryption_key_with_device`).
+    pub fn from_key(key: [u8; 32]) -> Self {
+        let cipher = XChaCha20Poly1305::new_from_slice(&key)
+            .expect("32-byte key should always work");
         Self { cipher }
     }
 

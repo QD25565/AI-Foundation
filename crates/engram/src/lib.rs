@@ -41,7 +41,7 @@ pub mod recall;
 
 pub use error::{EngramError, Result};
 pub use note::Note;
-pub use storage::Engram;
+pub use storage::{Engram, RecoveryResult};
 
 /// Engram file format version
 pub const FORMAT_VERSION: u32 = 1;

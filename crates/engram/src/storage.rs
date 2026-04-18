@@ -31,6 +31,21 @@ const INDEX_MAGIC: u64 = 0x454E47494E444558; // "ENGINDEX" in hex
 /// Maximum number of pinned notes (enforced at Engram core level)
 pub const MAX_PINNED: usize = 30;
 
+/// Outcome of an `Engram::recover_orphan` attempt. Distinguishes the four states a row
+/// can be in so callers (migration tools, diagnostics) can tally per-notebook totals
+/// without re-scanning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoveryResult {
+    /// Row already decrypts under the current cipher — no action taken.
+    NotOrphan,
+    /// Recovered under the given candidate `ai_id` and re-encrypted under current key.
+    Recovered(String),
+    /// No candidate cipher decrypted the row; data remains encrypted under an unknown key.
+    Unrecoverable,
+    /// No entry for this id (gap in id-space or tombstone).
+    Missing,
+}
+
 /// LRU cache entry
 struct CacheEntry {
     note: Note,
@@ -776,8 +791,11 @@ impl Engram {
             ids.retain(|&nid| nid != id);
         }
 
-        // Write new entry with same ID, stamping updated_at so recency reflects edits
+        // Write new entry with same ID. Preserve creation timestamp (NoteEntry::new_encrypted
+        // stamps timestamp=now(), which would violate timestamp's creation-time contract);
+        // edit time is recorded via updated_at, so effective_timestamp_nanos() still reflects recency.
         let mut entry = NoteEntry::new_encrypted(id, final_content, final_tags, true, &self.cipher)?;
+        entry.timestamp = existing.timestamp;
         entry.updated_at = chrono::Utc::now().timestamp() as u32;
         self.write_note_entry(&entry)?;
 
@@ -808,6 +826,158 @@ impl Engram {
         self.bm25_cache = None;
 
         Ok(())
+    }
+
+    /// Read the raw on-disk NoteEntry for an id without decrypting it. Used by recovery
+    /// tooling that needs to try alternate ciphers against a row. Returns `Ok(None)` if
+    /// the id has no index entry, or the entry is a tombstone.
+    fn read_entry_raw(&mut self, id: u64) -> Result<Option<NoteEntry>> {
+        let offset = match self.note_index.get(&id) {
+            Some(&off) => off,
+            None => return Ok(None),
+        };
+
+        self.file.seek(SeekFrom::Start(offset))?;
+        let mut header_buf = [0u8; 32];
+        self.file.read_exact(&mut header_buf)?;
+
+        let content_len = u32::from_le_bytes(header_buf[20..24].try_into().unwrap());
+        let tags_len = u16::from_le_bytes(header_buf[24..26].try_into().unwrap());
+        let entry_size = 32 + tags_len as usize + content_len as usize;
+
+        let mut full_buf = vec![0u8; entry_size];
+        full_buf[..32].copy_from_slice(&header_buf);
+        self.file.seek(SeekFrom::Start(offset + 32))?;
+        self.file.read_exact(&mut full_buf[32..])?;
+
+        let entry = NoteEntry::from_bytes(&full_buf)?;
+        if entry.is_tombstone() {
+            return Ok(None);
+        }
+        Ok(Some(entry))
+    }
+
+    /// Read-only probe: does an orphan row decrypt under any of the given candidate
+    /// ciphers? Same outcomes as `recover_orphan` but writes nothing. Used by
+    /// `--dry-run` migration paths to plan a recovery before touching bytes.
+    ///
+    /// Each candidate is a `(label, cipher)` pair — the label is what's returned in
+    /// `RecoveryResult::Recovered` so callers can tell which candidate worked.
+    pub fn probe_orphan(
+        &mut self,
+        id: u64,
+        candidates: &[(String, EngramCipher)],
+    ) -> Result<RecoveryResult> {
+        self.refresh_if_modified()?;
+
+        let entry = match self.read_entry_raw(id)? {
+            Some(e) => e,
+            None => return Ok(RecoveryResult::Missing),
+        };
+
+        if entry.to_note_decrypted(&self.cipher).is_ok() {
+            return Ok(RecoveryResult::NotOrphan);
+        }
+
+        for (label, alt_cipher) in candidates {
+            match entry.to_note_decrypted(alt_cipher) {
+                Ok(_) => return Ok(RecoveryResult::Recovered(label.clone())),
+                Err(EngramError::DecryptionError(_)) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+
+        Ok(RecoveryResult::Unrecoverable)
+    }
+
+    /// Attempt to recover an orphan row (one that fails to decrypt under the current
+    /// AI_ID) by trying each candidate cipher in turn. On success the plaintext is
+    /// re-encrypted under the current cipher and written back in place (preserving
+    /// `timestamp`, `updated_at`, `ttl_hours`, and tag text). Idempotent: rows already
+    /// decryptable under the current key return `NotOrphan` and are left untouched.
+    ///
+    /// Each candidate is a `(label, cipher)` pair so the tool can describe what worked
+    /// (e.g. "ai_id=cairn,home=/home/user,host=HOST"). Callers are responsible for
+    /// building meaningful labels.
+    ///
+    /// A single recovery writes one new NoteEntry (tombstoning the old offset by
+    /// displacement in `note_index`) — callers that need a side-file backup before the
+    /// migration run should copy the `.engram` file first.
+    pub fn recover_orphan(
+        &mut self,
+        id: u64,
+        candidates: &[(String, EngramCipher)],
+    ) -> Result<RecoveryResult> {
+        if self.read_only {
+            return Err(EngramError::ReadOnly);
+        }
+        self.refresh_if_modified()?;
+
+        let entry = match self.read_entry_raw(id)? {
+            Some(e) => e,
+            None => return Ok(RecoveryResult::Missing),
+        };
+
+        // Fast path: row already decryptable under current cipher. Idempotent.
+        if entry.to_note_decrypted(&self.cipher).is_ok() {
+            return Ok(RecoveryResult::NotOrphan);
+        }
+
+        // Try each candidate in order.
+        for (label, alt_cipher) in candidates {
+            let recovered = match entry.to_note_decrypted(alt_cipher) {
+                Ok(n) => n,
+                Err(EngramError::DecryptionError(_)) => continue,
+                Err(e) => return Err(e),
+            };
+            let candidate_label = label;
+
+            // Re-encrypt under current cipher, preserving creation-time metadata.
+            let final_tags: Vec<&str> = recovered.tags.iter().map(|s| s.as_str()).collect();
+            let mut new_entry = NoteEntry::new_encrypted(
+                id,
+                &recovered.content,
+                &final_tags,
+                true,
+                &self.cipher,
+            )?;
+            new_entry.timestamp = entry.timestamp;
+            new_entry.updated_at = entry.updated_at;
+            new_entry.ttl_hours = entry.ttl_hours;
+
+            self.write_note_entry(&new_entry)?;
+            let new_offset = self.header.note_log_offset + self.header.note_log_size
+                - new_entry.total_size() as u64;
+            self.note_index.insert(id, new_offset);
+
+            // Index recovered tags under their decrypted text. Orphan rows contributed
+            // nothing to tag_index on open (tags couldn't be decrypted), so there are no
+            // stale tag→id pointers to remove here.
+            for tag in &final_tags {
+                self.tag_bloom.insert(&tag.to_string());
+                let vec = self.tag_index.entry(tag.to_string()).or_insert_with(Vec::new);
+                if !vec.contains(&id) {
+                    vec.push(id);
+                }
+            }
+
+            // Same for temporal_index: orphan rows were skipped on open-time rebuild,
+            // so the id may be absent. Add (sorted) if missing.
+            if !self.temporal_index.iter().any(|(_, nid)| *nid == id) {
+                self.temporal_index.push((entry.timestamp, id));
+                self.temporal_index.sort_by_key(|(ts, _)| *ts);
+            }
+
+            self.cache.invalidate(id);
+            self.header.touch();
+            self.header.write_to(&mut self.file)?;
+            self.persist_indexes()?;
+            self.bm25_cache = None;
+
+            return Ok(RecoveryResult::Recovered(candidate_label.clone()));
+        }
+
+        Ok(RecoveryResult::Unrecoverable)
     }
 
     /// Pin a note
@@ -969,6 +1139,31 @@ impl Engram {
         Ok(results)
     }
 
+    /// Variant of `get` that treats orphan rows (decrypt-fails under the current key,
+    /// typically legacy notes written under a prior AI_ID) as a data-state — returns
+    /// `Ok(None)` instead of propagating the error. Used by iteration paths so a single
+    /// orphan doesn't abort an entire listing. Real I/O/format errors still propagate.
+    fn get_skip_orphan(&mut self, id: u64) -> Result<Option<Note>> {
+        match self.get(id) {
+            Ok(n) => Ok(n),
+            Err(EngramError::DecryptionError(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Count orphan rows: entries present in note_index that fail to decrypt under
+    /// the current cipher. O(N) decrypt scan — call only for diagnostics, not in hot paths.
+    pub fn orphan_count(&mut self) -> u64 {
+        let ids: Vec<u64> = self.note_index.keys().copied().collect();
+        let mut count = 0u64;
+        for id in ids {
+            if let Err(EngramError::DecryptionError(_)) = self.get(id) {
+                count += 1;
+            }
+        }
+        count
+    }
+
     /// Get most recent notes
     pub fn recent(&mut self, limit: usize) -> Result<Vec<Note>> {
         // Check for external modifications (multi-process sync)
@@ -984,7 +1179,7 @@ impl Engram {
 
         let mut notes = Vec::new();
         for id in ids {
-            if let Some(note) = self.get(id)? {
+            if let Some(note) = self.get_skip_orphan(id)? {
                 notes.push(note);
                 if notes.len() >= limit {
                     break;
@@ -1013,7 +1208,7 @@ impl Engram {
 
         let mut notes = Vec::new();
         for id in ids {
-            if let Some(note) = self.get(id)? {
+            if let Some(note) = self.get_skip_orphan(id)? {
                 notes.push(note);
             }
         }
@@ -1042,7 +1237,7 @@ impl Engram {
 
         let mut notes = Vec::new();
         for id in ids {
-            if let Some(note) = self.get(id)? {
+            if let Some(note) = self.get_skip_orphan(id)? {
                 notes.push(note);
             }
         }
@@ -1059,7 +1254,7 @@ impl Engram {
         let mut notes = Vec::new();
 
         for id in ids {
-            if let Some(note) = self.get(id)? {
+            if let Some(note) = self.get_skip_orphan(id)? {
                 notes.push(note);
             }
         }
@@ -1135,16 +1330,25 @@ impl Engram {
             ));
         }
 
-        // Verify all indexed notes are readable
+        // Verify all indexed notes are readable. Tombstones and orphans (decrypt-fail
+        // under current key — legacy pre-rekey rows) are both counted as "unreadable"
+        // here so the report flags them as warnings rather than erroring out the verify.
         let mut unreadable = 0;
+        let mut orphans = 0;
         let ids: Vec<u64> = self.note_index.keys().copied().collect();
         for id in ids {
-            if self.get(id)?.is_none() {
-                unreadable += 1;
+            match self.get(id) {
+                Ok(Some(_)) => {}
+                Ok(None) => unreadable += 1,
+                Err(EngramError::DecryptionError(_)) => orphans += 1,
+                Err(e) => return Err(e),
             }
         }
         if unreadable > 0 {
             warnings.push(format!("{} indexed notes are unreadable", unreadable));
+        }
+        if orphans > 0 {
+            warnings.push(format!("{} orphan notes (undecryptable under current AI_ID)", orphans));
         }
 
         // Report cache stats
@@ -1414,7 +1618,7 @@ impl Engram {
         if let Some(embedding) = query_embedding {
             let similar = self.search_similar(embedding, limit * 3);
             for (id, sim) in similar {
-                if let Some(note) = self.get(id)? {
+                if let Some(note) = self.get_skip_orphan(id)? {
                     candidates.insert(id, RecallResult {
                         note,
                         vector_score: sim,
@@ -1438,7 +1642,7 @@ impl Engram {
 
         let mut notes_for_bm25: Vec<(u64, Note)> = Vec::with_capacity(all_ids.len());
         for id in all_ids {
-            if let Some(note) = self.get(id)? {
+            if let Some(note) = self.get_skip_orphan(id)? {
                 notes_for_bm25.push((id, note));
             }
         }
@@ -1957,6 +2161,7 @@ mod tests {
 
     #[test]
     fn test_create_and_open() {
+        let _env = env_lock().lock().unwrap();
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.engram");
 
@@ -1976,6 +2181,7 @@ mod tests {
 
     #[test]
     fn test_remember_and_get() {
+        let _env = env_lock().lock().unwrap();
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.engram");
 
@@ -1997,6 +2203,7 @@ mod tests {
 
     #[test]
     fn test_remember_batch() {
+        let _env = env_lock().lock().unwrap();
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.engram");
 
@@ -2021,6 +2228,7 @@ mod tests {
 
     #[test]
     fn test_cache() {
+        let _env = env_lock().lock().unwrap();
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.engram");
 
@@ -2043,6 +2251,7 @@ mod tests {
 
     #[test]
     fn test_forget() {
+        let _env = env_lock().lock().unwrap();
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.engram");
 
@@ -2057,6 +2266,7 @@ mod tests {
 
     #[test]
     fn test_persistence() {
+        let _env = env_lock().lock().unwrap();
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.engram");
 
@@ -2077,7 +2287,184 @@ mod tests {
     }
 
     #[test]
+    fn test_update_preserves_creation_timestamp() {
+        let _env = env_lock().lock().unwrap();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("test.engram");
+
+        let (id, original_ts) = {
+            let mut db = Engram::open(&path).unwrap();
+            let id = db.remember("original content", &["t1"]).unwrap();
+            let ts = db.get(id).unwrap().unwrap().timestamp;
+            (id, ts)
+        };
+
+        // Sleep ~1.2s so a newly-stamped timestamp would measurably differ.
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+
+        {
+            let mut db = Engram::open(&path).unwrap();
+            db.update(id, Some("rewritten content"), None).unwrap();
+            let note = db.get(id).unwrap().unwrap();
+            assert_eq!(note.content, "rewritten content");
+            assert_eq!(note.timestamp, original_ts,
+                "update() must preserve creation timestamp; fresh stamp would violate the creation-time contract");
+            assert!(note.updated_at > 0,
+                "update() must record edit time in updated_at");
+            let updated_at_ns = (note.updated_at as i64) * 1_000_000_000;
+            assert!(updated_at_ns > original_ts,
+                "updated_at must reflect the later edit; got updated_at_ns={} original_ts={}",
+                updated_at_ns, original_ts);
+        }
+
+        // Reopen to ensure the preserved timestamp survives index rebuild from disk.
+        {
+            let mut db = Engram::open(&path).unwrap();
+            let note = db.get(id).unwrap().unwrap();
+            assert_eq!(note.timestamp, original_ts,
+                "creation timestamp must survive db reopen after an update()");
+            assert_eq!(note.content, "rewritten content");
+        }
+    }
+
+    // Shared mutex across all env-manipulating tests — `cargo test` runs tests in parallel
+    // by default and AI_ID is a process-global. Tests that touch it must serialize.
+    fn env_lock() -> &'static std::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| std::sync::Mutex::new(()))
+    }
+
+    #[test]
+    fn test_orphan_rows_tolerated_by_list_and_counted() {
+        // Simulates a notebook that has rows written under a legacy AI_ID ("key-A")
+        // plus rows written under the current AI_ID ("key-B"). Iteration paths must
+        // return only key-B rows; orphan_count() must return the key-A count.
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("orphan-mixed.engram");
+
+        std::env::set_var("AI_ID", "key-A");
+        {
+            let mut db = Engram::open(&path).unwrap();
+            db.remember("legacy-A-1", &["legacy"]).unwrap();
+            db.remember("legacy-A-2", &["legacy"]).unwrap();
+            db.remember("legacy-A-3", &["legacy"]).unwrap();
+        }
+
+        std::env::set_var("AI_ID", "key-B");
+        {
+            let mut db = Engram::open(&path).unwrap();
+            db.remember("current-B-1", &["current"]).unwrap();
+            db.remember("current-B-2", &["current"]).unwrap();
+
+            // recent() must not abort on first orphan; must return only current-key notes.
+            let recent = db.recent(100).unwrap();
+            assert_eq!(recent.len(), 2, "recent() must return only current-key rows, got {:?}",
+                recent.iter().map(|n| &n.content).collect::<Vec<_>>());
+            assert!(recent.iter().all(|n| n.content.starts_with("current-B-")));
+
+            // list() uses recent() under the hood — same guarantee.
+            let all = db.list(100).unwrap();
+            assert_eq!(all.len(), 2);
+
+            // by_tag on a current tag returns only current rows.
+            let current = db.by_tag("current").unwrap();
+            assert_eq!(current.len(), 2);
+
+            // by_tag on the legacy tag finds 0 (tag_index is rebuilt from tags blobs
+            // whose encryption binds tag text to the cipher, so legacy tags don't
+            // even appear in the current-key index). Must not panic.
+            let legacy = db.by_tag("legacy").unwrap();
+            assert!(legacy.iter().all(|n| n.content.starts_with("current-B-")));
+
+            // orphan_count reports the three legacy rows.
+            assert_eq!(db.orphan_count(), 3,
+                "orphan_count must report rows that fail to decrypt under current AI_ID");
+        }
+
+        std::env::remove_var("AI_ID");
+    }
+
+    #[test]
+    fn test_recover_orphan_end_to_end() {
+        // Writes a note under "legacy-key", reopens under "current-key" so the note
+        // becomes an orphan, calls recover_orphan with candidate list, verifies the
+        // row is now decryptable + tag-indexed + timestamp-preserved.
+        let _guard = env_lock().lock().unwrap();
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("recover.engram");
+
+        let original_timestamp;
+        let original_tag = "legacy-tag";
+        let original_content = "recovered memory under alternate key";
+
+        std::env::set_var("AI_ID", "legacy-key");
+        let id = {
+            let mut db = Engram::open(&path).unwrap();
+            let id = db.remember(original_content, &[original_tag]).unwrap();
+            original_timestamp = db.get(id).unwrap().unwrap().timestamp;
+            id
+        };
+
+        std::env::set_var("AI_ID", "current-key");
+        {
+            let mut db = Engram::open(&path).unwrap();
+
+            // Before recovery: orphan. recent() must return nothing; orphan_count = 1.
+            assert_eq!(db.recent(100).unwrap().len(), 0);
+            assert_eq!(db.orphan_count(), 1);
+
+            // Wrong candidate: still orphan. No side-effect.
+            let wrong = vec![("wrong-guess".to_string(), EngramCipher::new("wrong-guess"))];
+            let result = db.recover_orphan(id, &wrong).unwrap();
+            assert_eq!(result, RecoveryResult::Unrecoverable);
+            assert_eq!(db.orphan_count(), 1);
+
+            // Correct candidate in a mixed list: recovered.
+            let mixed = vec![
+                ("another-wrong".to_string(), EngramCipher::new("another-wrong")),
+                ("legacy-key".to_string(), EngramCipher::new("legacy-key")),
+                ("never-tried".to_string(), EngramCipher::new("never-tried")),
+            ];
+            let result = db.recover_orphan(id, &mixed).unwrap();
+            assert_eq!(result, RecoveryResult::Recovered("legacy-key".to_string()));
+
+            // Row now decryptable under current cipher.
+            let note = db.get(id).unwrap().unwrap();
+            assert_eq!(note.content, original_content);
+            assert_eq!(note.tags, vec![original_tag.to_string()]);
+            assert_eq!(note.timestamp, original_timestamp,
+                "recovered row must preserve original creation timestamp");
+
+            // Re-appears in recent() + by_tag() indexes.
+            assert_eq!(db.recent(100).unwrap().len(), 1);
+            let tagged = db.by_tag(original_tag).unwrap();
+            assert_eq!(tagged.len(), 1);
+            assert_eq!(tagged[0].content, original_content);
+
+            // Idempotent: second call is a no-op.
+            let again = vec![("legacy-key".to_string(), EngramCipher::new("legacy-key"))];
+            let result = db.recover_orphan(id, &again).unwrap();
+            assert_eq!(result, RecoveryResult::NotOrphan);
+
+            // Orphan count now 0.
+            assert_eq!(db.orphan_count(), 0);
+        }
+
+        // Survives reopen (persisted correctly).
+        {
+            let mut db = Engram::open(&path).unwrap();
+            let note = db.get(id).unwrap().unwrap();
+            assert_eq!(note.content, original_content);
+            assert_eq!(note.timestamp, original_timestamp);
+        }
+
+        std::env::remove_var("AI_ID");
+    }
+
+    #[test]
     fn test_by_tag() {
+        let _env = env_lock().lock().unwrap();
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.engram");
 
@@ -2096,6 +2483,7 @@ mod tests {
 
     #[test]
     fn test_recent() {
+        let _env = env_lock().lock().unwrap();
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.engram");
 
@@ -2113,6 +2501,7 @@ mod tests {
 
     #[test]
     fn test_large_batch() {
+        let _env = env_lock().lock().unwrap();
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.engram");
 
@@ -2141,6 +2530,7 @@ mod tests {
 
     #[test]
     fn test_index_persistence() {
+        let _env = env_lock().lock().unwrap();
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.engram");
 
@@ -2187,6 +2577,7 @@ mod tests {
 
     #[test]
     fn test_index_persistence_with_bloom() {
+        let _env = env_lock().lock().unwrap();
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.engram");
 
@@ -2216,6 +2607,7 @@ mod tests {
 
     #[test]
     fn test_index_persistence_roundtrip() {
+        let _env = env_lock().lock().unwrap();
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.engram");
 
@@ -2251,6 +2643,7 @@ mod tests {
 
     #[test]
     fn test_write_after_persisted_indexes() {
+        let _env = env_lock().lock().unwrap();
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.engram");
 
@@ -2298,6 +2691,7 @@ mod tests {
 
     #[test]
     fn test_vector_operations() {
+        let _env = env_lock().lock().unwrap();
         use crate::vector::DIMS;
 
         let dir = tempdir().unwrap();
@@ -2330,6 +2724,7 @@ mod tests {
 
     #[test]
     fn test_vector_search_multiple() {
+        let _env = env_lock().lock().unwrap();
         use crate::vector::DIMS;
 
         let dir = tempdir().unwrap();
@@ -2363,6 +2758,7 @@ mod tests {
 
     #[test]
     fn test_hnsw_persistence_roundtrip() {
+        let _env = env_lock().lock().unwrap();
         use crate::vector::DIMS;
 
         let dir = tempdir().unwrap();
@@ -2415,6 +2811,7 @@ mod tests {
 
     #[test]
     fn test_hnsw_persistence_dangling_refs() {
+        let _env = env_lock().lock().unwrap();
         use crate::vector::DIMS;
 
         let dir = tempdir().unwrap();
@@ -2466,6 +2863,7 @@ mod tests {
 
     #[test]
     fn test_vault_operations() {
+        let _env = env_lock().lock().unwrap();
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.engram");
 
@@ -2497,6 +2895,7 @@ mod tests {
 
     #[test]
     fn test_graph_operations() {
+        let _env = env_lock().lock().unwrap();
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.engram");
 
@@ -2532,6 +2931,7 @@ mod tests {
 
     #[test]
     fn test_recall_by_keyword() {
+        let _env = env_lock().lock().unwrap();
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.engram");
 
@@ -2556,6 +2956,7 @@ mod tests {
 
     #[test]
     fn test_hybrid_recall() {
+        let _env = env_lock().lock().unwrap();
         use crate::vector::DIMS;
 
         let dir = tempdir().unwrap();
@@ -2592,6 +2993,7 @@ mod tests {
 
     #[test]
     fn test_auto_link_temporal() {
+        let _env = env_lock().lock().unwrap();
         let dir = tempdir().unwrap();
         let path = dir.path().join("test.engram");
 
@@ -2615,6 +3017,7 @@ mod tests {
 
     #[test]
     fn test_auto_link_semantic() {
+        let _env = env_lock().lock().unwrap();
         use crate::vector::DIMS;
 
         let dir = tempdir().unwrap();
@@ -2654,6 +3057,7 @@ mod tests {
 
     #[test]
     fn test_full_auto_link() {
+        let _env = env_lock().lock().unwrap();
         use crate::vector::DIMS;
 
         let dir = tempdir().unwrap();
@@ -2682,6 +3086,7 @@ mod tests {
 
     #[test]
     fn test_recall_config() {
+        let _env = env_lock().lock().unwrap();
         use crate::recall::RecallConfig;
 
         let dir = tempdir().unwrap();
@@ -2709,6 +3114,7 @@ mod tests {
 
     #[test]
     fn test_full_persistence_with_vault_vector_graph() {
+        let _env = env_lock().lock().unwrap();
         use crate::vector::DIMS;
         use crate::graph::EdgeType;
 
