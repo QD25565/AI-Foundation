@@ -6,7 +6,7 @@
     "architecture": {
         "64bit": {
             "url": "https://github.com/QD25565/ai-foundation/releases/download/v62/ai-foundation-v62-windows-x64.zip",
-            "hash": "TODO-UPDATE-AFTER-RELEASE-BUILD",
+            "hash": "1cd8f0ee7db31eea7e8b1333316428f766303175b00beb8d4af9dd7642c521b0",
             "extract_dir": "ai-foundation-v62"
         }
     },
