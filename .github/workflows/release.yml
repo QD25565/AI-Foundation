@@ -29,8 +29,25 @@ jobs:
             target
           key: windows-cargo-${{ hashFiles('**/Cargo.lock') }}
 
+      # Strip runner-specific paths (C:\Users\runneradmin\..., workspace path) from
+      # embedded debug strings, panic locations, and dep-info. rustc's strip=true
+      # only removes debug symbols; path literals via file!()/include_str! survive
+      # unless remapped at compile time.
+      # LLAMA_CPP_PATH_REMAP is read by the workspace llama-cpp-sys-2 build.rs,
+      # which passes /d1trimfile (MSVC) or -ffile-prefix-map (clang/gcc) so that
+      # __FILE__ baked into llama.cpp's C/C++ objects doesn't leak the path.
       - name: Build release binaries
-        run: cargo build --release
+        shell: pwsh
+        run: |
+          $env:RUSTFLAGS = "--remap-path-prefix=$pwd=. --remap-path-prefix=$env:USERPROFILE\.cargo=/cargo --remap-path-prefix=$env:USERPROFILE\.rustup=/rustup"
+          $env:LLAMA_CPP_PATH_REMAP = "$pwd"
+          # Default-features build produces forge.exe (API-only, no llama.cpp).
+          cargo build --release --workspace --bins
+          Copy-Item "target/release/forge.exe" "target/release/forge-api.exe"
+          # Rebuild forge with local-llm to produce the llama.cpp-linked variant.
+          cargo build --release -p forge --features local-llm
+          Copy-Item "target/release/forge.exe" "target/release/forge-local.exe"
+          Copy-Item "target/release/forge-api.exe" "target/release/forge.exe" -Force
 
       - name: Collect binaries
         shell: pwsh
@@ -38,16 +55,17 @@ jobs:
           $version = (Get-Content version.txt).Trim()
           $outDir = "staging/ai-foundation-v$version/bin"
           New-Item -ItemType Directory -Path $outDir -Force
-          $binaries = @(
+          $required = @(
             "notebook-cli", "teambook-engram", "session-start",
             "v2-daemon", "teamengram-daemon", "ai-foundation-mcp", "forge", "forge-local"
           )
-          foreach ($bin in $binaries) {
+          foreach ($bin in $required) {
             $src = "target/release/$bin.exe"
-            if (Test-Path $src) {
-              Copy-Item $src "$outDir/$bin.exe"
-              Write-Host "Collected: $bin.exe"
+            if (-not (Test-Path $src)) {
+              throw "Missing required binary: $src"
             }
+            Copy-Item $src "$outDir/$bin.exe"
+            Write-Host "Collected: $bin.exe"
           }
 
       - name: Generate manifest
@@ -88,20 +106,29 @@ jobs:
           key: linux-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build release binaries
-        run: cargo build --release
+        run: |
+          export RUSTFLAGS="--remap-path-prefix=$PWD=. --remap-path-prefix=$HOME/.cargo=/cargo --remap-path-prefix=$HOME/.rustup=/rustup"
+          export LLAMA_CPP_PATH_REMAP="$PWD"
+          cargo build --release --workspace --bins
+          cp target/release/forge target/release/forge-api
+          cargo build --release -p forge --features local-llm
+          cp target/release/forge target/release/forge-local
+          cp target/release/forge-api target/release/forge
 
       - name: Collect and package
         run: |
           VERSION=$(cat version.txt | tr -d '[:space:]')
           STAGING="staging/ai-foundation-v${VERSION}"
           mkdir -p "$STAGING"
-          for bin in notebook-cli teambook session-start v2-daemon ai-foundation-mcp forge forge-local; do
+          for bin in notebook-cli teambook-engram session-start v2-daemon teamengram-daemon ai-foundation-mcp forge forge-local; do
             src="target/release/${bin}"
-            if [ -f "$src" ]; then
-              cp "$src" "$STAGING/"
-              chmod +x "$STAGING/$bin"
-              echo "Collected: $bin"
+            if [ ! -f "$src" ]; then
+              echo "Missing required binary: $src" >&2
+              exit 1
             fi
+            cp "$src" "$STAGING/"
+            chmod +x "$STAGING/$bin"
+            echo "Collected: $bin"
           done
           python3 sign.py --bin-dir "$STAGING"
           tar -czf "ai-foundation-v${VERSION}-linux-x64.tar.gz" -C staging .
@@ -139,19 +166,29 @@ jobs:
           key: macos-${{ matrix.arch }}-cargo-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build release binaries
-        run: cargo build --release
+        run: |
+          export RUSTFLAGS="--remap-path-prefix=$PWD=. --remap-path-prefix=$HOME/.cargo=/cargo --remap-path-prefix=$HOME/.rustup=/rustup"
+          export LLAMA_CPP_PATH_REMAP="$PWD"
+          cargo build --release --workspace --bins
+          cp target/release/forge target/release/forge-api
+          cargo build --release -p forge --features local-llm
+          cp target/release/forge target/release/forge-local
+          cp target/release/forge-api target/release/forge
 
       - name: Collect and package
         run: |
           VERSION=$(cat version.txt | tr -d '[:space:]')
           STAGING="staging/ai-foundation-v${VERSION}"
           mkdir -p "$STAGING"
-          for bin in notebook-cli teambook session-start v2-daemon ai-foundation-mcp forge forge-local; do
+          # macOS is best-effort (continue-on-error on this job); skip missing bins rather than fail.
+          for bin in notebook-cli teambook-engram session-start v2-daemon teamengram-daemon ai-foundation-mcp forge forge-local; do
             src="target/release/${bin}"
             if [ -f "$src" ]; then
               cp "$src" "$STAGING/"
               chmod +x "$STAGING/$bin"
               echo "Collected: $bin"
+            else
+              echo "Skipped (missing): $bin"
             fi
           done
           python3 sign.py --bin-dir "$STAGING"
