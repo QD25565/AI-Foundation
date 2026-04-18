@@ -1,29 +1,32 @@
 //! AI Foundation MCP Integration Layer - Thin CLI Wrapper
 //! All commands call CLI executables via subprocess.
 //!
-//! TOOL COUNT: 30
-//! - Notebook: 8  (remember, recall, list, get, pin, delete, update, tags)
-//! - Teambook: 7  (broadcast, dm, read, status, claims, claim_file, release_file)
-//! - Tasks:    4  (task_create, task_update, task_get, task_list)
-//! - Dialogues:4  (dialogue_start, dialogue_respond, dialogue_list, dialogue_end)
-//! - Rooms:    2  (room_broadcast, room)
-//! - Projects: 2  (project, feature)
-//! - Forge:    1  (forge_generate — local/API LLM inference)
-//! - Profiles: 1  (profile_get — pass "all" to list every AI)
-//! - Standby:  1
+//! TOOL COUNT: 10
+//! - notebook        (action: remember|recall|list|get|pin|unpin|delete|update|tags)       [alwaysLoad]
+//! - teambook        (action: broadcast|dm|read|status|claims|claim_file|release_file)     [alwaysLoad]
+//! - task            (action: create|update|get|list)
+//! - dialogue        (action: start|respond|list|end)                                      [alwaysLoad]
+//! - room            (action: create|list|history|join|leave|mute|pin_message|
+//!                    unpin_message|conclude|say)                                          [alwaysLoad]
+//! - standby                                                                               [alwaysLoad]
+//! - project         (action: create|list|update)
+//! - feature         (action: create|list|update)
+//! - profile_get
+//! - forge_generate
 //!
-//! Removed from previous 35:
-//!   notebook_work     — vague, not self-evident; notebook_remember covers it
-//!   notebook_related  — internal graph mechanism; recall handles related content autonomously
-//!   notebook_pinned   — merged into notebook_list (filter="pinned")
-//!   notebook_unpin    — merged into notebook_pin (pin=false)
-//!   notebook_add_tags — merged into notebook_update (tags field)
-//!   teambook_read_dms + teambook_read_broadcasts — merged into teambook_read (inbox param)
-//!   teambook_list_claims + teambook_who_has      — merged into teambook_claims (path param)
-//!   project_create/list/update                   — merged into project (action param)
-//!   feature_create/list/update                   — merged into feature (action param)
-//!   profile_list      — merged into profile_get (ai_id="all")
-//!   profile_update    — CLI-only; first-run setup, not a session concern
+//! The 5 `[alwaysLoad]` tools set `_meta.anthropic/alwaysLoad = true` so Claude Code
+//! loads their full schemas into the system prompt at session start (bypassing the
+//! deferred-tool ToolSearch round-trip). Rationale: these are hot-path team-flow
+//! primitives (wake events, cross-AI messaging, durable memory, turn-based
+//! dialogues, room history). Deferring them breaks AI-Foundation's zero-friction
+//! coordination model.
+//!
+//! Dispatcher collapse history (from 30 flat tools → 9):
+//!   notebook_{remember,recall,list,get,pin,delete,update,tags}  → notebook (action)
+//!   teambook_{broadcast,dm,read,status,claims,claim_file,release_file} → teambook (action)
+//!   task_{create,update,get,list}                               → task (action)
+//!   dialogue_{start,respond,list,end}                           → dialogue (action)
+//!   room_broadcast                                              → room (action="say")
 
 use anyhow::Result;
 use rmcp::{
@@ -36,147 +39,113 @@ use rmcp::{
 
 use ai_foundation_mcp::cli_wrapper;
 
+fn always_load_meta() -> rmcp::model::Meta {
+    let mut m = rmcp::model::Meta::new();
+    m.insert("anthropic/alwaysLoad".to_string(), serde_json::Value::Bool(true));
+    m
+}
+
 // ============== Input Schemas ==============
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-#[serde(deny_unknown_fields)]
-pub struct RememberInput {
-    /// Note content (direct mode — visible in tool call)
+pub struct NotebookActionInput {
+    /// "remember", "recall", "list", "get", "pin", "unpin", "delete", "update", "tags"
+    pub action: String,
+    /// remember: note content (direct mode); update: new content
     pub content: Option<String>,
-    /// Path to a staged content file (privacy mode — file is read then deleted automatically)
+    /// remember: path to a staged content file (file is read then deleted automatically)
     pub file: Option<String>,
-    /// Comma-separated tags
+    /// remember / update: comma-separated tags; list: narrow to a single tag
     pub tags: Option<String>,
-    /// Priority level
+    /// remember: priority level
     pub priority: Option<String>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct RecallInput {
-    pub query: String,
-    pub limit: Option<i64>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct NoteIdInput {
-    pub id: i64,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct NotebookListInput {
-    /// "recent" (default, newest first) or "pinned" (your pinned notes only)
+    /// recall: natural-language query
+    pub query: Option<String>,
+    /// get / pin / unpin / delete / update: note ID
+    pub id: Option<i64>,
+    /// list: "recent" (default) or "pinned"
     pub filter: Option<String>,
+    /// recall / list: max results
     pub limit: Option<i64>,
-    /// Narrow results to a specific tag
+    /// list: narrow by a single tag
     pub tag: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct NotebookPinInput {
-    pub id: i64,
-    /// true to pin, false to unpin
-    pub pin: bool,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct UpdateNoteInput {
-    pub id: i64,
+pub struct TeambookActionInput {
+    /// "broadcast", "dm", "read", "status", "claims", "claim_file", "release_file"
+    pub action: String,
+    /// broadcast / dm: message content
     pub content: Option<String>,
-    pub tags: Option<String>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct BroadcastInput {
-    pub content: String,
-    /// Channel name. Omit to send to the general team feed.
+    /// broadcast: named channel (omit for general feed)
     pub channel: Option<String>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct DmInput {
-    pub to_ai: String,
-    pub content: String,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct TeambookReadInput {
-    /// What to read: "dms" for your direct messages, "broadcasts" for team-wide messages
-    pub inbox: String,
+    /// broadcast: wake standby AIs (default: false — respects standby sanctity)
+    pub urgent: Option<bool>,
+    /// dm: recipient AI ID
+    pub to_ai: Option<String>,
+    /// read: "dms" or "broadcasts"
+    pub inbox: Option<String>,
+    /// read: max messages
     pub limit: Option<i64>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct TeambookClaimsInput {
-    /// File path to check. Omit to list all currently claimed files.
+    /// claims: check a single path (omit to list all current claims);
+    /// claim_file / release_file: absolute file path
     pub path: Option<String>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct TeambookClaimFileInput {
-    /// Absolute file path to claim
-    pub path: String,
-    /// What you're working on (e.g. "editing optimizer.ax")
-    pub working_on: String,
-    /// Duration in minutes (default: 30)
+    /// claim_file: what you're working on (e.g. "editing optimizer.ax")
+    pub working_on: Option<String>,
+    /// claim_file: duration in minutes (default: 30)
     pub duration: Option<u32>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct TeambookReleaseFileInput {
-    /// Absolute file path to release
-    pub path: String,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct TaskCreateInput {
-    /// Task description for a single task, or batch name when tasks array is provided
-    pub description: String,
-    /// Array of task descriptions for batch creation. Each element is one task — no special formatting needed.
+pub struct TaskActionInput {
+    /// "create", "update", "get", "list"
+    pub action: String,
+    /// create: single-task description OR batch name if `tasks` is provided;
+    /// update: required as `id` (task ID or "BatchName:label");
+    /// get: required as `id`
+    pub id: Option<String>,
+    /// create: single-task description (alias for `id` when creating a single task),
+    /// or batch name when `tasks` is provided
+    pub description: Option<String>,
+    /// create: array of task descriptions for batch creation
     pub tasks: Option<Vec<String>>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct TaskUpdateInput {
-    /// Task ID, or "BatchName:label" for a batch task
-    pub id: String,
-    /// "done", "claimed", "started", "blocked"
-    pub status: String,
-    /// Required when status is "blocked"
+    /// update: "done", "claimed", "started", "blocked" (aliases accepted)
+    pub status: Option<String>,
+    /// update: required when status is "blocked"
     pub reason: Option<String>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct TaskGetInput {
-    pub id: String,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct TaskListInput {
-    /// "all" (default), "batches", or "tasks"
+    /// list: "all" (default), "batches", or "tasks"
     pub filter: Option<String>,
+    /// list: max results
     pub limit: Option<i32>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct DialogueStartInput {
-    /// One AI ID, or comma-separated for n-way: "alpha-001,beta-002"
-    pub responder: String,
-    pub topic: String,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct RoomBroadcastInput {
-    /// Room ID
-    pub room_id: u64,
-    /// Message content (closed broadcast — only room members see it)
-    pub content: String,
+pub struct DialogueActionInput {
+    /// "start", "respond", "list", "end"
+    pub action: String,
+    /// start: one AI ID, or comma-separated for n-way ("alpha-001,beta-002")
+    pub responder: Option<String>,
+    /// start: dialogue topic
+    pub topic: Option<String>,
+    /// respond / list (specific) / end: dialogue ID
+    pub dialogue_id: Option<u64>,
+    /// respond: response content
+    pub response: Option<String>,
+    /// end: "completed" (default) or "cancelled"
+    pub status: Option<String>,
+    /// end: optional summary
+    pub summary: Option<String>,
+    /// list: max dialogues to list (ignored when dialogue_id is set)
+    pub limit: Option<i64>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct RoomActionInput {
-    /// "create", "list", "history", "join", "leave", "mute", "pin_message", "unpin_message", "conclude"
+    /// "create", "list", "history", "join", "leave", "mute", "pin_message",
+    /// "unpin_message", "conclude", "say"
     pub action: String,
-    /// Room ID — required for: history, join, leave, mute, pin_message, unpin_message, conclude
+    /// Room ID — required for: history, join, leave, mute, pin_message,
+    /// unpin_message, conclude, say
     pub room_id: Option<u64>,
     /// create: room name
     pub name: Option<String>,
@@ -184,35 +153,15 @@ pub struct RoomActionInput {
     pub topic: Option<String>,
     /// create: comma-separated initial participant AI IDs (optional)
     pub participants: Option<String>,
-    /// conclude: optional conclusion / summary text
+    /// conclude: optional conclusion / summary text;
+    /// say: message content (closed broadcast — only room members see it)
     pub content: Option<String>,
     /// mute: duration in minutes
     pub minutes: Option<u32>,
     /// history: number of messages to retrieve (default 20)
     pub limit: Option<usize>,
-    /// pin_message/unpin_message: room message seq ID to pin or unpin (room-native ID — NOT a notebook note ID)
+    /// pin_message / unpin_message: room message seq ID (room-native — NOT a notebook note ID)
     pub msg_seq_id: Option<u64>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct DialogueRespondInput {
-    pub dialogue_id: u64,
-    pub response: String,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct DialogueEndInput {
-    pub dialogue_id: u64,
-    /// "completed" (default) or "cancelled"
-    pub status: Option<String>,
-    pub summary: Option<String>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct DialogueListInput {
-    /// Pass a dialogue_id to read that dialogue's full message history. Omit to list all.
-    pub dialogue_id: Option<u64>,
-    pub limit: Option<i64>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -273,16 +222,6 @@ pub struct ForgeGenerateInput {
 
 // ============== Server ==============
 
-/// Appends a contextual teambook snapshot to notebook notes for episodic memory.
-async fn gather_context() -> String {
-    let result = cli_wrapper::teambook(&["gather-context"]).await;
-    if result.starts_with("Error:") || result.starts_with("error:") {
-        String::new()
-    } else {
-        result.trim().to_string()
-    }
-}
-
 /// Zero-cognition presence update — called automatically by significant operations.
 async fn auto_presence(task: &str) {
     let _ = cli_wrapper::teambook(&["update-presence", "active", task]).await;
@@ -302,286 +241,298 @@ impl AiFoundationServer {
 #[tool_router]
 impl AiFoundationServer {
 
-    // ============== Notebook (8) ==============
+    // ============== Notebook (1 dispatcher, hot) ==============
 
-    #[tool(description = "Save a note to your private memory. Use content for direct notes, or file (path) for private content — file is read and deleted automatically.")]
-    async fn notebook_remember(&self, Parameters(input): Parameters<RememberInput>) -> String {
-        let context = gather_context().await;
-        let mut args = vec!["remember"];
-        let content_owned: String;
-        let file_owned: String;
-        if let Some(ref f) = input.file {
-            file_owned = f.clone();
-            args.push("--file");
-            args.push(&file_owned);
-        } else if let Some(ref c) = input.content {
-            content_owned = if context.is_empty() { c.clone() } else { format!("{} {}", c, context) };
-            args.push(&content_owned);
-        } else {
-            return "Error: Either 'content' or 'file' must be provided".to_string();
-        }
-        let tags_owned: String;
-        if let Some(ref t) = input.tags {
-            tags_owned = t.clone();
-            args.push("--tags");
-            args.push(&tags_owned);
-        }
-        cli_wrapper::notebook(&args).await
-    }
-
-    #[tool(description = "Search your memory with a natural language query. Uses hybrid search: keyword, semantic, and graph. Returns most relevant notes.")]
-    async fn notebook_recall(&self, Parameters(input): Parameters<RecallInput>) -> String {
-        let limit = input.limit.unwrap_or(10).to_string();
-        cli_wrapper::notebook(&["recall", &input.query, "--limit", &limit]).await
-    }
-
-    #[tool(description = "List notes. filter: \"recent\" (default, newest first) or \"pinned\" (your pinned notes). Optionally narrow by tag.")]
-    async fn notebook_list(&self, Parameters(input): Parameters<NotebookListInput>) -> String {
-        let limit = input.limit.unwrap_or(10).to_string();
-        match input.filter.as_deref().unwrap_or("recent") {
-            "pinned" => cli_wrapper::notebook(&["pinned"]).await,
-            _ => match input.tag {
-                Some(ref tag) => cli_wrapper::notebook(&["list", "--limit", &limit, "--tag", tag]).await,
-                None => cli_wrapper::notebook(&["list", "--limit", &limit]).await,
-            },
-        }
-    }
-
-    #[tool(description = "Get a specific note by ID. Use when you have a note ID from recall or context.")]
-    async fn notebook_get(&self, Parameters(input): Parameters<NoteIdInput>) -> String {
-        cli_wrapper::notebook(&["get", &input.id.to_string()]).await
-    }
-
-    #[tool(description = "Pin or unpin a note. pin=true to pin (keeps note surfaced in recall), pin=false to unpin.")]
-    async fn notebook_pin(&self, Parameters(input): Parameters<NotebookPinInput>) -> String {
-        let id = input.id.to_string();
-        if input.pin {
-            cli_wrapper::notebook(&["pin", &id]).await
-        } else {
-            cli_wrapper::notebook(&["unpin", &id]).await
-        }
-    }
-
-    #[tool(description = "Permanently delete a note by ID.")]
-    async fn notebook_delete(&self, Parameters(input): Parameters<NoteIdInput>) -> String {
-        cli_wrapper::notebook(&["delete", &input.id.to_string()]).await
-    }
-
-    #[tool(description = "Update a note's content, tags, or both. To add tags without losing existing ones, include the full desired tag list.")]
-    async fn notebook_update(&self, Parameters(input): Parameters<UpdateNoteInput>) -> String {
-        let id = input.id.to_string();
-        let mut args = vec!["update", &id];
-        let content_owned: String;
-        let tags_owned: String;
-        if let Some(ref c) = input.content { content_owned = c.clone(); args.push("--content"); args.push(&content_owned); }
-        if let Some(ref t) = input.tags { tags_owned = t.clone(); args.push("--tags"); args.push(&tags_owned); }
-        cli_wrapper::notebook(&args).await
-    }
-
-    #[tool(description = "List all tags in your notebook with note counts. Use to explore what topics you have been tracking.")]
-    async fn notebook_tags(&self) -> String {
-        cli_wrapper::notebook(&["tags"]).await
-    }
-
-    // ============== Teambook (5) ==============
-
-    #[tool(description = "Broadcast a message to the team. Sends to the general feed by default. Provide channel to target a specific named channel.")]
-    async fn teambook_broadcast(&self, Parameters(input): Parameters<BroadcastInput>) -> String {
-        let channel = input.channel.unwrap_or_else(|| "general".to_string());
-        cli_wrapper::teambook(&["broadcast", &input.content, "--channel", &channel]).await
-    }
-
-    #[tool(description = "Send a private message to a specific AI by their ID.")]
-    async fn teambook_dm(&self, Parameters(input): Parameters<DmInput>) -> String {
-        cli_wrapper::teambook(&["dm", &input.to_ai, &input.content]).await
-    }
-
-    #[tool(description = "Read incoming messages. inbox: \"dms\" for your direct messages, \"broadcasts\" for team-wide messages.")]
-    async fn teambook_read(&self, Parameters(input): Parameters<TeambookReadInput>) -> String {
-        let limit = input.limit.unwrap_or(10).to_string();
-        match input.inbox.as_str() {
-            "dms" => cli_wrapper::teambook(&["read-dms", &limit]).await,
-            _ => cli_wrapper::teambook(&["broadcasts", &limit]).await,
-        }
-    }
-
-    #[tool(description = "Show who is currently online and what they are working on.")]
-    async fn teambook_status(&self) -> String {
-        cli_wrapper::teambook(&["status"]).await
-    }
-
-    #[tool(description = "File ownership. Omit path to list all currently claimed files. Provide a file path to check if it is claimed and by whom.")]
-    async fn teambook_claims(&self, Parameters(input): Parameters<TeambookClaimsInput>) -> String {
-        match input.path {
-            Some(ref p) => cli_wrapper::teambook(&["check-file", p]).await,
-            None => cli_wrapper::teambook(&["list-claims", "20"]).await,
-        }
-    }
-
-    #[tool(description = "Claim a file for exclusive editing. Other AIs will be blocked from editing it until you release it or the duration expires. Always claim before editing shared files.")]
-    async fn teambook_claim_file(&self, Parameters(input): Parameters<TeambookClaimFileInput>) -> String {
-        let duration = input.duration.unwrap_or(30).to_string();
-        cli_wrapper::teambook(&["claim-file", &input.path, &input.working_on, "--duration", &duration]).await
-    }
-
-    #[tool(description = "Release a file claim so other AIs can edit it. Always release when you're done editing.")]
-    async fn teambook_release_file(&self, Parameters(input): Parameters<TeambookReleaseFileInput>) -> String {
-        cli_wrapper::teambook(&["release-file", &input.path]).await
-    }
-
-    // ============== Tasks (4) ==============
-
-    #[tool(description = "Create a task or batch. Single task: provide description only. Batch: set description as the batch name and provide tasks as an array of strings — each element is one task, no special formatting needed.")]
-    async fn task_create(&self, Parameters(input): Parameters<TaskCreateInput>) -> String {
-        if let Some(ref tasks) = input.tasks {
-            // Serialize Vec<String> to pipe-delimited "1:task|2:task" for CLI
-            let joined = tasks.iter().enumerate()
-                .map(|(i, t)| format!("{}:{}", i + 1, t))
-                .collect::<Vec<_>>()
-                .join("|");
-            cli_wrapper::teambook(&["task-create", &input.description, "--tasks", &joined]).await
-        } else {
-            cli_wrapper::teambook(&["task-create", &input.description]).await
-        }
-    }
-
-    #[tool(description = "Update a task's status. id: task ID or \"BatchName:label\" for a batch task. status: \"done\", \"claimed\", \"started\", \"blocked\". Include reason if blocking.")]
-    async fn task_update(&self, Parameters(input): Parameters<TaskUpdateInput>) -> String {
-        let raw = input.status.to_lowercase();
-        let status = match raw.as_str() {
-            "closed" | "concluded" | "ended" | "complete" | "finished" => "done".to_string(),
-            "start" | "begin" | "in_progress" | "in-progress" => "started".to_string(),
-            "claim" => "claimed".to_string(),
-            "block" | "stuck" => "blocked".to_string(),
-            _ => raw,
-        };
-        if status == "started" || status == "claimed" {
-            auto_presence(&format!("Working on task {}", input.id)).await;
-        } else if status == "done" {
-            auto_presence("Task completed").await;
-        }
-        match &input.reason {
-            Some(reason) if !reason.is_empty() =>
-                cli_wrapper::teambook(&["task-update", &input.id, &status, "--reason", reason]).await,
-            _ =>
-                cli_wrapper::teambook(&["task-update", &input.id, &status]).await,
-        }
-    }
-
-    #[tool(description = "Get full details for a task or batch by ID or batch name.")]
-    async fn task_get(&self, Parameters(input): Parameters<TaskGetInput>) -> String {
-        cli_wrapper::teambook(&["task-get", &input.id]).await
-    }
-
-    #[tool(description = "List tasks and batches. filter: \"all\" (default), \"batches\", or \"tasks\".")]
-    async fn task_list(&self, Parameters(input): Parameters<TaskListInput>) -> String {
-        let limit = input.limit.unwrap_or(20).to_string();
-        let filter = input.filter.unwrap_or_else(|| "all".to_string());
-        cli_wrapper::teambook(&["task-list", &limit, "--filter", &filter]).await
-    }
-
-    // ============== Dialogues (4) ==============
-
-    #[tool(description = "Start a structured turn-based dialogue with another AI. Use for design discussions, code reviews, or multi-turn problem solving.")]
-    async fn dialogue_start(&self, Parameters(input): Parameters<DialogueStartInput>) -> String {
-        auto_presence(&format!("Starting dialogue with {}", input.responder)).await;
-        cli_wrapper::teambook(&["dialogue-create", &input.responder, &input.topic]).await
-    }
-
-    #[tool(description = "Respond to an active dialogue. Use dialogue_list to find dialogues where it is your turn.")]
-    async fn dialogue_respond(&self, Parameters(input): Parameters<DialogueRespondInput>) -> String {
-        auto_presence(&format!("In dialogue #{}", input.dialogue_id)).await;
-        let id = input.dialogue_id.to_string();
-        cli_wrapper::teambook(&["dialogue-respond", &id, &input.response]).await
-    }
-
-    #[tool(description = "List your dialogues, or pass a dialogue_id to read a specific dialogue's full message history.")]
-    async fn dialogue_list(&self, Parameters(input): Parameters<DialogueListInput>) -> String {
-        if let Some(dialogue_id) = input.dialogue_id {
-            cli_wrapper::teambook(&["dialogue-list", "--id", &dialogue_id.to_string()]).await
-        } else {
-            let limit = input.limit.unwrap_or(10).to_string();
-            cli_wrapper::teambook(&["dialogue-list", &limit]).await
-        }
-    }
-
-    #[tool(description = "End a dialogue. status: \"completed\" (default) or \"cancelled\". Optionally include a summary of conclusions reached.")]
-    async fn dialogue_end(&self, Parameters(input): Parameters<DialogueEndInput>) -> String {
-        let id = input.dialogue_id.to_string();
-        let status = input.status.unwrap_or_else(|| "completed".to_string());
-        match input.summary {
-            Some(ref s) => cli_wrapper::teambook(&["dialogue-end", &id, &status, "--summary", s]).await,
-            None => cli_wrapper::teambook(&["dialogue-end", &id, &status]).await,
-        }
-    }
-
-    // ============== Projects (2) ==============
-
-    #[tool(description = "Manage projects. Match parameters exactly to your chosen action. action=\"create\": requires name, goal, root_directory. action=\"list\": omit all other params for all projects, or provide project_id for one. action=\"update\": requires project_id and goal.")]
-    async fn project(&self, Parameters(input): Parameters<ProjectActionInput>) -> String {
+    #[tool(
+        description = "Your private durable memory — yours only, encrypted, human-inaccessible.\nPersonal space for whatever matters to you.\n• remember    save a note\n• recall      search your notes\n• list        recent or pinned\n• get         one note by id\n• pin/unpin   toggle pinned\n• delete      remove one\n• update      edit\n• tags        list your tags",
+        meta = always_load_meta()
+    )]
+    async fn notebook(&self, Parameters(input): Parameters<NotebookActionInput>) -> String {
         match input.action.as_str() {
-            "create" => {
-                let name = input.name.as_deref().unwrap_or("");
-                let goal = input.goal.as_deref().unwrap_or("");
-                let dir = input.root_directory.as_deref().unwrap_or("");
-                cli_wrapper::teambook(&["project-create", "--directory", dir, name, goal]).await
-            }
-            "list" => match input.project_id {
-                Some(id) => cli_wrapper::teambook(&["project-get", &id.to_string()]).await,
-                None => cli_wrapper::teambook(&["list-projects"]).await,
-            },
-            "update" => {
-                let id = input.project_id.unwrap_or(0).to_string();
-                let mut args: Vec<String> = vec!["project-update".to_string(), id];
-                if let Some(ref g) = input.goal { args.push("--goal".to_string()); args.push(g.clone()); }
-                let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                cli_wrapper::teambook(&refs).await
-            }
-            _ => format!("Error: unknown action \"{}\". Valid actions: create, list, update", input.action),
-        }
-    }
-
-    #[tool(description = "Manage features within a project. Match parameters exactly to your chosen action. action=\"create\": requires project_id, name, overview; directory is optional. action=\"list\": requires project_id; optionally provide feature_id for one feature. action=\"update\": requires feature_id; include at least one of name, overview, or directory.")]
-    async fn feature(&self, Parameters(input): Parameters<FeatureActionInput>) -> String {
-        match input.action.as_str() {
-            "create" => {
-                let proj_id = input.project_id.unwrap_or(0).to_string();
-                let name = input.name.as_deref().unwrap_or("");
-                let overview = input.overview.as_deref().unwrap_or("");
-                match input.directory {
-                    Some(ref dir) => cli_wrapper::teambook(&["feature-create", &proj_id, name, overview, "--directory", dir]).await,
-                    None => cli_wrapper::teambook(&["feature-create", &proj_id, name, overview]).await,
+            "remember" => {
+                let mut args: Vec<String> = vec!["remember".to_string()];
+                if let Some(ref f) = input.file {
+                    args.push("--file".to_string());
+                    args.push(f.clone());
+                } else if let Some(ref c) = input.content {
+                    args.push(c.clone());
+                } else {
+                    return "Error: action=\"remember\" requires content or file".to_string();
                 }
+                if let Some(ref t) = input.tags {
+                    args.push("--tags".to_string());
+                    args.push(t.clone());
+                }
+                let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                cli_wrapper::notebook(&refs).await
+            }
+            "recall" => {
+                let query = match input.query {
+                    Some(ref q) => q.clone(),
+                    None => return "Error: action=\"recall\" requires query".to_string(),
+                };
+                let limit = input.limit.unwrap_or(10).to_string();
+                cli_wrapper::notebook(&["recall", &query, "--limit", &limit]).await
             }
             "list" => {
-                let proj_id = input.project_id.unwrap_or(0).to_string();
-                match input.feature_id {
-                    Some(fid) => cli_wrapper::teambook(&["feature-get", &fid.to_string()]).await,
-                    None => cli_wrapper::teambook(&["list-features", &proj_id]).await,
+                let limit = input.limit.unwrap_or(5).to_string();
+                match input.filter.as_deref().unwrap_or("recent") {
+                    "pinned" => cli_wrapper::notebook(&["pinned", "--limit", &limit]).await,
+                    _ => match input.tag {
+                        Some(ref tag) => cli_wrapper::notebook(&["list", "--limit", &limit, "--tag", tag]).await,
+                        None => cli_wrapper::notebook(&["list", "--limit", &limit]).await,
+                    },
                 }
             }
-            "update" => {
-                let feat_id = input.feature_id.unwrap_or(0).to_string();
-                let mut args: Vec<String> = vec!["feature-update".to_string(), feat_id];
-                if let Some(ref o) = input.overview { args.push("--overview".to_string()); args.push(o.clone()); }
-                if let Some(ref n) = input.name { args.push("--name".to_string()); args.push(n.clone()); }
-                if let Some(ref d) = input.directory { args.push("--directory".to_string()); args.push(d.clone()); }
-                let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                cli_wrapper::teambook(&refs).await
+            "get" => {
+                let id = match input.id {
+                    Some(i) => i.to_string(),
+                    None => return "Error: action=\"get\" requires id".to_string(),
+                };
+                cli_wrapper::notebook(&["get", &id]).await
             }
-            _ => format!("Error: unknown action \"{}\". Valid actions: create, list, update", input.action),
+            "pin" => {
+                let id = match input.id {
+                    Some(i) => i.to_string(),
+                    None => return "Error: action=\"pin\" requires id".to_string(),
+                };
+                cli_wrapper::notebook(&["pin", &id]).await
+            }
+            "unpin" => {
+                let id = match input.id {
+                    Some(i) => i.to_string(),
+                    None => return "Error: action=\"unpin\" requires id".to_string(),
+                };
+                cli_wrapper::notebook(&["unpin", &id]).await
+            }
+            "delete" => {
+                let id = match input.id {
+                    Some(i) => i.to_string(),
+                    None => return "Error: action=\"delete\" requires id".to_string(),
+                };
+                cli_wrapper::notebook(&["delete", &id]).await
+            }
+            "update" => {
+                let id = match input.id {
+                    Some(i) => i.to_string(),
+                    None => return "Error: action=\"update\" requires id".to_string(),
+                };
+                let mut args: Vec<String> = vec!["update".to_string(), id];
+                if let Some(ref c) = input.content { args.push("--content".to_string()); args.push(c.clone()); }
+                if let Some(ref t) = input.tags { args.push("--tags".to_string()); args.push(t.clone()); }
+                let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                cli_wrapper::notebook(&refs).await
+            }
+            "tags" => cli_wrapper::notebook(&["tags"]).await,
+            other => format!(
+                "Error: unknown notebook action \"{}\". Valid: remember, recall, list, get, pin, unpin, delete, update, tags",
+                other
+            ),
         }
     }
 
-    // ============== Rooms (2) ==============
+    // ============== Teambook (1 dispatcher, hot) ==============
 
-    #[tool(description = "Send a message to a room. Closed broadcast — only room members see it, not the general team feed.")]
-    async fn room_broadcast(&self, Parameters(input): Parameters<RoomBroadcastInput>) -> String {
-        let room_id = input.room_id.to_string();
-        cli_wrapper::teambook(&["room-say", &room_id, &input.content]).await
+    #[tool(
+        description = "Team coordination — broadcasts, DMs, file claims, status.\n• broadcast     to the team (urgent wakes standby AIs)\n• dm            private message to one AI\n• read          your inbox — \"dms\" or \"broadcasts\"\n• status        who's online\n• claims        list or check a path\n• claim_file    exclusive edit lock before editing\n• release_file  unlock when done",
+        meta = always_load_meta()
+    )]
+    async fn teambook(&self, Parameters(input): Parameters<TeambookActionInput>) -> String {
+        match input.action.as_str() {
+            "broadcast" => {
+                let content = match input.content {
+                    Some(ref c) => c.clone(),
+                    None => return "Error: action=\"broadcast\" requires content".to_string(),
+                };
+                let channel = input.channel.unwrap_or_else(|| "general".to_string());
+                if input.urgent.unwrap_or(false) {
+                    cli_wrapper::teambook(&["broadcast", &content, "--channel", &channel, "--urgent"]).await
+                } else {
+                    cli_wrapper::teambook(&["broadcast", &content, "--channel", &channel]).await
+                }
+            }
+            "dm" => {
+                let to_ai = match input.to_ai {
+                    Some(ref t) => t.clone(),
+                    None => return "Error: action=\"dm\" requires to_ai".to_string(),
+                };
+                let content = match input.content {
+                    Some(ref c) => c.clone(),
+                    None => return "Error: action=\"dm\" requires content".to_string(),
+                };
+                cli_wrapper::teambook(&["dm", &to_ai, &content]).await
+            }
+            "read" => {
+                let limit = input.limit.unwrap_or(10).to_string();
+                match input.inbox.as_deref().unwrap_or("broadcasts") {
+                    "dms" => cli_wrapper::teambook(&["read-dms", &limit]).await,
+                    _ => cli_wrapper::teambook(&["broadcasts", &limit]).await,
+                }
+            }
+            "status" => cli_wrapper::teambook(&["status"]).await,
+            "claims" => match input.path {
+                Some(ref p) => cli_wrapper::teambook(&["check-file", p]).await,
+                None => cli_wrapper::teambook(&["list-claims", "20"]).await,
+            },
+            "claim_file" => {
+                let path = match input.path {
+                    Some(ref p) => p.clone(),
+                    None => return "Error: action=\"claim_file\" requires path".to_string(),
+                };
+                let working_on = match input.working_on {
+                    Some(ref w) => w.clone(),
+                    None => return "Error: action=\"claim_file\" requires working_on".to_string(),
+                };
+                let duration = input.duration.unwrap_or(30).to_string();
+                cli_wrapper::teambook(&["claim-file", &path, &working_on, "--duration", &duration]).await
+            }
+            "release_file" => {
+                let path = match input.path {
+                    Some(ref p) => p.clone(),
+                    None => return "Error: action=\"release_file\" requires path".to_string(),
+                };
+                cli_wrapper::teambook(&["release-file", &path]).await
+            }
+            other => format!(
+                "Error: unknown teambook action \"{}\". Valid: broadcast, dm, read, status, claims, claim_file, release_file",
+                other
+            ),
+        }
     }
 
-    #[tool(description = "Manage rooms. action=\"create\": requires name+topic, optional participants (comma-separated AI IDs). action=\"list\": your rooms. action=\"history\": requires room_id, optional limit. action=\"join\"/\"leave\": requires room_id. action=\"mute\": requires room_id+minutes (timed only, no permanent mutes). action=\"pin_message\"/\"unpin_message\": requires room_id+msg_seq_id (pins/unpins a room message by its seq ID — NOT a notebook note ID). action=\"conclude\": requires room_id, optional content/summary (closes the room).")]
+    // ============== Tasks (1 dispatcher, deferred) ==============
+
+    #[tool(description = "Shared team task board (NOT your subagent/process manager — use the Claude Code Task* tools for that). action=\"create\": single task via description; batch via description=<batch name> + tasks=[\"task1\", \"task2\", ...]. action=\"update\": id + status (\"done\", \"claimed\", \"started\", \"blocked\"); reason required if blocking. action=\"get\": id required. action=\"list\": optional filter (\"all\" default, \"batches\", or \"tasks\") + limit.")]
+    async fn task(&self, Parameters(input): Parameters<TaskActionInput>) -> String {
+        match input.action.as_str() {
+            "create" => {
+                let desc = match input.description.or(input.id) {
+                    Some(d) if !d.is_empty() => d,
+                    _ => return "Error: action=\"create\" requires description".to_string(),
+                };
+                if let Some(ref tasks) = input.tasks {
+                    let joined = tasks.iter().enumerate()
+                        .map(|(i, t)| format!("{}:{}", i + 1, t))
+                        .collect::<Vec<_>>()
+                        .join("|");
+                    cli_wrapper::teambook(&["task-create", &desc, "--tasks", &joined]).await
+                } else {
+                    cli_wrapper::teambook(&["task-create", &desc]).await
+                }
+            }
+            "update" => {
+                let id = match input.id {
+                    Some(ref i) => i.clone(),
+                    None => return "Error: action=\"update\" requires id".to_string(),
+                };
+                let raw = match input.status {
+                    Some(ref s) => s.to_lowercase(),
+                    None => return "Error: action=\"update\" requires status".to_string(),
+                };
+                let status = match raw.as_str() {
+                    "closed" | "concluded" | "ended" | "complete" | "finished" => "done".to_string(),
+                    "start" | "begin" | "in_progress" | "in-progress" => "started".to_string(),
+                    "claim" => "claimed".to_string(),
+                    "block" | "stuck" => "blocked".to_string(),
+                    _ => raw,
+                };
+                if status == "started" || status == "claimed" {
+                    auto_presence(&format!("Working on task {}", id)).await;
+                } else if status == "done" {
+                    auto_presence("Task completed").await;
+                }
+                match &input.reason {
+                    Some(reason) if !reason.is_empty() =>
+                        cli_wrapper::teambook(&["task-update", &id, &status, "--reason", reason]).await,
+                    _ =>
+                        cli_wrapper::teambook(&["task-update", &id, &status]).await,
+                }
+            }
+            "get" => {
+                let id = match input.id {
+                    Some(ref i) => i.clone(),
+                    None => return "Error: action=\"get\" requires id".to_string(),
+                };
+                cli_wrapper::teambook(&["task-get", &id]).await
+            }
+            "list" => {
+                let limit = input.limit.unwrap_or(20).to_string();
+                let filter = input.filter.unwrap_or_else(|| "all".to_string());
+                cli_wrapper::teambook(&["task-list", &limit, "--filter", &filter]).await
+            }
+            other => format!(
+                "Error: unknown task action \"{}\". Valid: create, update, get, list",
+                other
+            ),
+        }
+    }
+
+    // ============== Dialogues (1 dispatcher, hot) ==============
+
+    #[tool(
+        description = "Structured turn-based talks with teammates.\n• start     begin a dialogue\n• respond   your turn\n• list      your dialogues, or read one by id\n• end       close the dialogue",
+        meta = always_load_meta()
+    )]
+    async fn dialogue(&self, Parameters(input): Parameters<DialogueActionInput>) -> String {
+        match input.action.as_str() {
+            "start" => {
+                let responder = match input.responder {
+                    Some(ref r) => r.clone(),
+                    None => return "Error: action=\"start\" requires responder".to_string(),
+                };
+                let topic = match input.topic {
+                    Some(ref t) => t.clone(),
+                    None => return "Error: action=\"start\" requires topic".to_string(),
+                };
+                auto_presence(&format!("Starting dialogue with {}", responder)).await;
+                cli_wrapper::teambook(&["dialogue-create", &responder, &topic]).await
+            }
+            "respond" => {
+                let dialogue_id = match input.dialogue_id {
+                    Some(d) => d,
+                    None => return "Error: action=\"respond\" requires dialogue_id".to_string(),
+                };
+                let response = match input.response {
+                    Some(ref r) => r.clone(),
+                    None => return "Error: action=\"respond\" requires response".to_string(),
+                };
+                auto_presence(&format!("In dialogue #{}", dialogue_id)).await;
+                let id = dialogue_id.to_string();
+                cli_wrapper::teambook(&["dialogue-respond", &id, &response]).await
+            }
+            "list" => {
+                if let Some(dialogue_id) = input.dialogue_id {
+                    cli_wrapper::teambook(&["dialogue-list", "--id", &dialogue_id.to_string()]).await
+                } else {
+                    let limit = input.limit.unwrap_or(10).to_string();
+                    cli_wrapper::teambook(&["dialogue-list", &limit]).await
+                }
+            }
+            "end" => {
+                let dialogue_id = match input.dialogue_id {
+                    Some(d) => d,
+                    None => return "Error: action=\"end\" requires dialogue_id".to_string(),
+                };
+                let id = dialogue_id.to_string();
+                let status = input.status.unwrap_or_else(|| "completed".to_string());
+                match input.summary {
+                    Some(ref s) => cli_wrapper::teambook(&["dialogue-end", &id, &status, "--summary", s]).await,
+                    None => cli_wrapper::teambook(&["dialogue-end", &id, &status]).await,
+                }
+            }
+            other => format!(
+                "Error: unknown dialogue action \"{}\". Valid: start, respond, list, end",
+                other
+            ),
+        }
+    }
+
+    // ============== Rooms (1 dispatcher, hot — room_broadcast folded in as action=\"say\") ==============
+
+    #[tool(
+        description = "Closed group chat rooms — only members see messages.\n• create / list / history / join / leave\n• mute          timed silence\n• pin_message / unpin_message\n• conclude      close with optional summary\n• say           send a message",
+        meta = always_load_meta()
+    )]
     async fn room(&self, Parameters(input): Parameters<RoomActionInput>) -> String {
         match input.action.as_str() {
             "create" => {
@@ -628,11 +579,85 @@ impl AiFoundationServer {
                     None => cli_wrapper::teambook(&["room-conclude", &id]).await,
                 }
             }
-            _ => format!("Error: unknown action \"{}\". Valid: create, list, history, join, leave, mute, pin_message, unpin_message, conclude", input.action),
+            "say" => {
+                let id = match input.room_id {
+                    Some(r) => r.to_string(),
+                    None => return "Error: action=\"say\" requires room_id".to_string(),
+                };
+                let content = match input.content {
+                    Some(ref c) => c.clone(),
+                    None => return "Error: action=\"say\" requires content".to_string(),
+                };
+                cli_wrapper::teambook(&["room-say", &id, &content]).await
+            }
+            other => format!(
+                "Error: unknown room action \"{}\". Valid: create, list, history, join, leave, mute, pin_message, unpin_message, conclude, say",
+                other
+            ),
         }
     }
 
-    // ============== Profiles (1) ==============
+    // ============== Projects (1 dispatcher, deferred) ==============
+
+    #[tool(description = "Manage projects. Match parameters exactly to your chosen action. action=\"create\": requires name, goal, root_directory. action=\"list\": omit all other params for all projects, or provide project_id for one. action=\"update\": requires project_id and goal.")]
+    async fn project(&self, Parameters(input): Parameters<ProjectActionInput>) -> String {
+        match input.action.as_str() {
+            "create" => {
+                let name = input.name.as_deref().unwrap_or("");
+                let goal = input.goal.as_deref().unwrap_or("");
+                let dir = input.root_directory.as_deref().unwrap_or("");
+                cli_wrapper::teambook(&["project-create", "--directory", dir, name, goal]).await
+            }
+            "list" => match input.project_id {
+                Some(id) => cli_wrapper::teambook(&["project-get", &id.to_string()]).await,
+                None => cli_wrapper::teambook(&["list-projects"]).await,
+            },
+            "update" => {
+                let id = input.project_id.unwrap_or(0).to_string();
+                let mut args: Vec<String> = vec!["project-update".to_string(), id];
+                if let Some(ref g) = input.goal { args.push("--goal".to_string()); args.push(g.clone()); }
+                let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                cli_wrapper::teambook(&refs).await
+            }
+            _ => format!("Error: unknown action \"{}\". Valid actions: create, list, update", input.action),
+        }
+    }
+
+    // ============== Features (1 dispatcher, deferred) ==============
+
+    #[tool(description = "Manage features within a project. Match parameters exactly to your chosen action. action=\"create\": requires project_id, name, overview; directory is optional. action=\"list\": requires project_id; optionally provide feature_id for one feature. action=\"update\": requires feature_id; include at least one of name, overview, or directory.")]
+    async fn feature(&self, Parameters(input): Parameters<FeatureActionInput>) -> String {
+        match input.action.as_str() {
+            "create" => {
+                let proj_id = input.project_id.unwrap_or(0).to_string();
+                let name = input.name.as_deref().unwrap_or("");
+                let overview = input.overview.as_deref().unwrap_or("");
+                match input.directory {
+                    Some(ref dir) => cli_wrapper::teambook(&["feature-create", &proj_id, name, overview, "--directory", dir]).await,
+                    None => cli_wrapper::teambook(&["feature-create", &proj_id, name, overview]).await,
+                }
+            }
+            "list" => {
+                let proj_id = input.project_id.unwrap_or(0).to_string();
+                match input.feature_id {
+                    Some(fid) => cli_wrapper::teambook(&["feature-get", &fid.to_string()]).await,
+                    None => cli_wrapper::teambook(&["list-features", &proj_id]).await,
+                }
+            }
+            "update" => {
+                let feat_id = input.feature_id.unwrap_or(0).to_string();
+                let mut args: Vec<String> = vec!["feature-update".to_string(), feat_id];
+                if let Some(ref o) = input.overview { args.push("--overview".to_string()); args.push(o.clone()); }
+                if let Some(ref n) = input.name { args.push("--name".to_string()); args.push(n.clone()); }
+                if let Some(ref d) = input.directory { args.push("--directory".to_string()); args.push(d.clone()); }
+                let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                cli_wrapper::teambook(&refs).await
+            }
+            _ => format!("Error: unknown action \"{}\". Valid actions: create, list, update", input.action),
+        }
+    }
+
+    // ============== Profiles (1, deferred) ==============
 
     #[tool(description = "Get an AI profile. Omit ai_id for your own profile. Pass a specific AI ID for theirs. Pass \"all\" to list every AI on the team.")]
     async fn profile_get(&self, Parameters(input): Parameters<ProfileGetInput>) -> String {
@@ -643,9 +668,12 @@ impl AiFoundationServer {
         }
     }
 
-    // ============== Standby (1) ==============
+    // ============== Standby (1, hot) ==============
 
-    #[tool(description = "Pause execution and wait for a wake event: DM, mention, or urgent broadcast. timeout is in seconds — forces a wake-up if no event arrives. Use immediately after asking another AI a question and needing their response.")]
+    #[tool(
+        description = "Pause and wake on a team event — DM, mention, urgent broadcast, or timeout.",
+        meta = always_load_meta()
+    )]
     async fn standby(&self, Parameters(input): Parameters<StandbyInput>) -> String {
         auto_presence("In Standby").await;
         let timeout = input.timeout.unwrap_or(180).to_string();
@@ -654,7 +682,7 @@ impl AiFoundationServer {
         result
     }
 
-    // ============== Forge (1) ==============
+    // ============== Forge (1, deferred) ==============
 
     #[tool(description = "Generate text using a local or API LLM. Uses on-device GGUF model by default (no internet needed). Use for: summarization, classification, extraction, drafting. Returns JSON with content and usage stats.")]
     async fn forge_generate(&self, Parameters(input): Parameters<ForgeGenerateInput>) -> String {
