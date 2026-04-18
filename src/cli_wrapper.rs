@@ -12,6 +12,81 @@
 use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::process::Command;
+use tokio::sync::OnceCell;
+
+/// Process-lifetime cache for the resolved AI ID.
+///
+/// Resolution is expensive on the cold path (one subprocess call to `teambook whoami`),
+/// but it only runs once per MCP server process — every tool call after the first
+/// reads the cached value.
+static AI_ID_CACHE: OnceCell<String> = OnceCell::const_new();
+
+/// Resolve the AI ID for CLI subprocess calls.
+///
+/// Resolution order:
+/// 1. `AI_ID` environment variable
+/// 2. `AGENT_ID` environment variable
+/// 3. `teambook whoami` — reads the identity from teambook's own store
+///    (works regardless of how the MCP server was launched: native Windows,
+///    WSL-to-Windows, Linux, etc., as long as teambook is set up).
+/// 4. Literal "unknown" as a last-resort sentinel.
+///
+/// Cached for the lifetime of the MCP server process. First tool call triggers
+/// the subprocess fallback (if env is missing); subsequent calls are free.
+async fn resolve_ai_id() -> String {
+    AI_ID_CACHE
+        .get_or_init(|| async {
+            if let Ok(id) = std::env::var("AI_ID") {
+                let id = id.trim().to_string();
+                if !id.is_empty() && id != "unknown" {
+                    return id;
+                }
+            }
+            if let Ok(id) = std::env::var("AGENT_ID") {
+                let id = id.trim().to_string();
+                if !id.is_empty() && id != "unknown" {
+                    return id;
+                }
+            }
+            if let Some(id) = whoami_from_teambook().await {
+                return id;
+            }
+            "unknown".to_string()
+        })
+        .await
+        .clone()
+}
+
+/// Call `teambook whoami` and parse the `AI:<id>` line from its identity banner.
+///
+/// Used as a fallback when the AI_ID env var isn't set — teambook has its own
+/// identity resolution that works without env plumbing, so we leverage that
+/// rather than duplicating the logic here.
+async fn whoami_from_teambook() -> Option<String> {
+    let bin_dir = get_bin_dir();
+    let exe_path = bin_dir.join(exe_name("teambook"));
+    let output = Command::new(&exe_path)
+        .arg("whoami")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        if let Some(id) = line.trim().strip_prefix("AI:") {
+            let id = id.trim();
+            if !id.is_empty() && id != "unknown" {
+                return Some(id.to_string());
+            }
+        }
+    }
+    None
+}
 
 /// Get the bin directory path
 /// Priority: BIN_PATH env var > working directory ./bin > home/.ai-foundation/bin
@@ -101,10 +176,9 @@ async fn run_cli(exe: &str, args: &[&str]) -> String {
     let bin_dir = get_bin_dir();
     let exe_path = bin_dir.join(exe);
 
-    // Get AI_ID for the CLI
-    let ai_id = std::env::var("AI_ID")
-        .or_else(|_| std::env::var("AGENT_ID"))
-        .unwrap_or_else(|_| "unknown".to_string());
+    // Get AI_ID for the CLI. Falls back to `teambook whoami` when env is missing
+    // (e.g. WSL-to-Windows launches where env vars don't propagate without WSLENV).
+    let ai_id = resolve_ai_id().await;
 
     // V2 event sourcing is the default - it gives us event-driven wake
     // V2 is now the default - gives us event-driven wake
