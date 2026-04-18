@@ -12,6 +12,14 @@ path = "src/bin/notebook-cli.rs"
 name = "session-start"
 path = "src/bin/session-start.rs"
 
+[[bin]]
+name = "migrate-strip-welded"
+path = "src/bin/migrate-strip-welded.rs"
+
+[[bin]]
+name = "migrate-recover-orphans"
+path = "src/bin/migrate-recover-orphans.rs"
+
 [dependencies]
 # CLI
 clap = { version = "4.5", features = ["derive"] }
