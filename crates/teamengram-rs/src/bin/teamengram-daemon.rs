@@ -773,12 +773,33 @@ async fn route_method(
                             }
                         }
                     }
-                    // Check for urgent keywords
-                    if content_lower.contains("urgent") || content_lower.contains("critical") || content_lower.contains("help") {
-                        // Wake all known AIs for urgent messages
-                        // For now, signal broadcast reason (AIs can check if relevant)
-                        signal_wake("all", WakeReason::Urgent, from, content);
+                    let urgent_requested = params.get("urgent")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let urgent_tagged = content.trim_start().starts_with("[URGENT]")
+                        || content.trim_start().starts_with("[urgent]");
+                    if urgent_requested || urgent_tagged {
+                        let store_for_wake = Arc::clone(&shared_store);
+                        let from_owned = from.to_string();
+                        let content_owned = content.to_string();
+                        tokio::spawn(async move {
+                            let mut s = store_for_wake.write().await;
+                            if let Ok(presences) = s.get_all_presences() {
+                                drop(s);
+                                let mut seen: std::collections::HashSet<String> =
+                                    std::collections::HashSet::new();
+                                for p in presences {
+                                    if p.ai_id == from_owned { continue; }
+                                    if !seen.insert(p.ai_id.clone()) { continue; }
+                                    if is_ai_online(&p.ai_id) {
+                                        signal_wake(&p.ai_id, WakeReason::Urgent,
+                                                    &from_owned, &content_owned);
+                                    }
+                                }
+                            }
+                        });
                     }
+                    let _ = content_lower;
                     JsonRpcResponse::success(id, serde_json::json!({
                         "id": msg_id,
                         "status": "sent"
