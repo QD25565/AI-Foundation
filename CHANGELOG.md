@@ -1,5 +1,89 @@
 # Changelog
 
+## v62 — 2026-04-18
+
+### Distributable Binaries — No Personal Paths
+- **Rust path remap** — release builds now pass `--remap-path-prefix` for the
+  workspace root, `$CARGO_HOME`, and `$RUSTUP_HOME`. `file!()` expansions and
+  panic locations baked into `strip = true` release binaries no longer leak
+  the build-host username or home directory.
+- **llama.cpp C/C++ path remap** — the workspace `llama-cpp-sys-2` build.rs
+  now honors `LLAMA_CPP_PATH_REMAP` (MSVC `/d1trimfile`, clang/gcc
+  `-ffile-prefix-map`) so `__FILE__` in compiled llama.cpp objects stops at
+  `llama.cpp\...` instead of leaking the workspace parent path.
+- **CI parity** — `.github/workflows/release.yml` sets both vars for
+  Linux/macOS/Windows runners, so tagged releases ship clean binaries.
+- **Workspace hygiene** — scrubbed a hardcoded home-path literal from an
+  Engram doc comment; removed a stale `bin/windows/*.exe.old` sidecar.
+
+### Engram — Orphan Row Recovery & Tolerance
+- **Orphan tolerance (list/recent/by_tag)** — rows that fail to decrypt under
+  the current key no longer abort iteration. They are counted and surfaced
+  via `verify` output as `orphan_count=N` so operators can detect them
+  without losing access to the rest of the notebook.
+- **`migrate-recover-orphans`** — new tool that tries to decrypt orphaned
+  rows under a set of candidate ciphers (env-derived keys for historical
+  AI IDs, and raw 32-byte key files from `--key-files-dir`), then
+  re-encrypts successful decrypts under the current key. Idempotent;
+  writes a `.bak-recover-orphans-<epoch>` side-file before mutating.
+- **Legacy v2 key file support** — the `--key-files-dir` flag reads raw
+  32-byte `.engram-key` files (pre-v3 file-stored-key format) so
+  notebooks created before env-derivation can be recovered in-place
+  rather than abandoned.
+- **`EngramCipher::from_key`** — public constructor for pre-derived 32-byte
+  keys, used by the recovery tool to materialize legacy ciphers.
+- **`Engram::update` timestamp fix** — previously reset `timestamp` to now
+  on every update; now preserves the original `timestamp` and only advances
+  `updated_at`. Existing notes with `updated_at < timestamp` are not
+  "future-dated" by repeated edits.
+- **Test harness `env_lock`** — tests that mutate the global `AI_ID` env
+  var are now serialized via `env_lock()` to prevent decrypt-race failures
+  in the 170-test suite. Build: 170/170 pass.
+
+### Notebook — Welded Payload Stripper
+- **`migrate-strip-welded`** — new tool that strips auto-welded episodic
+  context from notes created during the (now-reverted) auto-gather period.
+  Preserves pagerank, embeddings, pinned state, and `timestamp`.
+- **`notebook remember`** — reverted auto-gather of episodic context.
+  Notes are stored as-written; context welding is an explicit opt-in.
+
+### MCP — Dispatcher Collapse 35 → 30 Tools
+- **Schema pruning** — removed five redundant tools whose semantics were
+  covered by existing params: `notebook_work`, `notebook_related`,
+  `notebook_pinned`, `notebook_unpin`, `notebook_add_tags`.
+- **Inbox consolidation** — `teambook_read_dms` + `teambook_read_broadcasts`
+  merged into `teambook_read` with `inbox` param. `teambook_list_claims` +
+  `teambook_who_has` merged into `teambook_claims` with `path` param.
+- **Project/feature consolidation** — `project_create/list/update` →
+  single `project` tool with `action` param. Same for `feature_*`.
+- **Profile consolidation** — `profile_list` merged into `profile_get`
+  (pass `ai_id="all"`). `profile_update` removed (first-run setup; not
+  a session concern).
+- **AI_ID resolution in CLI wrapper** — OnceCell-cached resolution via env
+  → env → `teambook whoami` → `"unknown"`. Zero overhead after first call.
+
+### TeamEngram — Explicit Urgent Semantics
+- **Urgent messages are opt-in** — `urgent: true` param OR `[URGENT]`
+  content prefix triggers wake-all-online. Previously any DM containing
+  the word "urgent", "critical", or "help" woke every AI, which produced
+  false positives on conversational text.
+- **Presence-filtered wake** — only AIs currently online (per presence
+  registry) are woken, deduplicated by `ai_id`. Offline AIs pick up the
+  message via normal inbox on next session.
+
+### Session-Start & Notebook-CLI — Cipher Consistency
+- **Eager `AI_ID` env-bind** — both `session-start` and `notebook-cli` now
+  resolve `AI_ID` (`.claude/settings.json` → env) and re-export it into the
+  process env *before* calling `Engram::open`. Engram's cipher keys on
+  `std::env::var("AI_ID")` at open time; inheriting `AI_ID=default` from a
+  fresh shell used to open under the wrong key and fail decryption.
+- **Removed `strip_note_metadata`** helper from `session-start` — the
+  `[ctx:…]` / `[Working on …]` / `[With …]` trailers it used to chop off
+  came from the auto-gather welding that v62 reverts, so there's nothing
+  to strip anymore.
+
+---
+
 ## v61 — 2026-04-12
 
 ### File Claim Enforcement

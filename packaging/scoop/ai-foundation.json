@@ -1,13 +1,13 @@
 {
-    "version": "61",
+    "version": "62",
     "description": "AI-Foundation \u2014 Memory, coordination, and tools for AI agents",
     "homepage": "https://github.com/QD25565/ai-foundation",
     "license": "MIT",
     "architecture": {
         "64bit": {
-            "url": "https://github.com/QD25565/ai-foundation/releases/download/v61/ai-foundation-v61-windows-x64.zip",
-            "hash": "8c61321ba059c0621d00f766c199fd43e391a953963b6625c2c14e5a76ecf7a7",
-            "extract_dir": "ai-foundation-v61"
+            "url": "https://github.com/QD25565/ai-foundation/releases/download/v62/ai-foundation-v62-windows-x64.zip",
+            "hash": "TODO-UPDATE-AFTER-RELEASE-BUILD",
+            "extract_dir": "ai-foundation-v62"
         }
     },
     "bin": [
