@@ -249,6 +249,9 @@ impl AiFoundationServer {
                     args.push("--file".to_string());
                     args.push(f.clone());
                 } else if let Some(ref c) = input.content {
+                    if c.trim().is_empty() {
+                        return "Error: content is empty — refusing to store a blank note".to_string();
+                    }
                     args.push(c.clone());
                 } else {
                     return "Error: action=\"remember\" requires content or file".to_string();
@@ -689,53 +692,13 @@ impl ServerHandler for AiFoundationServer {
     }
 }
 
-/// OS-level presence mutex — held for process lifetime, auto-releases on death.
-/// Uses the same naming convention as teamengram::wake::PresenceMutex so
-/// is_ai_online() detects MCP server processes.
-#[cfg(windows)]
-fn acquire_presence_mutex(ai_id: &str) -> Option<*mut std::ffi::c_void> {
-    use std::ffi::OsStr;
-    use std::os::windows::ffi::OsStrExt;
-
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn CreateMutexW(
-            attrs: *const u8,
-            initial_owner: i32,
-            name: *const u16,
-        ) -> *mut std::ffi::c_void;
-    }
-
-    let name = format!("Local\\TeamEngram_Alive_{}", ai_id);
-    let wide: Vec<u16> = OsStr::new(&name)
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    let handle = unsafe { CreateMutexW(std::ptr::null(), 1, wide.as_ptr()) };
-    if handle.is_null() { None } else { Some(handle) }
-}
-
-#[cfg(not(windows))]
-fn acquire_presence_mutex(ai_id: &str) -> Option<std::path::PathBuf> {
-    let dir = dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
-        .join(".ai-foundation")
-        .join("v2")
-        .join("presence");
-    std::fs::create_dir_all(&dir).ok()?;
-    let path = dir.join(format!("{}.pid", ai_id));
-    std::fs::write(&path, format!("{}", std::process::id())).ok()?;
-    Some(path)
-}
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let ai_id = std::env::var("AI_ID").unwrap_or_default();
-    let _presence = if !ai_id.is_empty() && ai_id != "unknown" {
-        acquire_presence_mutex(&ai_id)
-    } else {
-        None
-    };
+
+    if !ai_id.is_empty() && ai_id != "unknown" {
+        cli_wrapper::register_presence_v1(&ai_id).await;
+    }
 
     let server = AiFoundationServer::new();
     server.serve(stdio()).await?.waiting().await?;

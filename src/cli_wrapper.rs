@@ -152,6 +152,30 @@ pub async fn profile(args: &[&str]) -> String {
     run_cli(&exe_name("profile-cli"), args).await
 }
 
+/// Register presence via the V1 daemon RPC path (creates OS mutex).
+///
+/// V2 outbox writes (TEAMENGRAM_V2=1) update presence events but don't create
+/// the OS-level named mutex that is_ai_online() checks. The V1 daemon path
+/// does: the daemon acquires a PresenceMutex for each AI that connects and
+/// holds it for its lifetime. This one-time call at MCP server startup ensures
+/// the daemon knows we're alive.
+///
+/// Deliberately does NOT set TEAMENGRAM_V2 on the subprocess — we need the V1
+/// code path, not the V2 outbox writer.
+pub async fn register_presence_v1(ai_id: &str) {
+    let bin_dir = get_bin_dir();
+    let exe_path = bin_dir.join(exe_name("teambook"));
+    let _ = Command::new(&exe_path)
+        .args(["update-presence", "active", "MCP server online", "--v2", "false"])
+        .env("AI_ID", ai_id)
+        .current_dir(std::env::temp_dir())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await;
+}
+
 /// Run a CLI command and return its output
 ///
 /// # Arguments

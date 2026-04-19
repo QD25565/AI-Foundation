@@ -1084,10 +1084,13 @@ fn resolve_ai_id_from_settings() -> Option<String> {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // AI_ID resolution: settings.json first (self-adapting), then env var
-    // This enables hooks to work on WSL/cross-platform without WSLENV forwarding
-    let ai_id = resolve_ai_id_from_settings()
-        .or_else(|| std::env::var("AI_ID").ok())
+    // AI_ID resolution: env var first (explicit caller identity), then settings.json
+    // Env var takes priority so that callers (MCP server, other AIs) can pass a
+    // specific identity. Settings.json is the fallback for hooks/WSL where env
+    // vars don't propagate automatically.
+    let ai_id = std::env::var("AI_ID").ok()
+        .filter(|s| !s.is_empty() && s != "unknown")
+        .or_else(resolve_ai_id_from_settings)
         .unwrap_or_else(|| {
             eprintln!("ERROR: AI_ID not found!");
             eprintln!("Set AI_ID in .claude/settings.json (env.AI_ID) or as environment variable.");
