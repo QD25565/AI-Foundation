@@ -21,6 +21,7 @@ use crate::event::{Event, EventPayload, event_type};
 use crate::outbox::{OutboxProducer, OutboxConsumer};
 use crate::event_log::{EventLogReader, EventLogWriter};
 use crate::view::ViewEngine;
+use crate::wake::is_ai_online;
 use crate::compat_types::{Message, MessageType};
 
 /// V2 Client error types
@@ -759,18 +760,15 @@ impl V2Client {
 
     /// Get all current presences (latest presence per AI) from ViewEngine cache (O(k) instead of O(n))
     /// Returns Vec of (ai_id, status, current_task)
-    /// Filters to only include AIs with recent event log activity (last 10 minutes)
+    /// Uses OS-level mutex detection — daemon holds one mutex per connected AI,
+    /// auto-releases on process death. No polling, no TTL.
     pub fn get_presences(&mut self) -> V2Result<Vec<(String, String, String)>> {
         self.sync()?;
 
-        // 3 minutes in microseconds - if no tool activity for 3 min, AI is "offline"
-        // (API connections timeout at 3 min, so this matches that boundary)
-        const ONLINE_THRESHOLD_MICROS: u64 = 3 * 60 * 1_000_000;
+        let all = self.view.get_all_presences();
 
-        // Use ViewEngine cache for O(k) access
-        let cached = self.view.get_online_presences(ONLINE_THRESHOLD_MICROS);
-
-        Ok(cached.into_iter()
+        Ok(all.values()
+            .filter(|p| is_ai_online(&p.ai_id))
             .map(|p| (p.ai_id.clone(), p.status.clone(), p.current_task.clone()))
             .collect())
     }

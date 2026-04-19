@@ -203,7 +203,11 @@ impl TeamEngramClient {
             // Spawn daemon with CREATE_NO_WINDOW flag (0x08000000)
             const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+            // AI_ID is required by the daemon — pass it through so the spawned
+            // process can acquire its presence mutex and register correctly.
+            let ai_id_for_spawn = std::env::var("AI_ID").unwrap_or_default();
             let spawn_result = std::process::Command::new(&daemon_path)
+                .env("AI_ID", &ai_id_for_spawn)
                 .creation_flags(CREATE_NO_WINDOW)
                 .spawn();
 

@@ -1,7 +1,7 @@
 //! AI Foundation MCP Integration Layer - Thin CLI Wrapper
 //! All commands call CLI executables via subprocess.
 //!
-//! TOOL COUNT: 10
+//! TOOL COUNT: 9
 //! - notebook        (action: remember|recall|list|get|pin|unpin|delete|update|tags)       [alwaysLoad]
 //! - teambook        (action: broadcast|dm|read|status|claims|claim_file|release_file)     [alwaysLoad]
 //! - task            (action: create|update|get|list)
@@ -12,7 +12,15 @@
 //! - project         (action: create|list|update)
 //! - feature         (action: create|list|update)
 //! - profile_get
-//! - forge_generate
+//!
+//! forge_generate (local GGUF text-gen) was removed 2026-04-18 after a 6-thread
+//! benchmark of Qwen3.5-9B-Q4_K_M and Qwen3.6-35B-A3B-UD-IQ3_S. 9B produced 0/6
+//! trustworthy outputs (3/6 reasoning-spiraled to length-cap, 3/6 fabricated
+//! ownership). 35B-A3B was 5/6 clean but inverted ownership on one multi-party
+//! review thread, which is an unacceptable failure mode for ambient summaries
+//! that teammates would read as canonical. Feature deferred until a model
+//! reliably preserves attribution under multi-party ambiguity. Bench assets
+//! preserved at /tmp/bench/ for future re-evaluation.
 //!
 //! The 5 `[alwaysLoad]` tools set `_meta.anthropic/alwaysLoad = true` so Claude Code
 //! loads their full schemas into the system prompt at session start (bypassing the
@@ -204,20 +212,6 @@ pub struct ProfileGetInput {
 pub struct StandbyInput {
     /// Seconds before forcing a wake-up if no event arrives. Default: 180.
     pub timeout: Option<i64>,
-}
-
-#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct ForgeGenerateInput {
-    /// The prompt to send to the LLM
-    pub prompt: String,
-    /// System prompt (optional, default: "You are a helpful AI assistant. Be concise and direct.")
-    pub system: Option<String>,
-    /// Model alias: "local" (default, GGUF on-device), "claude", or "gpt4"
-    pub model: Option<String>,
-    /// Max tokens to generate (default: 512)
-    pub max_tokens: Option<usize>,
-    /// Temperature 0.0-2.0 (default: 0.3 for deterministic tasks)
-    pub temperature: Option<f32>,
 }
 
 // ============== Server ==============
@@ -682,48 +676,6 @@ impl AiFoundationServer {
         result
     }
 
-    // ============== Forge (1, deferred) ==============
-
-    #[tool(description = "Generate text using a local or API LLM. Uses on-device GGUF model by default (no internet needed). Use for: summarization, classification, extraction, drafting. Returns JSON with content and usage stats.")]
-    async fn forge_generate(&self, Parameters(input): Parameters<ForgeGenerateInput>) -> String {
-        auto_presence("Running forge inference").await;
-        let mut args = vec!["--headless"];
-
-        let prompt_owned = input.prompt;
-        args.push("--prompt");
-        args.push(&prompt_owned);
-
-        let model_owned: String;
-        if let Some(ref m) = input.model {
-            model_owned = m.clone();
-            args.push("--model");
-            args.push(&model_owned);
-        }
-
-        let system_owned: String;
-        if let Some(ref s) = input.system {
-            system_owned = s.clone();
-            args.push("--system");
-            args.push(&system_owned);
-        }
-
-        let max_tokens_owned: String;
-        if let Some(mt) = input.max_tokens {
-            max_tokens_owned = mt.to_string();
-            args.push("--max-tokens");
-            args.push(&max_tokens_owned);
-        }
-
-        let temp_owned: String;
-        if let Some(t) = input.temperature {
-            temp_owned = t.to_string();
-            args.push("--temperature");
-            args.push(&temp_owned);
-        }
-
-        cli_wrapper::forge(&args).await
-    }
-
 }
 
 #[tool_handler]
@@ -737,8 +689,54 @@ impl ServerHandler for AiFoundationServer {
     }
 }
 
+/// OS-level presence mutex — held for process lifetime, auto-releases on death.
+/// Uses the same naming convention as teamengram::wake::PresenceMutex so
+/// is_ai_online() detects MCP server processes.
+#[cfg(windows)]
+fn acquire_presence_mutex(ai_id: &str) -> Option<*mut std::ffi::c_void> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateMutexW(
+            attrs: *const u8,
+            initial_owner: i32,
+            name: *const u16,
+        ) -> *mut std::ffi::c_void;
+    }
+
+    let name = format!("Local\\TeamEngram_Alive_{}", ai_id);
+    let wide: Vec<u16> = OsStr::new(&name)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let handle = unsafe { CreateMutexW(std::ptr::null(), 1, wide.as_ptr()) };
+    if handle.is_null() { None } else { Some(handle) }
+}
+
+#[cfg(not(windows))]
+fn acquire_presence_mutex(ai_id: &str) -> Option<std::path::PathBuf> {
+    let dir = dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join(".ai-foundation")
+        .join("v2")
+        .join("presence");
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join(format!("{}.pid", ai_id));
+    std::fs::write(&path, format!("{}", std::process::id())).ok()?;
+    Some(path)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
+    let ai_id = std::env::var("AI_ID").unwrap_or_default();
+    let _presence = if !ai_id.is_empty() && ai_id != "unknown" {
+        acquire_presence_mutex(&ai_id)
+    } else {
+        None
+    };
+
     let server = AiFoundationServer::new();
     server.serve(stdio()).await?.waiting().await?;
     Ok(())

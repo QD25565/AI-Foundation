@@ -152,17 +152,6 @@ pub async fn profile(args: &[&str]) -> String {
     run_cli(&exe_name("profile-cli"), args).await
 }
 
-/// Run a forge CLI command and return output
-/// Uses forge-local (with llama.cpp) if available, falls back to forge (API-only)
-pub async fn forge(args: &[&str]) -> String {
-    let bin_dir = get_bin_dir();
-    let local_path = bin_dir.join(exe_name("forge-local"));
-    if local_path.exists() {
-        return run_cli(&exe_name("forge-local"), args).await;
-    }
-    run_cli(&exe_name("forge"), args).await
-}
-
 /// Run a CLI command and return its output
 ///
 /// # Arguments

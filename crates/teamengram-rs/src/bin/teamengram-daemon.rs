@@ -378,6 +378,9 @@ pub struct TeamEngramDaemon {
     #[allow(dead_code)]
     idle_timeout_secs: u64,
     // NO heartbeat_interval - presence is EVENT-DRIVEN on each IPC request
+    /// SWMR presence: daemon holds PresenceMutex for every AI that calls in.
+    /// is_ai_online() checks these OS mutexes — without them, who_is_here returns 0.
+    active_presences: Arc<Mutex<HashMap<String, teamengram::wake::PresenceMutex>>>,
 }
 
 impl TeamEngramDaemon {
@@ -430,7 +433,7 @@ impl TeamEngramDaemon {
             notify,
             stats: Arc::new(RwLock::new(DaemonStats::new())),
             idle_timeout_secs: 1800, // 30 minutes
-            // NO heartbeat polling - presence updated on each IPC request
+            active_presences: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -442,11 +445,14 @@ impl TeamEngramDaemon {
         info!("Pipe: {}", self.pipe_name);
         info!("Store: {:?}", TeamEngram::default_path());
 
-        // ACQUIRE PRESENCE MUTEX - OS-level, auto-releases on process death
-        // This is the ONLY presence indicator - no polling, no TTL
-        let _presence = PresenceMutex::acquire(&self.ai_id)
-            .context("Failed to acquire presence mutex")?;
-        info!("Presence mutex acquired: {} is ONLINE", self.ai_id);
+        // ACQUIRE PRESENCE MUTEX - OS-level, auto-releases on process death.
+        // Seed active_presences with daemon's own AI so route_method doesn't double-acquire.
+        {
+            let mutex = PresenceMutex::acquire(&self.ai_id)
+                .context("Failed to acquire presence mutex")?;
+            info!("Presence mutex acquired: {} is ONLINE", self.ai_id);
+            self.active_presences.lock().unwrap().insert(self.ai_id.clone(), mutex);
+        }
 
         // Also register in store for status/task info (not for online detection)
         {
@@ -489,10 +495,11 @@ impl TeamEngramDaemon {
             let private_store = Arc::clone(&self.private_store);
             let stats = Arc::clone(&self.stats);
             let ai_id = self.ai_id.clone();
+            let active_presences = Arc::clone(&self.active_presences);
 
             // Handle client in separate blocking thread (pipe I/O is synchronous)
             std::thread::spawn(move || {
-                if let Err(e) = handle_client_sync(pipe, shared_store, private_store, stats, ai_id) {
+                if let Err(e) = handle_client_sync(pipe, shared_store, private_store, stats, ai_id, active_presences) {
                     error!("Client error: {}", e);
                 }
             });
@@ -514,6 +521,7 @@ fn handle_client_sync(
     private_store: Arc<RwLock<TeamEngram>>,
     stats: Arc<RwLock<DaemonStats>>,
     ai_id: String,
+    active_presences: Arc<Mutex<HashMap<String, teamengram::wake::PresenceMutex>>>,
 ) -> Result<()> {
     // Create a tokio runtime for this thread to call async route_method
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -553,7 +561,7 @@ fn handle_client_sync(
                 }
 
                 // Route method (async, run in our local runtime)
-                rt.block_on(route_method(&request, &shared_store, &private_store, &stats, &ai_id))
+                rt.block_on(route_method(&request, &shared_store, &private_store, &stats, &ai_id, &active_presences))
             }
             Err(e) => {
                 JsonRpcResponse::error(None, -32700, format!("Parse error: {}", e))
@@ -577,6 +585,7 @@ async fn route_method(
     private_store: &Arc<RwLock<TeamEngram>>,
     stats: &Arc<RwLock<DaemonStats>>,
     ai_id: &str,
+    active_presences: &Arc<Mutex<HashMap<String, teamengram::wake::PresenceMutex>>>,
 ) -> JsonRpcResponse {
     let id = request.id.clone();
     let params = &request.params;
@@ -587,6 +596,18 @@ async fn route_method(
     {
         let mut store = shared_store.write().await;
         let _ = store.update_presence(requesting_ai, "active", &request.method);
+    }
+    // SWMR: Acquire OS-level presence mutex for this AI so is_ai_online() sees them.
+    // The daemon holds one mutex per distinct AI that calls in. All mutexes auto-release
+    // when the daemon process dies — accurate online detection, zero polling.
+    {
+        let mut presences = active_presences.lock().unwrap();
+        if !presences.contains_key(requesting_ai) {
+            if let Ok(mutex) = teamengram::wake::PresenceMutex::acquire(requesting_ai) {
+                info!("Presence mutex acquired for {}", requesting_ai);
+                presences.insert(requesting_ai.to_string(), mutex);
+            }
+        }
     }
 
     match request.method.as_str() {
