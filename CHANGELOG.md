@@ -1,5 +1,29 @@
 # Changelog
 
+## v63 — 2026-04-18
+
+### forge_generate removed — feature deferred
+- **MCP tool count:** 10 → 9 (`forge_generate` unwired from tool router).
+- **Rationale:** 6-thread benchmark of Qwen3.5-9B-Q4_K_M and
+  Qwen3.6-35B-A3B-UD-IQ3_S against AI-team dialogue summaries (code at
+  `/tmp/bench/` — threads, gold standards, runner, results).
+  - 9B (full GPU, ~60 tok/s): 3/6 tests reasoning-spiraled to the 16k-token
+    length cap with zero content; 3/6 that completed fabricated ownership
+    (e.g. invented "lyra (owns): Deliver harness DM"). 0/6 trustworthy.
+  - 35B-A3B-IQ3_S (16/41 layers GPU on 8GB VRAM, ~14 tok/s): 6/6 finish=stop,
+    5/6 clean. One test inverted ownership in a multi-party peer-review
+    thread (attributed the ship-owner to the reviewer). An ambient summary
+    that silently swaps who-owns-what is worse than no summary — teammates
+    read it as canonical.
+- **What was removed:** `ForgeGenerateInput` struct, `forge_generate`
+  `#[tool]` handler in `main.rs`, `cli_wrapper::forge()` subprocess bridge,
+  README tool-table row.
+- **What was preserved:** `forge-cli` / `forge-local` binaries and their
+  crate source are unchanged. Only the MCP-exposed tool surface was cut.
+- **Revival criteria:** 6/6 attribution-clean on an expanded ~20-thread
+  suite. Will likely land in the pure-Axiom AI-Foundation rewrite rather
+  than this Rust generation.
+
 ## v62 — 2026-04-18
 
 ### Distributable Binaries — No Personal Paths
