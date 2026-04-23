@@ -95,40 +95,137 @@ def setup_autostart(bin_dir: Path, platform: Platform, yes: bool = False) -> Non
         _setup_autostart_launchd(bin_dir)
 
 
-def _setup_autostart_windows(bin_dir: Path) -> None:
-    """Create a VBS launcher in the Windows Startup folder."""
+_WIN_TASK_NAME = "AI-Foundation-Daemon"
+
+
+def _windows_daemon_exe_path(bin_dir: Path) -> str:
+    """Resolve bin_dir / v2-daemon.exe to a native Windows path string.
+
+    bin_dir may be a WSL-style /mnt/c/... path when the installer runs under WSL;
+    the scheduled task must embed a native C:\\... path for the Windows task engine.
+    """
+    daemon_exe = bin_dir / "v2-daemon.exe"
     try:
         result = subprocess.run(
-            ["cmd.exe", "/c", "echo %APPDATA%"],
-            capture_output=True, text=True, timeout=5
+            ["wslpath", "-w", str(daemon_exe)],
+            capture_output=True, text=True, timeout=5,
         )
-        app_data = result.stdout.strip()
-        if not app_data or app_data == "%APPDATA%":
-            warn("Could not locate Windows APPDATA — skipping auto-start setup")
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return str(daemon_exe)
+
+
+def _run_powershell(script: str, timeout: int = 20) -> subprocess.CompletedProcess:
+    """Invoke a PowerShell script block via powershell.exe (works under WSL + native)."""
+    return subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive",
+         "-ExecutionPolicy", "Bypass", "-Command", script],
+        capture_output=True, text=True, timeout=timeout,
+    )
+
+
+def _remove_legacy_startup_vbs() -> None:
+    """Delete any earlier-install VBS auto-start artifacts from the Startup folder.
+
+    Older installs of this project (and an interim hand-rolled watchdog) dropped
+    VBS launchers into %APPDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup.
+    The Scheduled Task path supersedes all of them; removing the files prevents
+    double-launch at login and keeps one source of truth for daemon lifecycle.
+    """
+    script = r"""
+$startup = [Environment]::GetFolderPath('Startup')
+$names = @('ai-foundation-daemon.vbs','start-v2-daemon-hidden.vbs','v2-daemon-watchdog.vbs')
+foreach ($n in $names) {
+    $p = Join-Path $startup $n
+    if (Test-Path $p) {
+        Remove-Item -LiteralPath $p -Force -ErrorAction SilentlyContinue
+        Write-Output ("removed:" + $p)
+    }
+}
+"""
+    try:
+        result = _run_powershell(script, timeout=10)
+        for line in (result.stdout or "").splitlines():
+            if line.startswith("removed:"):
+                info(f"  Removed legacy Startup entry: {line.split(':', 1)[1]}")
+    except (OSError, subprocess.TimeoutExpired):
+        pass  # Non-fatal — the Scheduled Task is authoritative.
+
+
+def _setup_autostart_windows(bin_dir: Path) -> None:
+    """Register v2-daemon as a Windows Scheduled Task with auto-restart on failure.
+
+    Parity with the Linux systemd service (Restart=on-failure, RestartSec=5) and the
+    macOS launchd agent (KeepAlive=true). Runs at user logon under the current user's
+    credentials (no admin required), hidden, with unlimited execution time and an
+    auto-restart policy that fires if the daemon exits non-zero.
+
+    The task supersedes the older VBS-in-Startup pattern; legacy VBS launchers are
+    removed so the Scheduled Task is the only source of daemon lifecycle.
+    """
+    daemon_win = _windows_daemon_exe_path(bin_dir)
+    # PowerShell string literal: escape single quotes by doubling them.
+    daemon_ps = daemon_win.replace("'", "''")
+    task_name = _WIN_TASK_NAME
+
+    # Scheduled Task definition:
+    # - AtLogon trigger for the current user (no admin needed, survives reboots)
+    # - Hidden, battery-tolerant, unlimited runtime
+    # - RestartCount 999 + 1-minute interval = respawn on crash, like systemd
+    #   Restart=on-failure with a tiny RestartSec
+    # - StartWhenAvailable catches missed windows (e.g. machine was off at logon)
+    script = f"""
+$ErrorActionPreference = 'Stop'
+$exe = '{daemon_ps}'
+if (-not (Test-Path $exe)) {{
+    Write-Error ('daemon binary missing: ' + $exe)
+    exit 2
+}}
+
+$action = New-ScheduledTaskAction -Execute $exe
+$trigger = New-ScheduledTaskTrigger -AtLogOn -User ("$env:USERDOMAIN\\$env:USERNAME")
+$settings = New-ScheduledTaskSettingsSet `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries `
+    -StartWhenAvailable `
+    -RestartCount 999 `
+    -RestartInterval (New-TimeSpan -Minutes 1) `
+    -ExecutionTimeLimit (New-TimeSpan -Seconds 0) `
+    -MultipleInstances IgnoreNew `
+    -Hidden
+$principal = New-ScheduledTaskPrincipal `
+    -UserId ("$env:USERDOMAIN\\$env:USERNAME") `
+    -LogonType Interactive `
+    -RunLevel Limited
+
+Register-ScheduledTask `
+    -TaskName '{task_name}' `
+    -Action $action `
+    -Trigger $trigger `
+    -Settings $settings `
+    -Principal $principal `
+    -Description 'AI-Foundation v2 daemon. Auto-starts at logon; auto-restarts on failure.' `
+    -Force | Out-Null
+
+Start-ScheduledTask -TaskName '{task_name}' -ErrorAction SilentlyContinue
+Write-Output 'registered'
+"""
+
+    try:
+        result = _run_powershell(script, timeout=20)
+        if result.returncode == 0 and "registered" in (result.stdout or ""):
+            _remove_legacy_startup_vbs()
+            ok(f"Scheduled Task registered: {task_name}")
+            info("  Auto-starts at logon, auto-restarts on crash (RestartCount=999, interval=1m).")
             return
-
-        # Resolve to WSL path if needed
-        try:
-            wsl_result = subprocess.run(
-                ["wslpath", app_data], capture_output=True, text=True, timeout=5
-            )
-            startup_dir = Path(wsl_result.stdout.strip()) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            startup_dir = Path(app_data) / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup"
-
-        vbs_path = startup_dir / "ai-foundation-daemon.vbs"
-        daemon_exe = bin_dir / "v2-daemon.exe"
-
-        vbs_content = f'''Set objShell = CreateObject("WScript.Shell")
-objShell.Run Chr(34) & "{daemon_exe}" & Chr(34), 0, False
-'''
-        vbs_path.write_text(vbs_content)
-        ok(f"Auto-start configured: {vbs_path}")
-        info("  Daemon will start automatically on Windows login.")
-
+        err_tail = (result.stderr or result.stdout or "").strip().splitlines()[-3:]
+        warn("Could not register Scheduled Task: " + " | ".join(err_tail))
+        info("  Run manually: installer/daemon.py --retry-autostart")
     except (OSError, subprocess.TimeoutExpired) as e:
         warn(f"Could not set up auto-start: {e}")
-        info("  Run bin/setup-autostart.ps1 manually for Windows auto-start.")
+        info("  powershell.exe must be reachable from the installer host.")
 
 
 def _setup_autostart_systemd(bin_dir: Path) -> None:

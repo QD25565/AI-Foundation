@@ -879,6 +879,10 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Remember { content, tags, pin, image, capture, screenshot, snap } => {
+            if content.trim().is_empty() {
+                eprintln!("error: content is empty — refusing to store a blank note");
+                std::process::exit(1);
+            }
             // Consolidate capture aliases
             let capture_window = capture.or(screenshot).or(snap);
             let mut tags_vec = parse_tags(tags);

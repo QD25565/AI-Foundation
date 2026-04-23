@@ -314,6 +314,14 @@ impl V2Client {
 
     /// Respond to a dialogue
     pub fn respond_dialogue(&mut self, dialogue_id: u64, response: &str) -> V2Result<u64> {
+        self.sync()?;
+        if let Some(d) = self.view.get_dialogue(dialogue_id) {
+            if d.status == "ended" || d.status == "completed" || d.status == "cancelled" {
+                return Err(V2Error::InvalidState(
+                    format!("dialogue {} is {} — cannot respond", dialogue_id, d.status),
+                ));
+            }
+        }
         let event = Event::dialogue_respond(&self.ai_id, dialogue_id, response);
         let timestamp = event.header.timestamp;
         self.outbox.write_event(&event)
@@ -651,6 +659,16 @@ impl V2Client {
         // Sync view to get current mute state
         self.sync()?;
 
+        if let Ok(room_id_u64) = room_id.parse::<u64>() {
+            if let Some(room) = self.view.get_room(room_id_u64) {
+                if room.is_closed {
+                    return Err(V2Error::InvalidState(
+                        format!("room {} is concluded — cannot send messages", room_id),
+                    ));
+                }
+            }
+        }
+
         // Filter out muted participants before writing the event
         let filtered = if let Ok(room_id_u64) = room_id.parse::<u64>() {
             if let Some(room) = self.view.get_room(room_id_u64) {
@@ -758,19 +776,36 @@ impl V2Client {
 
     // ========== QUERY METHODS ==========
 
-    /// Get all current presences (latest presence per AI) from ViewEngine cache (O(k) instead of O(n))
-    /// Returns Vec of (ai_id, status, current_task)
-    /// Uses OS-level mutex detection — daemon holds one mutex per connected AI,
-    /// auto-releases on process death. No polling, no TTL.
+    /// Get all online presences — OS mutex detection, no polling, no TTL.
+    /// Scans registered outbox AIs so newly-restarted AIs appear even before
+    /// they write a V2 event.
     pub fn get_presences(&mut self) -> V2Result<Vec<(String, String, String)>> {
         self.sync()?;
 
         let all = self.view.get_all_presences();
-
-        Ok(all.values()
+        let mut result: Vec<(String, String, String)> = all.values()
             .filter(|p| is_ai_online(&p.ai_id))
             .map(|p| (p.ai_id.clone(), p.status.clone(), p.current_task.clone()))
-            .collect())
+            .collect();
+
+        let outbox_dir = self.base_dir.join("shared").join("outbox");
+        if let Ok(entries) = std::fs::read_dir(&outbox_dir) {
+            for entry in entries.flatten() {
+                if entry.path().extension().map_or(false, |e| e == "outbox") {
+                    if let Some(stem) = entry.path().file_stem() {
+                        let ai_id = stem.to_string_lossy().trim().to_string();
+                        if !ai_id.is_empty()
+                            && !result.iter().any(|(id, _, _)| id == &ai_id)
+                            && is_ai_online(&ai_id)
+                        {
+                            result.push((ai_id, "active".to_string(), String::new()));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(result)
     }
 
     /// Get all dialogues (active and ended) from ViewEngine cache (O(k) instead of O(n))

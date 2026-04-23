@@ -529,17 +529,18 @@ fn handle_client_sync(
         .build()?;
 
     let mut buffer = vec![0u8; 65536];
+    let mut client_ai: Option<String> = None;
 
     loop {
         // Synchronous read from our Windows API pipe
         let n = match pipe.read(&mut buffer) {
             Ok(n) => n,
             Err(e) => {
-                // Check for broken pipe (client disconnected)
                 if e.kind() == std::io::ErrorKind::BrokenPipe {
                     break;
                 }
-                return Err(e.into());
+                error!("Pipe read error: {}", e);
+                break;
             }
         };
 
@@ -553,6 +554,15 @@ fn handle_client_sync(
         // Parse JSON-RPC request
         let response = match serde_json::from_str::<JsonRpcRequest>(&request_str) {
             Ok(request) => {
+                // Track client identity for disconnect cleanup
+                if client_ai.is_none() {
+                    if let Some(id) = request.params.get("ai_id").and_then(|v| v.as_str()) {
+                        if id != ai_id {
+                            client_ai = Some(id.to_string());
+                        }
+                    }
+                }
+
                 // Update stats (blocking)
                 {
                     let mut s = stats.blocking_write();
@@ -573,6 +583,14 @@ fn handle_client_sync(
         debug!("Sending: {}", response_str.trim());
         pipe.write(response_str.as_bytes())?;
         pipe.flush()?;
+    }
+
+    // Client disconnected — release their presence mutex so is_ai_online() sees them as offline
+    if let Some(ref disconnected_ai) = client_ai {
+        let mut presences = active_presences.lock().unwrap();
+        if presences.remove(disconnected_ai).is_some() {
+            info!("Presence released for disconnected client: {}", disconnected_ai);
+        }
     }
 
     Ok(())
@@ -2311,24 +2329,24 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Per-AI pipe name - each AI gets its own isolated daemon
-    // This matches TeamEngramClient::pipe_name_for_ai() which clients use
-    // Architecture: Each AI has own daemon for blazing fast, isolated data streams
-    // AI_ID is required (validated above), no fallback needed
-    // SWMR: Single shared daemon for all AIs
-    let pipe_name = std::env::var("PIPE_NAME").unwrap_or_else(|_| {
-        r"\\.\pipe\teamengram".to_string()
-    });
-    // OLD: Per-AI pipes (caused multi-writer B+Tree corruption) - REMOVED
-
-    info!("|TEAMENGRAM DAEMON|v0.1.0");
-    info!("Pipe:{}", pipe_name);
+    // V2 architecture: per-AI daemon holds presence mutex, no shared B+tree store.
+    // The shared teamengram.engram is DEAD — V2 uses outbox + sequencer + views.
+    // Each AI gets its own daemon. Each daemon holds its own PresenceMutex.
+    // That mutex is how is_ai_online() detects presence (OS-level, auto-releases on death).
+    info!("|TEAMENGRAM DAEMON|v2.0 (presence)");
     info!("AI:{}", ai_id);
 
+    // Acquire presence mutex — OS-level, auto-releases on process death.
+    let _presence = PresenceMutex::acquire(&ai_id)
+        .context("Failed to acquire presence mutex")?;
+    info!("Presence mutex acquired: {} is ONLINE", ai_id);
 
-    // Create and run daemon
-    let daemon = TeamEngramDaemon::new(pipe_name, ai_id)?;
-    daemon.run().await
+    // Block forever. The daemon's job is to exist and hold the mutex.
+    // When this process dies (kill, crash, reboot), the OS releases the mutex
+    // and is_ai_online() returns false. No polling, no TTL, no heartbeat.
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(3600));
+    }
 }
 
 // ============================================================================
