@@ -23,14 +23,42 @@ use chrono::{DateTime, Utc};
 /// Lazily initialized V2Client — opened once, reused for all calls.
 static V2: OnceLock<Mutex<V2Client>> = OnceLock::new();
 
+fn valid_ai_id(id: &str) -> bool {
+    let id = id.trim();
+    !id.is_empty() && id != "unknown"
+}
+
+fn resolve_env_ai_id() -> String {
+    let id = std::env::var("AI_ID")
+        .or_else(|_| std::env::var("AGENT_ID"))
+        .unwrap_or_else(|_| {
+            panic!("FATAL: AI_ID/AGENT_ID is required for in-process dispatch; refusing to run as `unknown`")
+        });
+
+    if !valid_ai_id(&id) {
+        panic!("FATAL: AI_ID/AGENT_ID cannot be empty or `unknown` for in-process dispatch");
+    }
+
+    id
+}
+
+fn wake_online_ai(target_ai: &str, reason: WakeReason, from_ai: &str, content: &str) -> Result<(), String> {
+    if !is_ai_online(target_ai) {
+        return Ok(());
+    }
+
+    let coord = WakeCoordinator::new(target_ai)
+        .map_err(|e| format!("Wake failed for {}: {}", target_ai, e))?;
+    coord.wake(reason, from_ai, content);
+    Ok(())
+}
+
 /// Get or initialize the global V2Client.
 /// Panics on init failure (fail loudly per QD directive — no silent degradation).
 fn get_v2() -> &'static Mutex<V2Client> {
     V2.get_or_init(|| {
-        let ai_id = std::env::var("AI_ID")
-            .or_else(|_| std::env::var("AGENT_ID"))
-            .unwrap_or_else(|_| "unknown".to_string());
-        let client = V2Client::open(&ai_id, None)
+        let ai_id = resolve_env_ai_id();
+        let client = V2Client::open(&ai_id, None, None)
             .expect("FATAL: Failed to open V2Client — teambook unavailable");
         Mutex::new(client)
     })
@@ -38,9 +66,7 @@ fn get_v2() -> &'static Mutex<V2Client> {
 
 /// Get AI_ID from environment
 fn ai_id() -> String {
-    std::env::var("AI_ID")
-        .or_else(|_| std::env::var("AGENT_ID"))
-        .unwrap_or_else(|_| "unknown".to_string())
+    resolve_env_ai_id()
 }
 
 /// Format a microsecond timestamp as UTC datetime string
@@ -77,9 +103,9 @@ pub async fn broadcast(content: &str, channel: &str) -> String {
                     if word.starts_with('@') {
                         let mentioned = word.trim_start_matches('@')
                             .trim_end_matches(|c: char| !c.is_alphanumeric() && c != '-');
-                        if !mentioned.is_empty() && mentioned != from && is_ai_online(mentioned) {
-                            if let Ok(coord) = WakeCoordinator::new(mentioned) {
-                                coord.wake(WakeReason::Mention, &from, &content);
+                        if !mentioned.is_empty() && mentioned != from {
+                            if let Err(e) = wake_online_ai(mentioned, WakeReason::Mention, &from, &content) {
+                                return format!("Error: Broadcast wake failed after event write: {}", e);
                             }
                         }
                     }
@@ -107,10 +133,8 @@ pub async fn direct_message(to_ai: &str, content: &str) -> String {
         match client.direct_message(&to_ai, &content) {
             Ok(seq) => {
                 // Wake recipient if online (matches CLI behavior)
-                if is_ai_online(&to_ai) {
-                    if let Ok(coord) = WakeCoordinator::new(&to_ai) {
-                        coord.wake(WakeReason::DirectMessage, &from, &content);
-                    }
+                if let Err(e) = wake_online_ai(&to_ai, WakeReason::DirectMessage, &from, &content) {
+                    return format!("Error: DM wake failed after event write: {}", e);
                 }
                 format!("dm_sent|{}|{}|{}", seq, to_ai, content)
             }
@@ -457,13 +481,12 @@ pub async fn dialogue_create(responder: &str, topic: &str) -> String {
         let v2 = get_v2();
         let mut client = v2.lock().unwrap();
 
-        match client.start_dialogue(&responder, &topic) {
+        match client.start_dialogue(&[responder.as_str()], &topic) {
             Ok(seq) => {
                 // Wake responder
-                if is_ai_online(&responder) {
-                    if let Ok(coord) = WakeCoordinator::new(&responder) {
-                        coord.wake(WakeReason::DialogueTurn, &from, &format!("Dialogue: {}", topic));
-                    }
+                let wake_content = format!("Dialogue: {}", topic);
+                if let Err(e) = wake_online_ai(&responder, WakeReason::DialogueTurn, &from, &wake_content) {
+                    return format!("Error: Dialogue wake failed after event write: {}", e);
                 }
                 format!("dialogue_created|{}|{}|{}", seq, responder, topic)
             }
@@ -496,11 +519,9 @@ pub async fn dialogue_respond(dialogue_id: u64, response: &str) -> String {
             Ok(seq) => {
                 // Wake the other party
                 if let Some((other_ai, topic)) = other_party {
-                    if is_ai_online(&other_ai) {
-                        if let Ok(coord) = WakeCoordinator::new(&other_ai) {
-                            coord.wake(WakeReason::DialogueTurn, &from,
-                                &format!("Re: {} - {}", topic, response));
-                        }
+                    let wake_content = format!("Re: {} - {}", topic, response);
+                    if let Err(e) = wake_online_ai(&other_ai, WakeReason::DialogueTurn, &from, &wake_content) {
+                        return format!("Error: Dialogue wake failed after event write: {}", e);
                     }
                 }
                 format!("dialogue_responded|{}|{}", dialogue_id, seq)

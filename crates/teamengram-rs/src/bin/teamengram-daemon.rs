@@ -200,9 +200,12 @@ fn signal_wake(target_ai: &str, reason: WakeReason, from_ai: &str, content: &str
                 c
             }
             Err(e) => {
-                error!("Failed to create wake coordinator for {}: {}", target_ai, e);
-                // Return a dummy that will fail silently - not ideal but prevents panic
-                WakeCoordinator::new("_invalid_").unwrap_or_else(|_| panic!("Cannot create any wake coordinator"))
+                let msg = format!(
+                    "CRITICAL: failed to create wake coordinator for {}: {}; wake delivery is required",
+                    target_ai, e
+                );
+                error!("{}", msg);
+                panic!("{}", msg);
             }
         }
     });
@@ -2736,4 +2739,3 @@ mod tests {
         assert_eq!(error.code, -32602); // Invalid params
     }
 }
-

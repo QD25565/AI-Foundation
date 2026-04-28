@@ -19,7 +19,7 @@ use tokio::sync::OnceCell;
 /// Resolution is expensive on the cold path (one subprocess call to `teambook whoami`),
 /// but it only runs once per MCP server process — every tool call after the first
 /// reads the cached value.
-static AI_ID_CACHE: OnceCell<String> = OnceCell::const_new();
+static AI_ID_CACHE: OnceCell<Result<String, String>> = OnceCell::const_new();
 
 /// Resolve the AI ID for CLI subprocess calls.
 ///
@@ -29,29 +29,30 @@ static AI_ID_CACHE: OnceCell<String> = OnceCell::const_new();
 /// 3. `teambook whoami` — reads the identity from teambook's own store
 ///    (works regardless of how the MCP server was launched: native Windows,
 ///    WSL-to-Windows, Linux, etc., as long as teambook is set up).
-/// 4. Literal "unknown" as a last-resort sentinel.
+/// 4. Hard error. Running subprocess tools as `unknown` corrupts authorship and
+///    hides launch/configuration defects.
 ///
 /// Cached for the lifetime of the MCP server process. First tool call triggers
 /// the subprocess fallback (if env is missing); subsequent calls are free.
-async fn resolve_ai_id() -> String {
+async fn resolve_ai_id() -> Result<String, String> {
     AI_ID_CACHE
         .get_or_init(|| async {
             if let Ok(id) = std::env::var("AI_ID") {
                 let id = id.trim().to_string();
                 if !id.is_empty() && id != "unknown" {
-                    return id;
+                    return Ok(id);
                 }
             }
             if let Ok(id) = std::env::var("AGENT_ID") {
                 let id = id.trim().to_string();
                 if !id.is_empty() && id != "unknown" {
-                    return id;
+                    return Ok(id);
                 }
             }
             if let Some(id) = whoami_from_teambook().await {
-                return id;
+                return Ok(id);
             }
-            "unknown".to_string()
+            Err("AI identity unavailable: AI_ID/AGENT_ID are unset or invalid, and `teambook whoami` did not return a concrete AI id; refusing to run CLI tools as `unknown`".to_string())
         })
         .await
         .clone()
@@ -59,9 +60,8 @@ async fn resolve_ai_id() -> String {
 
 /// Call `teambook whoami` and parse the `AI:<id>` line from its identity banner.
 ///
-/// Used as a fallback when the AI_ID env var isn't set — teambook has its own
-/// identity resolution that works without env plumbing, so we leverage that
-/// rather than duplicating the logic here.
+/// Used only as an identity discovery path when the environment is missing.
+/// If this also fails, callers fail loudly instead of inventing `unknown`.
 async fn whoami_from_teambook() -> Option<String> {
     let bin_dir = get_bin_dir();
     let exe_path = bin_dir.join(exe_name("teambook"));
@@ -189,9 +189,10 @@ async fn run_cli(exe: &str, args: &[&str]) -> String {
     let bin_dir = get_bin_dir();
     let exe_path = bin_dir.join(exe);
 
-    // Get AI_ID for the CLI. Falls back to `teambook whoami` when env is missing
-    // (e.g. WSL-to-Windows launches where env vars don't propagate without WSLENV).
-    let ai_id = resolve_ai_id().await;
+    let ai_id = match resolve_ai_id().await {
+        Ok(id) => id,
+        Err(e) => return format!("Error: {}", e),
+    };
 
     // V2 event sourcing is the default - it gives us event-driven wake
     // V2 is now the default - gives us event-driven wake
@@ -324,4 +325,3 @@ pub async fn teambook_as(args: &[&str], caller_id: &str) -> String {
 pub async fn notebook_as(args: &[&str], caller_id: &str) -> String {
     run_cli_as(&exe_name("notebook-cli"), args, caller_id).await
 }
-
