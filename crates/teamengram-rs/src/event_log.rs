@@ -653,8 +653,9 @@ impl EventLogReader {
             });
         }
 
-        // Parse header
-        let header_bytes: [u8; 64] = raw[..64].try_into().unwrap();
+        // Parse header (length verified above, but defend against refactoring)
+        let header_bytes: [u8; 64] = raw[..64].try_into()
+            .map_err(|_| EventLogError::Corrupted { offset: self.position })?;
         let header = EventHeader::from_bytes(&header_bytes);
 
         let payload_bytes = &raw[64..];
@@ -705,7 +706,7 @@ impl EventLogReader {
         // Read length prefix
         let len_bytes: [u8; 4] = self.mmap[self.position..self.position + 4]
             .try_into()
-            .unwrap();
+            .map_err(|_| EventLogError::Corrupted { offset: self.position })?;
         let len = u32::from_le_bytes(len_bytes) as usize;
 
         if self.position + 4 + len > self.mmap.len() {
@@ -721,8 +722,8 @@ impl EventLogReader {
         self.position += 4 + len;
 
         // Update last sequence from header
-        if data.len() >= 8 {
-            self.last_sequence = u64::from_le_bytes(data[0..8].try_into().unwrap());
+        if let Some(seq_bytes) = data.get(0..8).and_then(|s| s.try_into().ok()) {
+            self.last_sequence = u64::from_le_bytes(seq_bytes);
         }
 
         Ok(Some(data))
@@ -856,7 +857,9 @@ fn find_min_cursor(base_dir: &Path) -> EventLogResult<u64> {
         if path.extension().and_then(|e| e.to_str()) == Some("cursor") {
             if let Ok(bytes) = std::fs::read(&path) {
                 if bytes.len() == 8 {
-                    let cursor = u64::from_le_bytes(bytes.try_into().unwrap());
+                    let cursor = u64::from_le_bytes(
+                        bytes.try_into().map_err(|_| EventLogError::Corrupted { offset: 0 })?
+                    );
                     if cursor < min_cursor {
                         min_cursor = cursor;
                     }
@@ -932,9 +935,13 @@ pub fn compact_event_log(base_dir: &Path, policy: &CompactionPolicy) -> EventLog
         }
 
         // Parse header fields from raw bytes (no full deserialization)
-        let sequence = u64::from_le_bytes(raw[0..8].try_into().unwrap());
-        let timestamp_micros = u64::from_le_bytes(raw[8..16].try_into().unwrap());
-        let evt_type = u16::from_le_bytes(raw[48..50].try_into().unwrap());
+        // Length verified above (< 64 → continue), but use safe conversion
+        let sequence = u64::from_le_bytes(
+            raw[0..8].try_into().map_err(|_| EventLogError::Corrupted { offset: 0 })?);
+        let timestamp_micros = u64::from_le_bytes(
+            raw[8..16].try_into().map_err(|_| EventLogError::Corrupted { offset: 0 })?);
+        let evt_type = u16::from_le_bytes(
+            raw[48..50].try_into().map_err(|_| EventLogError::Corrupted { offset: 0 })?);
 
         // Safety: NEVER remove events at or above min_cursor
         let should_keep = if sequence >= min_cursor {
@@ -956,7 +963,8 @@ pub fn compact_event_log(base_dir: &Path, policy: &CompactionPolicy) -> EventLog
         };
 
         if should_keep {
-            let header_bytes: [u8; 64] = raw[..64].try_into().unwrap();
+            let header_bytes: [u8; 64] = raw[..64].try_into()
+                .map_err(|_| EventLogError::Corrupted { offset: 0 })?;
             let payload_bytes = &raw[64..];
             writer.append_raw(&header_bytes, payload_bytes, sequence)?;
             events_kept += 1;

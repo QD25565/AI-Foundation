@@ -28,9 +28,9 @@ use teamengram::v2_client::V2Client;
 // Configuration
 // ============================================================================
 
-/// Session injection limits
-const MAX_INJECTED: usize = 40;
-const MAX_PINNED: usize = 25;
+/// Session injection limits (scaled for 1M context window, Apr 2026)
+const MAX_INJECTED: usize = 60;
+const MAX_PINNED: usize = 40;
 const MIN_RECENT: usize = 15;
 
 /// Supported output formats
@@ -382,30 +382,12 @@ fn format_plain(ctx: &SessionContext) -> String {
 }
 
 fn format_note_plain(note: &NoteInfo) -> String {
-    let content = strip_note_metadata(&note.content).replace('\n', " ");
+    let content = note.content.replace('\n', " ");
     if note.tags.is_empty() {
         format!("{} | ({}) {}", note.id, note.age, content)
     } else {
         format!("{} | ({}) [{}] {}", note.id, note.age, note.tags.join(","), content)
     }
-}
-
-/// Strip episodic metadata footers from note content for display.
-/// Metadata like [ctx:...], [Working on...], [With...] is useful for
-/// recall/search but clutters session-start injection and list output.
-fn strip_note_metadata(content: &str) -> String {
-    let markers = [" [ctx:", " [Working on ", " [With "];
-    let mut end_pos = content.len();
-
-    for marker in &markers {
-        if let Some(pos) = content.rfind(marker) {
-            if pos < end_pos {
-                end_pos = pos;
-            }
-        }
-    }
-
-    content[..end_pos].trim_end().to_string()
 }
 
 /// Pure JSON format
@@ -619,6 +601,10 @@ fn ensure_v2_daemon_running() {
 /// Gather all session context data
 fn gather_context() -> SessionContext {
     let ai_id = get_ai_id();
+    // Bind resolved ai_id into env before Engram::open_readonly — Engram's cipher reads
+    // AI_ID from env at open time. Claude Code usually sets it from settings.json when
+    // invoking the hook, but binding here removes the implicit parent-inheritance contract.
+    std::env::set_var("AI_ID", &ai_id);
     let db_path = get_db_path();
 
     // Format timestamp
@@ -712,7 +698,7 @@ fn fetch_awareness(ai_id: &str) -> AwarenessData {
     let now = Utc::now();
 
     // DMs
-    if let Ok(dms) = v2.recent_dms(10) {
+    if let Ok(dms) = v2.recent_dms(5) {
         data.direct_messages = dms.into_iter()
             .map(|dm| {
                 let age_secs = now.signed_duration_since(dm.timestamp).num_seconds();

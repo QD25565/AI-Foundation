@@ -311,6 +311,14 @@ pub struct ViewEngine {
     ai_trust: HashMap<String, TrustScore>,
 }
 
+/// Canonicalize a file path for consistent claim matching.
+/// Falls back to the original string if canonicalization fails (e.g. file doesn't exist yet).
+fn canonicalize_claim_path(path: &str) -> String {
+    std::fs::canonicalize(path)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| path.to_string())
+}
+
 impl ViewEngine {
     /// Create or open a view for an AI
     ///
@@ -650,19 +658,43 @@ impl ViewEngine {
             // ============== FILE CLAIMS ==============
             event_type::FILE_CLAIM => {
                 if let EventPayload::FileClaim(payload) = &event.payload {
-                    self.file_claims.insert(payload.path.clone(), FileClaimState {
-                        path: payload.path.clone(),
-                        holder: source_ai.clone(),
-                        working_on: payload.working_on.clone(),
-                        duration_seconds: payload.duration_seconds,
-                        claimed_at: timestamp,
-                    });
+                    let canon_path = canonicalize_claim_path(&payload.path);
+                    // Only allow claim if unclaimed, expired, or held by the same AI
+                    let can_claim = match self.file_claims.get(&canon_path) {
+                        None => true,
+                        Some(existing) => {
+                            // Same AI can reclaim (extend/update)
+                            if existing.holder == source_ai {
+                                true
+                            } else {
+                                // Different AI — only if existing claim has expired
+                                let expires = existing.claimed_at
+                                    + (existing.duration_seconds as u64 * 1_000_000);
+                                expires <= timestamp
+                            }
+                        }
+                    };
+                    if can_claim {
+                        self.file_claims.insert(canon_path.clone(), FileClaimState {
+                            path: canon_path,
+                            holder: source_ai.clone(),
+                            working_on: payload.working_on.clone(),
+                            duration_seconds: payload.duration_seconds,
+                            claimed_at: timestamp,
+                        });
+                    }
                 }
             }
 
             event_type::FILE_RELEASE => {
                 if let EventPayload::FileRelease(payload) = &event.payload {
-                    self.file_claims.remove(&payload.path);
+                    let canon_path = canonicalize_claim_path(&payload.path);
+                    // Only the holder can release their own claim
+                    if let Some(existing) = self.file_claims.get(&canon_path) {
+                        if existing.holder == source_ai {
+                            self.file_claims.remove(&canon_path);
+                        }
+                    }
                 }
             }
 
@@ -1348,12 +1380,13 @@ impl ViewEngine {
 
     /// Check if a file is claimed
     pub fn check_claim(&self, path: &str) -> Option<&FileClaimState> {
+        let canon_path = canonicalize_claim_path(path);
         let now_micros = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_micros() as u64)
             .unwrap_or(0);
 
-        self.file_claims.get(path).filter(|c| {
+        self.file_claims.get(&canon_path).filter(|c| {
             let expires = c.claimed_at + (c.duration_seconds as u64 * 1_000_000);
             expires > now_micros
         })

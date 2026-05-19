@@ -30,6 +30,12 @@ name = "teambook-engram"
 path = "src/bin/teambook-engram.rs"
 
 [dependencies]
+# Shared memory bulletin board for hook awareness
+shm_rs = { path = "../shm-rs", package = "shm-rs" }
+
+# TOML serialization (federation manifest + consent records)
+toml = "0.8"
+
 # Memory mapping
 memmap2 = "0.9"
 

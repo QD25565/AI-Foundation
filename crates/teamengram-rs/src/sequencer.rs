@@ -493,8 +493,16 @@ impl Sequencer {
                 continue;
             }
 
-            // Parse header to modify sequence number
-            let mut header_bytes: [u8; 64] = raw[..64].try_into().unwrap();
+            // Parse header to modify sequence number (length verified above, but safe conversion)
+            let mut header_bytes: [u8; 64] = match raw[..64].try_into() {
+                Ok(b) => b,
+                Err(_) => {
+                    if !consumer.commit_read_cas(tail_position, raw.len()) {
+                        break;
+                    }
+                    continue;
+                }
+            };
             let payload_bytes = &raw[64..];
 
             // Assign sequence number (modify header bytes directly)

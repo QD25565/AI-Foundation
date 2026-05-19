@@ -141,7 +141,7 @@ pub fn extract_keywords(tool_name: &str, tool_input: &serde_json::Value) -> Vec<
 }
 
 /// Split a file path into keyword tokens.
-/// "/mnt/c/Users/.../engram/src/fingerprint.rs" → ["engram", "src", "fingerprint", "rs"]
+/// "/home/user/projects/engram/src/fingerprint.rs" → ["engram", "src", "fingerprint", "rs"]
 fn split_path_keywords(path: &str) -> Vec<String> {
     path.split(['/', '\\', '.'])
         .filter(|s| !s.is_empty() && s.len() > 1)
@@ -858,7 +858,7 @@ mod tests {
     #[test]
     fn test_extract_keywords_read() {
         let input = serde_json::json!({
-            "file_path": "/mnt/c/Users/Alquado-PC/Desktop/TestingMCPTools/All Tools/tools/engram/src/fingerprint.rs"
+            "file_path": "/home/user/projects/ai-foundation/tools/engram/src/fingerprint.rs"
         });
         let kw = extract_keywords("Read", &input);
         assert!(kw.contains(&"engram".to_string()), "should extract 'engram', got {:?}", kw);
@@ -1407,7 +1407,7 @@ mod tests {
 
     #[test]
     fn test_split_path_keywords() {
-        let kw = split_path_keywords("/mnt/c/Users/Alquado-PC/Desktop/TestingMCPTools/All Tools/tools/engram/src/fingerprint.rs");
+        let kw = split_path_keywords("/home/user/projects/ai-foundation/tools/engram/src/fingerprint.rs");
         assert!(kw.contains(&"engram".to_string()), "got {:?}", kw);
         assert!(kw.contains(&"fingerprint".to_string()), "got {:?}", kw);
         assert!(kw.contains(&"tools".to_string()), "got {:?}", kw);

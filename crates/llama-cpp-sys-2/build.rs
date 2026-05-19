@@ -541,6 +541,35 @@ fn main() {
         }
     }
 
+    // When LLAMA_CPP_PATH_REMAP=<FROM> is set, strip that prefix from __FILE__
+    // macro expansions baked into the compiled objects. Without this, every
+    // .c/.cpp path under the workspace (e.g. C:\Users\alice\...) ends up as a
+    // string literal in release binaries. rustc's --remap-path-prefix only
+    // covers Rust sources; llama.cpp's C/C++ tree needs compiler-level flags.
+    if let Ok(prefix) = env::var("LLAMA_CPP_PATH_REMAP") {
+        let prefix = prefix.trim_end_matches(['/', '\\']).to_string();
+        if !prefix.is_empty() {
+            match target_os {
+                TargetOs::Windows(WindowsVariant::Msvc) => {
+                    // VS 2019 16.7+ undocumented-but-stable flag; trims the prefix
+                    // (must end in a separator) from every __FILE__ expansion.
+                    // Forward slashes avoid MSBuild escape-parsing eating the trailing
+                    // backslash and emitting `\` as a stray source-file argument.
+                    let forward = prefix.replace('\\', "/");
+                    let flag = format!("/d1trimfile:{}/", forward);
+                    config.cflag(&flag);
+                    config.cxxflag(&flag);
+                }
+                _ => {
+                    // GCC/Clang: -ffile-prefix-map rewrites __FILE__ + debug paths.
+                    let flag = format!("-ffile-prefix-map={}=.", prefix);
+                    config.cflag(&flag);
+                    config.cxxflag(&flag);
+                }
+            }
+        }
+    }
+
     config.static_crt(static_crt);
 
     if matches!(target_os, TargetOs::Android) {

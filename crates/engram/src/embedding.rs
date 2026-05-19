@@ -57,7 +57,7 @@ impl Default for EmbeddingConfig {
         Self {
             model_path: PathBuf::from("embeddinggemma-300M-Q8_0.gguf"),
             dimensions: DEFAULT_DIMENSIONS as usize, // 512
-            gpu_layers: 0, // CPU only for broad compatibility
+            gpu_layers: -1, // Auto: offload all layers to GPU if CUDA available, else CPU
             context_size: 8192, // Support long notes (up to ~30k chars)
             normalize: true,
         }
@@ -115,11 +115,12 @@ impl EmbeddingGenerator {
             )));
         }
 
-        // Load model with GPU settings
+        // Load model with GPU settings.
+        // gpu_layers: -1 = offload all layers (auto); 0 = CPU only; n = offload n layers.
+        // Embedding models are small (~24 layers for Gemma 300M); 999 safely offloads everything.
         let mut model_params = LlamaModelParams::default();
-        if config.gpu_layers >= 0 {
-            model_params = model_params.with_n_gpu_layers(config.gpu_layers as u32);
-        }
+        let n_gpu_layers: u32 = if config.gpu_layers < 0 { 999 } else { config.gpu_layers as u32 };
+        model_params = model_params.with_n_gpu_layers(n_gpu_layers);
 
         let model = LlamaModel::load_from_file(backend, &config.model_path, &model_params)
             .map_err(|e| EngramError::EmbeddingError(format!("Failed to load model: {}", e)))?;

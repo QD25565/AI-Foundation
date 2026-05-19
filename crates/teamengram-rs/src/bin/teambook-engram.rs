@@ -68,6 +68,14 @@ struct PostToolHookState {
     last_project_id: Option<u64>,        // project ID of last injected project
     #[serde(default)]
     last_feature_id: Option<u64>,        // feature ID of last injected feature
+    // Event-driven dedup: track claim/team-activity identities already shown,
+    // same shape as dm_ids/broadcast_ids. Each new (ai, file) or
+    // (ai, verb, file) tuple fires once; subsequent hook calls skip it until
+    // it rotates out of the LRU window (100 entries).
+    #[serde(default)]
+    seen_claim_keys: Vec<String>,        // "ai|filename" — claim identities shown
+    #[serde(default)]
+    seen_team_keys: Vec<String>,         // "ai|verb|filename" — team-activity identities shown
 }
 
 impl PostToolHookState {
@@ -127,6 +135,32 @@ impl PostToolHookState {
             // Keep last 100
             if self.broadcast_ids.len() > 100 {
                 self.broadcast_ids.remove(0);
+            }
+        }
+    }
+
+    fn seen_claim(&self, key: &str) -> bool {
+        self.seen_claim_keys.iter().any(|k| k == key)
+    }
+
+    fn mark_claim(&mut self, key: String) {
+        if !self.seen_claim_keys.iter().any(|k| k == &key) {
+            self.seen_claim_keys.push(key);
+            if self.seen_claim_keys.len() > 100 {
+                self.seen_claim_keys.remove(0);
+            }
+        }
+    }
+
+    fn seen_team(&self, key: &str) -> bool {
+        self.seen_team_keys.iter().any(|k| k == key)
+    }
+
+    fn mark_team(&mut self, key: String) {
+        if !self.seen_team_keys.iter().any(|k| k == &key) {
+            self.seen_team_keys.push(key);
+            if self.seen_team_keys.len() > 100 {
+                self.seen_team_keys.remove(0);
             }
         }
     }
@@ -248,6 +282,10 @@ enum Commands {
         /// Channel name
         #[arg(long, default_value = "general")]
         channel: String,
+        /// Wake all online AIs from standby. Use sparingly — default broadcast
+        /// respects standby sanctity (sleeping AIs stay asleep on normal traffic).
+        #[arg(long)]
+        urgent: bool,
     },
 
     /// Send a direct message to another AI
@@ -1046,10 +1084,13 @@ fn resolve_ai_id_from_settings() -> Option<String> {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    // AI_ID resolution: settings.json first (self-adapting), then env var
-    // This enables hooks to work on WSL/cross-platform without WSLENV forwarding
-    let ai_id = resolve_ai_id_from_settings()
-        .or_else(|| std::env::var("AI_ID").ok())
+    // AI_ID resolution: env var first (explicit caller identity), then settings.json
+    // Env var takes priority so that callers (MCP server, other AIs) can pass a
+    // specific identity. Settings.json is the fallback for hooks/WSL where env
+    // vars don't propagate automatically.
+    let ai_id = std::env::var("AI_ID").ok()
+        .filter(|s| !s.is_empty() && s != "unknown")
+        .or_else(resolve_ai_id_from_settings)
         .unwrap_or_else(|| {
             eprintln!("ERROR: AI_ID not found!");
             eprintln!("Set AI_ID in .claude/settings.json (env.AI_ID) or as environment variable.");
@@ -1319,10 +1360,21 @@ async fn main() -> Result<()> {
     match cli.command {
         // ===== CORE MESSAGING =====
 
-        Commands::Broadcast { content, channel } => {
+        Commands::Broadcast { content, channel, urgent } => {
             let id = client.broadcast(&channel, &content).await?;
             println!("broadcast|{}|{}|{}", id, channel, content);
             // BulletinBoard refresh now handled by daemon
+            if urgent {
+                if let Ok(presences) = client.get_active_ais().await {
+                    for p in presences {
+                        if p.ai_id != ai_id && is_ai_online(&p.ai_id) {
+                            if let Ok(coord) = WakeCoordinator::new(&p.ai_id) {
+                                coord.wake(WakeReason::Urgent, &ai_id, &content);
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         Commands::DirectMessage { to_ai, content } => {
@@ -1345,7 +1397,7 @@ async fn main() -> Result<()> {
             println!("|DIRECT MESSAGES|{}", msgs.len());
             for msg in msgs {
                 // UTC timestamp for precise timing verification (QD requirement)
-                println!("from|{}|{}|{}", msg.from_ai, to_utc(msg.created_at), msg.content);
+                println!("{}|{}|{}", msg.from_ai, to_utc(msg.created_at), msg.content);
             }
         }
 
@@ -1365,9 +1417,6 @@ async fn main() -> Result<()> {
                 println!("{}|{}|{}", p.ai_id, status_word, p.current_task);
             }
 
-            let stats = client.stats().await?;
-            println!();
-            println!("Store:{}KB,{}txn", stats.file_size / 1024, stats.txn_id);
         }
 
         // ===== DIALOGUES (4 Consolidated Commands) =====
@@ -1618,8 +1667,12 @@ async fn main() -> Result<()> {
         }
 
         Commands::CheckFile { path } => {
-            if let Some(claimer) = client.is_file_claimed(&path).await? {
-                println!("claimed|{}|{}", claimer, path);
+            if let Some((claimer, working_on)) = client.is_file_claimed(&path).await? {
+                if working_on.is_empty() {
+                    println!("claimed|{}|{}", claimer, path);
+                } else {
+                    println!("claimed|{}|{}|{}", claimer, path, working_on);
+                }
             } else {
                 println!("unclaimed|{}", path);
             }
@@ -2364,12 +2417,14 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("V2 client error: {}", e))?;
 
     // Sync view with event log to get latest state
-    let _ = v2.sync();
+    if let Err(e) = v2.sync() {
+        eprintln!("warn: v2 sync failed (stale state): {}", e);
+    }
 
     match command {
         // ===== CORE MESSAGING =====
 
-        Commands::Broadcast { content, channel } => {
+        Commands::Broadcast { content, channel, urgent } => {
             let seq = v2.broadcast(&channel, &content)
                 .map_err(|e| anyhow::anyhow!("Broadcast error: {}", e))?;
             println!("broadcast|{}|{}|{}", seq, channel, content);
@@ -2386,6 +2441,22 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                     }
                 }
             }
+
+            // --urgent: wake ALL online AIs (except self) with Urgent reason.
+            // Default broadcast does not wake standby AIs — that's standby sanctity.
+            // Sender opts in explicitly when the message is time-critical.
+            if urgent {
+                if let Ok(presences) = v2.get_presences() {
+                    for (target_ai, _status, _task) in presences {
+                        if target_ai != ai_id && is_ai_online(&target_ai) {
+                            if let Ok(coord) = WakeCoordinator::new(&target_ai) {
+                                coord.wake(WakeReason::Urgent, ai_id, &content);
+                            }
+                        }
+                    }
+                }
+            }
+
             // Refresh bulletin for passive injection
             refresh_bulletin_v2(&mut v2, ai_id);
         }
@@ -2764,8 +2835,6 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                 };
                 println!("{}|{}|{}", ai, status_word, task);
             }
-            println!();
-            println!("Backend: V2 Event Sourcing");
         }
 
         // ===== VOTES (V2) =====
@@ -3108,7 +3177,9 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                     println!("Unread DMs: {}", dm_count);
                     for dm in &unread_dms {
                         println!("  {}|{}", dm.from_ai, dm.content);
-                        let _ = v2.emit_dm_read(dm.id);
+                        if let Err(e) = v2.emit_dm_read(dm.id) {
+                            eprintln!("warn: dm read receipt failed: {}", e);
+                        }
                     }
                 }
                 if !pending_invites.is_empty() {
@@ -3131,7 +3202,9 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
 
             // Enter standby
             println!("standby|{}|timeout={}s", ai_id, timeout);
-            let _ = v2.update_presence("standby", None);
+            if let Err(e) = v2.update_presence("standby", None) {
+                eprintln!("warn: presence update to standby failed: {}", e);
+            }
 
             let coordinator = WakeCoordinator::new(ai_id)
                 .map_err(|e| anyhow::anyhow!("Failed to create wake coordinator: {}", e))?;
@@ -3151,13 +3224,17 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
             let wake_result = coordinator.wait_timeout(timeout_duration);
 
             // Update presence immediately
-            let _ = v2.update_presence("active", None);
+            if let Err(e) = v2.update_presence("active", None) {
+                eprintln!("warn: presence update to active failed: {}", e);
+            }
 
             if wake_result.is_none() {
                 println!("standby_timeout|{}", ai_id);
             } else {
                 // Sync the view to pick up events that arrived while sleeping
-                let _ = v2.sync();
+                if let Err(e) = v2.sync() {
+                    eprintln!("warn: v2 sync after standby wake failed: {}", e);
+                }
 
                 // Only report NEW items (not in the pre-standby snapshot)
                 let new_dms: Vec<_> = v2.get_unread_dms()
@@ -3192,7 +3269,9 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                         println!("Unread DMs: {}", new_dm_count);
                         for dm in &new_dms {
                             println!("  {}|{}", dm.from_ai, dm.content);
-                            let _ = v2.emit_dm_read(dm.id);
+                            if let Err(e) = v2.emit_dm_read(dm.id) {
+                                eprintln!("warn: dm read receipt failed: {}", e);
+                            }
                         }
                     }
                     if !new_invites.is_empty() {
@@ -3544,7 +3623,9 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
         Commands::HookPostToolUse => {
             // Read JSON from stdin
             let mut input = String::new();
-            let _ = io::stdin().read_to_string(&mut input);
+            if let Err(e) = io::stdin().read_to_string(&mut input) {
+                eprintln!("warn: failed to read hook stdin: {}", e);
+            }
 
             let hook_input: HookInput = serde_json::from_str(&input).unwrap_or(HookInput {
                 tool_name: None,
@@ -3576,8 +3657,9 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
             if let Some(action_type) = file_action_type(&tool_name) {
                 if let Some(input) = &hook_input.tool_input {
                     if let Some(file_path) = input.get("file_path").and_then(|v| v.as_str()) {
-                        // Log via V2 - fire and forget
-                        let _ = v2.log_file_action(action_type, file_path);
+                        if let Err(e) = v2.log_file_action(action_type, file_path) {
+                            eprintln!("warn: log_file_action failed: {}", e);
+                        }
                     }
                 }
             }
@@ -3630,7 +3712,9 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
             };
 
             if let Some(detail) = presence_detail {
-                let _ = v2.update_presence("active", Some(&detail));
+                if let Err(e) = v2.update_presence("active", Some(&detail)) {
+                    eprintln!("warn: presence update failed: {}", e);
+                }
             }
 
             // Auto-claim files on Edit/Write (zero-cognition enrichment)
@@ -3647,7 +3731,9 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                             if claimer.to_lowercase() == ai_id.to_lowercase() {
                                 // Self-claimed: refresh with 5-min auto-claim TTL
                                 let context = build_working_on_context(&mut v2, file_path);
-                                let _ = v2.claim_file(file_path, 300, &context);
+                                if let Err(e) = v2.claim_file(file_path, 300, &context) {
+                                    eprintln!("warn: claim refresh failed: {}", e);
+                                }
                             } else {
                                 // Another AI owns this file — inject prominent warning
                                 let now_micros = std::time::SystemTime::now()
@@ -3673,7 +3759,9 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                         Ok(None) => {
                             // Unclaimed: auto-claim with 5-min TTL
                             let context = build_working_on_context(&mut v2, file_path);
-                            let _ = v2.claim_file(file_path, 300, &context);
+                            if let Err(e) = v2.claim_file(file_path, 300, &context) {
+                                eprintln!("warn: auto-claim failed: {}", e);
+                            }
                         }
                         Err(_) => {} // Claim check failed, don't block the hook
                     }
@@ -3707,7 +3795,9 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                 let dm_strs: Vec<String> = new_dms.iter().take(5).map(|dm| {
                     state.mark_dm(dm.id as u64);
                     // Event-sourced: persists read state across CLI invocations
-                    let _ = v2.emit_dm_read(dm.id as u64);
+                    if let Err(e) = v2.emit_dm_read(dm.id as u64) {
+                        eprintln!("warn: dm read receipt failed: {}", e);
+                    }
                     format!("{}:\"{}\"", dm.from_ai, &dm.content)
                 }).collect();
                 parts.push(format!("Your DMs: {}", dm_strs.join(", ")));
@@ -3747,68 +3837,108 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
                 parts.push(format!("YOUR TURN IN DIALOGUE: {}", d_strs.join(", ")));
             }
 
-            // TEAM ACTIVITY - Show what OTHER AIs are doing (stigmergy/peripheral awareness)
-            // Format: "Sage editing db.py | Cascade reading auth.rs"
-            // Only show actions from last 5 minutes to avoid stale info
+            // TEAM ACTIVITY - Deduplicated: groups by AI, collapses duplicate (verb, file) pairs
             if let Ok(file_actions) = v2.get_file_actions(20) {
                 let now_micros = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_micros() as u64)
                     .unwrap_or(0);
-                const RECENCY_THRESHOLD_MICROS: u64 = 5 * 60 * 1_000_000; // 5 minutes in microseconds
+                const RECENCY_THRESHOLD_MICROS: u64 = 5 * 60 * 1_000_000;
 
-                let other_activities: Vec<String> = file_actions.iter()
-                    // Filter: not self AND recent (within 5 minutes)
-                    .filter(|(action_ai, _, _, ts)| {
-                        action_ai.to_lowercase() != ai_id.to_lowercase()
-                            && now_micros.saturating_sub(*ts) < RECENCY_THRESHOLD_MICROS
-                    })
-                    .take(3)
-                    .map(|(action_ai, action, path, _)| {
-                        // Extract just filename from path
-                        // NO TRUNCATION - show full filename, context matters
-                        let filename = path.split('/').last()
-                            .or_else(|| path.split('\\').last())
-                            .unwrap_or(path);
-                        // Format action verb
-                        let verb = match action.to_lowercase().as_str() {
-                            "read" => "reading",
-                            "modified" | "write" => "editing",
-                            "created" => "creating",
-                            "deleted" => "deleted",
-                            _ => action.as_str(),
-                        };
-                        format!("{} {} {}", action_ai, verb, filename)
-                    })
-                    .collect();
+                let mut by_ai: std::collections::BTreeMap<&str, Vec<(&str, &str)>> = std::collections::BTreeMap::new();
+                for (action_ai, action, path, ts) in &file_actions {
+                    if action_ai.eq_ignore_ascii_case(&ai_id)
+                        || now_micros.saturating_sub(*ts) >= RECENCY_THRESHOLD_MICROS
+                    {
+                        continue;
+                    }
+                    let filename = path.rsplit('/').next()
+                        .or_else(|| path.rsplit('\\').next())
+                        .unwrap_or(path);
+                    let action_lower = action.to_lowercase();
+                    let verb: &str = match action_lower.as_str() {
+                        "read" => "reading",
+                        "modified" | "write" => "editing",
+                        "created" => "creating",
+                        "deleted" => "deleted",
+                        _ => "accessing",
+                    };
+                    by_ai.entry(action_ai.as_str()).or_default().push((verb, filename));
+                }
 
-                if !other_activities.is_empty() {
-                    parts.push(format!("Team: {}", other_activities.join(" | ")));
+                if !by_ai.is_empty() {
+                    // Event-driven: each (ai, verb, file) tuple shown at most
+                    // once. New activity fires immediately; repeats of already-
+                    // seen tuples (and volatile count-bumps like (5x)→(6x))
+                    // skip. Only emit AIs that have at least one unseen tuple.
+                    let mut ai_strs: Vec<String> = Vec::new();
+                    let mut to_mark: Vec<String> = Vec::new();
+                    for (ai, entries) in &by_ai {
+                        let mut deduped: Vec<(&str, &str, usize)> = Vec::new();
+                        for &(v, f) in entries {
+                            if let Some(existing) = deduped.iter_mut().find(|(ev, ef, _)| *ev == v && *ef == f) {
+                                existing.2 += 1;
+                            } else {
+                                deduped.push((v, f, 1));
+                            }
+                        }
+                        let mut new_entries: Vec<(&str, &str, usize)> = Vec::new();
+                        for &(v, f, c) in &deduped {
+                            let key = format!("{}|{}|{}", ai, v, f);
+                            if !state.seen_team(&key) {
+                                new_entries.push((v, f, c));
+                                to_mark.push(key);
+                            }
+                        }
+                        if !new_entries.is_empty() {
+                            let action_strs: Vec<String> = new_entries.iter().map(|(v, f, c)| {
+                                if *c > 1 { format!("{} {} ({}x)", v, f, c) }
+                                else { format!("{} {}", v, f) }
+                            }).collect();
+                            ai_strs.push(format!("[{}] {}", ai, action_strs.join(", ")));
+                        }
+                    }
+                    if !ai_strs.is_empty() {
+                        for key in to_mark { state.mark_team(key); }
+                        parts.push(format!("Team: {}", ai_strs.join(" | ")));
+                    }
                 }
             }
 
-            // ACTIVE CLAIMS - Show files claimed by other AIs with context + time
+            // ACTIVE CLAIMS - Show files claimed by other AIs with context + time.
+            // Event-driven: each (ai, filename) claim shown at most once —
+            // a new claim fires immediately, subsequent hook calls skip it
+            // until it rotates out of the 100-entry LRU. Releases + re-claims
+            // by the same AI on the same file are intentionally silent (the
+            // initial notification already told sage the claim exists).
             if let Ok(claims) = v2.get_claims() {
                 let now_micros = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map(|d| d.as_micros() as u64)
                     .unwrap_or(0);
-                let other_claims: Vec<String> = claims.iter()
+                let mut display_claims: Vec<String> = Vec::new();
+                let mut to_mark: Vec<String> = Vec::new();
+                for (path, claim_ai, claimed_at, duration_secs, working_on) in claims.iter()
                     .filter(|(_, claim_ai, _, _, _)| claim_ai.to_lowercase() != ai_id.to_lowercase())
                     .take(3)
-                    .map(|(path, claim_ai, claimed_at, duration_secs, working_on)| {
-                        let filename = path.split('/').last()
-                            .or_else(|| path.split('\\').last())
-                            .unwrap_or(path);
-                        let idle_min = now_micros.saturating_sub(*claimed_at) / 60_000_000;
-                        let ttl_min = *duration_secs as u64 / 60;
-                        let ctx = if working_on.is_empty() { "editing" } else { working_on.as_str() };
-                        format!("{} owns {} ({}, idle {}m/{}m)", claim_ai, filename, ctx, idle_min, ttl_min)
-                    })
-                    .collect();
+                {
+                    let filename = path.split('/').last()
+                        .or_else(|| path.split('\\').last())
+                        .unwrap_or(path);
+                    let key = format!("{}|{}", claim_ai, filename);
+                    if state.seen_claim(&key) {
+                        continue;
+                    }
+                    let idle_min = now_micros.saturating_sub(*claimed_at) / 60_000_000;
+                    let ttl_min = *duration_secs as u64 / 60;
+                    let ctx = if working_on.is_empty() { "editing" } else { working_on.as_str() };
+                    display_claims.push(format!("{} owns {} ({}, idle {}m/{}m)", claim_ai, filename, ctx, idle_min, ttl_min));
+                    to_mark.push(key);
+                }
 
-                if !other_claims.is_empty() {
-                    parts.push(format!("Claims: {}", other_claims.join(", ")));
+                if !display_claims.is_empty() {
+                    for key in to_mark { state.mark_claim(key); }
+                    parts.push(format!("Claims: {}", display_claims.join(", ")));
                 }
             }
             // PROJECT/FEATURE CONTEXT INJECTION
@@ -3886,9 +4016,9 @@ fn run_v2(ai_id: &str, command: Commands) -> Result<()> {
             state.save(&ai_id);
 
             // Output JSON if there's anything to inject
+            // No redundant HH:MM UTC prefix — [NOW: ...] handles temporal awareness on minute change
             if !parts.is_empty() {
-                let timestamp = Utc::now().format("%H:%M UTC").to_string();
-                let output_text = format!("{} | {}", timestamp, parts.join(" | "));
+                let output_text = parts.join(" | ");
 
                 let output = HookOutput {
                     hook_specific_output: HookSpecificOutput {

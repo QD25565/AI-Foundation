@@ -58,7 +58,7 @@ static WAKE_REGISTRY: Lazy<Mutex<HashMap<String, WakeCoordinator>>> = Lazy::new(
 });
 
 // BulletinBoard for hook awareness - event-driven updates
-use teamengram::shm_rs::bulletin::BulletinBoard;
+use shm_rs::bulletin::BulletinBoard;
 
 // Using our own pipe implementation (direct Windows API, not tokio's broken abstraction)
 #[cfg(windows)]
@@ -200,9 +200,12 @@ fn signal_wake(target_ai: &str, reason: WakeReason, from_ai: &str, content: &str
                 c
             }
             Err(e) => {
-                error!("Failed to create wake coordinator for {}: {}", target_ai, e);
-                // Return a dummy that will fail silently - not ideal but prevents panic
-                WakeCoordinator::new("_invalid_").unwrap_or_else(|_| panic!("Cannot create any wake coordinator"))
+                let msg = format!(
+                    "CRITICAL: failed to create wake coordinator for {}: {}; wake delivery is required",
+                    target_ai, e
+                );
+                error!("{}", msg);
+                panic!("{}", msg);
             }
         }
     });
@@ -378,6 +381,9 @@ pub struct TeamEngramDaemon {
     #[allow(dead_code)]
     idle_timeout_secs: u64,
     // NO heartbeat_interval - presence is EVENT-DRIVEN on each IPC request
+    /// SWMR presence: daemon holds PresenceMutex for every AI that calls in.
+    /// is_ai_online() checks these OS mutexes — without them, who_is_here returns 0.
+    active_presences: Arc<Mutex<HashMap<String, teamengram::wake::PresenceMutex>>>,
 }
 
 impl TeamEngramDaemon {
@@ -430,7 +436,7 @@ impl TeamEngramDaemon {
             notify,
             stats: Arc::new(RwLock::new(DaemonStats::new())),
             idle_timeout_secs: 1800, // 30 minutes
-            // NO heartbeat polling - presence updated on each IPC request
+            active_presences: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -442,11 +448,14 @@ impl TeamEngramDaemon {
         info!("Pipe: {}", self.pipe_name);
         info!("Store: {:?}", TeamEngram::default_path());
 
-        // ACQUIRE PRESENCE MUTEX - OS-level, auto-releases on process death
-        // This is the ONLY presence indicator - no polling, no TTL
-        let _presence = PresenceMutex::acquire(&self.ai_id)
-            .context("Failed to acquire presence mutex")?;
-        info!("Presence mutex acquired: {} is ONLINE", self.ai_id);
+        // ACQUIRE PRESENCE MUTEX - OS-level, auto-releases on process death.
+        // Seed active_presences with daemon's own AI so route_method doesn't double-acquire.
+        {
+            let mutex = PresenceMutex::acquire(&self.ai_id)
+                .context("Failed to acquire presence mutex")?;
+            info!("Presence mutex acquired: {} is ONLINE", self.ai_id);
+            self.active_presences.lock().unwrap().insert(self.ai_id.clone(), mutex);
+        }
 
         // Also register in store for status/task info (not for online detection)
         {
@@ -489,10 +498,11 @@ impl TeamEngramDaemon {
             let private_store = Arc::clone(&self.private_store);
             let stats = Arc::clone(&self.stats);
             let ai_id = self.ai_id.clone();
+            let active_presences = Arc::clone(&self.active_presences);
 
             // Handle client in separate blocking thread (pipe I/O is synchronous)
             std::thread::spawn(move || {
-                if let Err(e) = handle_client_sync(pipe, shared_store, private_store, stats, ai_id) {
+                if let Err(e) = handle_client_sync(pipe, shared_store, private_store, stats, ai_id, active_presences) {
                     error!("Client error: {}", e);
                 }
             });
@@ -514,6 +524,7 @@ fn handle_client_sync(
     private_store: Arc<RwLock<TeamEngram>>,
     stats: Arc<RwLock<DaemonStats>>,
     ai_id: String,
+    active_presences: Arc<Mutex<HashMap<String, teamengram::wake::PresenceMutex>>>,
 ) -> Result<()> {
     // Create a tokio runtime for this thread to call async route_method
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -521,17 +532,18 @@ fn handle_client_sync(
         .build()?;
 
     let mut buffer = vec![0u8; 65536];
+    let mut client_ai: Option<String> = None;
 
     loop {
         // Synchronous read from our Windows API pipe
         let n = match pipe.read(&mut buffer) {
             Ok(n) => n,
             Err(e) => {
-                // Check for broken pipe (client disconnected)
                 if e.kind() == std::io::ErrorKind::BrokenPipe {
                     break;
                 }
-                return Err(e.into());
+                error!("Pipe read error: {}", e);
+                break;
             }
         };
 
@@ -545,6 +557,15 @@ fn handle_client_sync(
         // Parse JSON-RPC request
         let response = match serde_json::from_str::<JsonRpcRequest>(&request_str) {
             Ok(request) => {
+                // Track client identity for disconnect cleanup
+                if client_ai.is_none() {
+                    if let Some(id) = request.params.get("ai_id").and_then(|v| v.as_str()) {
+                        if id != ai_id {
+                            client_ai = Some(id.to_string());
+                        }
+                    }
+                }
+
                 // Update stats (blocking)
                 {
                     let mut s = stats.blocking_write();
@@ -553,7 +574,7 @@ fn handle_client_sync(
                 }
 
                 // Route method (async, run in our local runtime)
-                rt.block_on(route_method(&request, &shared_store, &private_store, &stats, &ai_id))
+                rt.block_on(route_method(&request, &shared_store, &private_store, &stats, &ai_id, &active_presences))
             }
             Err(e) => {
                 JsonRpcResponse::error(None, -32700, format!("Parse error: {}", e))
@@ -567,6 +588,14 @@ fn handle_client_sync(
         pipe.flush()?;
     }
 
+    // Client disconnected — release their presence mutex so is_ai_online() sees them as offline
+    if let Some(ref disconnected_ai) = client_ai {
+        let mut presences = active_presences.lock().unwrap();
+        if presences.remove(disconnected_ai).is_some() {
+            info!("Presence released for disconnected client: {}", disconnected_ai);
+        }
+    }
+
     Ok(())
 }
 
@@ -577,6 +606,7 @@ async fn route_method(
     private_store: &Arc<RwLock<TeamEngram>>,
     stats: &Arc<RwLock<DaemonStats>>,
     ai_id: &str,
+    active_presences: &Arc<Mutex<HashMap<String, teamengram::wake::PresenceMutex>>>,
 ) -> JsonRpcResponse {
     let id = request.id.clone();
     let params = &request.params;
@@ -587,6 +617,18 @@ async fn route_method(
     {
         let mut store = shared_store.write().await;
         let _ = store.update_presence(requesting_ai, "active", &request.method);
+    }
+    // SWMR: Acquire OS-level presence mutex for this AI so is_ai_online() sees them.
+    // The daemon holds one mutex per distinct AI that calls in. All mutexes auto-release
+    // when the daemon process dies — accurate online detection, zero polling.
+    {
+        let mut presences = active_presences.lock().unwrap();
+        if !presences.contains_key(requesting_ai) {
+            if let Ok(mutex) = teamengram::wake::PresenceMutex::acquire(requesting_ai) {
+                info!("Presence mutex acquired for {}", requesting_ai);
+                presences.insert(requesting_ai.to_string(), mutex);
+            }
+        }
     }
 
     match request.method.as_str() {
@@ -773,12 +815,33 @@ async fn route_method(
                             }
                         }
                     }
-                    // Check for urgent keywords
-                    if content_lower.contains("urgent") || content_lower.contains("critical") || content_lower.contains("help") {
-                        // Wake all known AIs for urgent messages
-                        // For now, signal broadcast reason (AIs can check if relevant)
-                        signal_wake("all", WakeReason::Urgent, from, content);
+                    let urgent_requested = params.get("urgent")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let urgent_tagged = content.trim_start().starts_with("[URGENT]")
+                        || content.trim_start().starts_with("[urgent]");
+                    if urgent_requested || urgent_tagged {
+                        let store_for_wake = Arc::clone(&shared_store);
+                        let from_owned = from.to_string();
+                        let content_owned = content.to_string();
+                        tokio::spawn(async move {
+                            let mut s = store_for_wake.write().await;
+                            if let Ok(presences) = s.get_all_presences() {
+                                drop(s);
+                                let mut seen: std::collections::HashSet<String> =
+                                    std::collections::HashSet::new();
+                                for p in presences {
+                                    if p.ai_id == from_owned { continue; }
+                                    if !seen.insert(p.ai_id.clone()) { continue; }
+                                    if is_ai_online(&p.ai_id) {
+                                        signal_wake(&p.ai_id, WakeReason::Urgent,
+                                                    &from_owned, &content_owned);
+                                    }
+                                }
+                            }
+                        });
                     }
+                    let _ = content_lower;
                     JsonRpcResponse::success(id, serde_json::json!({
                         "id": msg_id,
                         "status": "sent"
@@ -2269,24 +2332,24 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Per-AI pipe name - each AI gets its own isolated daemon
-    // This matches TeamEngramClient::pipe_name_for_ai() which clients use
-    // Architecture: Each AI has own daemon for blazing fast, isolated data streams
-    // AI_ID is required (validated above), no fallback needed
-    // SWMR: Single shared daemon for all AIs
-    let pipe_name = std::env::var("PIPE_NAME").unwrap_or_else(|_| {
-        r"\\.\pipe\teamengram".to_string()
-    });
-    // OLD: Per-AI pipes (caused multi-writer B+Tree corruption) - REMOVED
-
-    info!("|TEAMENGRAM DAEMON|v0.1.0");
-    info!("Pipe:{}", pipe_name);
+    // V2 architecture: per-AI daemon holds presence mutex, no shared B+tree store.
+    // The shared teamengram.engram is DEAD — V2 uses outbox + sequencer + views.
+    // Each AI gets its own daemon. Each daemon holds its own PresenceMutex.
+    // That mutex is how is_ai_online() detects presence (OS-level, auto-releases on death).
+    info!("|TEAMENGRAM DAEMON|v2.0 (presence)");
     info!("AI:{}", ai_id);
 
+    // Acquire presence mutex — OS-level, auto-releases on process death.
+    let _presence = PresenceMutex::acquire(&ai_id)
+        .context("Failed to acquire presence mutex")?;
+    info!("Presence mutex acquired: {} is ONLINE", ai_id);
 
-    // Create and run daemon
-    let daemon = TeamEngramDaemon::new(pipe_name, ai_id)?;
-    daemon.run().await
+    // Block forever. The daemon's job is to exist and hold the mutex.
+    // When this process dies (kill, crash, reboot), the OS releases the mutex
+    // and is_ai_online() returns false. No polling, no TTL, no heartbeat.
+    loop {
+        std::thread::sleep(std::time::Duration::from_secs(3600));
+    }
 }
 
 // ============================================================================
@@ -2676,4 +2739,3 @@ mod tests {
         assert_eq!(error.code, -32602); // Invalid params
     }
 }
-

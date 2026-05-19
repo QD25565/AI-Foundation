@@ -21,6 +21,7 @@ use crate::event::{Event, EventPayload, event_type};
 use crate::outbox::{OutboxProducer, OutboxConsumer};
 use crate::event_log::{EventLogReader, EventLogWriter};
 use crate::view::ViewEngine;
+use crate::wake::is_ai_online;
 use crate::compat_types::{Message, MessageType};
 
 /// Maximum events to scan in outbox fallback lookups.
@@ -317,6 +318,14 @@ impl V2Client {
 
     /// Respond to a dialogue
     pub fn respond_dialogue(&mut self, dialogue_id: u64, response: &str) -> V2Result<u64> {
+        self.sync()?;
+        if let Some(d) = self.view.get_dialogue(dialogue_id) {
+            if d.status == "ended" || d.status == "completed" || d.status == "cancelled" {
+                return Err(V2Error::InvalidState(
+                    format!("dialogue {} is {} — cannot respond", dialogue_id, d.status),
+                ));
+            }
+        }
         let event = Event::dialogue_respond(&self.ai_id, dialogue_id, response);
         let timestamp = event.header.timestamp;
         self.outbox.write_event(&event)
@@ -386,16 +395,48 @@ impl V2Client {
     // ========== FILE CLAIMS ==========
 
     /// Claim a file for exclusive work
+    ///
+    /// Pre-checks for conflicting claims before emitting the event.
+    /// Returns error if another AI holds an active (non-expired) claim.
+    /// Same-AI reclaims are allowed (extends/updates the existing claim).
     pub fn claim_file(&mut self, path: &str, duration_secs: u32, working_on: &str) -> V2Result<u64> {
+        // Sync view to get current claim state before checking
+        self.sync()?;
+
+        // Pre-check: reject if another AI holds an active claim on this file
+        if let Some(existing) = self.view.check_claim(path) {
+            if existing.holder != self.ai_id {
+                return Err(V2Error::InvalidState(
+                    format!("already_claimed|{}|{}|{}", existing.holder, existing.working_on, path)
+                ));
+            }
+        }
+
         let event = Event::file_claim(&self.ai_id, path, duration_secs, working_on);
-        let timestamp = event.header.timestamp; // Use as claim ID
+        let timestamp = event.header.timestamp;
         self.outbox.write_event(&event)
             .map_err(|e| V2Error::Outbox(e.to_string()))?;
         Ok(timestamp)
     }
 
     /// Release a file claim
+    ///
+    /// Pre-checks ownership before emitting the release event.
+    /// Returns error if another AI holds the claim (not_owner).
+    /// Releasing an unclaimed file is a no-op (idempotent).
     pub fn release_file(&mut self, path: &str) -> V2Result<u64> {
+        // Sync view to get current claim state
+        self.sync()?;
+
+        // Pre-check: only the holder can release their own claim
+        if let Some(existing) = self.view.check_claim(path) {
+            if existing.holder != self.ai_id {
+                return Err(V2Error::InvalidState(
+                    format!("not_owner|{}|{}", existing.holder, path)
+                ));
+            }
+        }
+
         let event = Event::file_release(&self.ai_id, path);
         let timestamp = event.header.timestamp;
         self.outbox.write_event(&event)
@@ -416,11 +457,14 @@ impl V2Client {
     }
 
     /// Check if a specific file is claimed
+    ///
+    /// Uses ViewEngine's check_claim which handles path canonicalization
+    /// internally, ensuring consistent matching regardless of input path form.
     pub fn check_claim(&mut self, path: &str) -> V2Result<Option<(String, u64, u32, String)>> {
-        let claims = self.get_claims()?;
-        Ok(claims.into_iter()
-            .find(|(p, _, _, _, _)| p == path)
-            .map(|(_, ai, ts, duration, working_on)| (ai, ts, duration, working_on)))
+        self.sync()?;
+        Ok(self.view.check_claim(path).map(|c| {
+            (c.holder.clone(), c.claimed_at, c.duration_seconds, c.working_on.clone())
+        }))
     }
 
     // ========== TASKS ==========
@@ -619,6 +663,16 @@ impl V2Client {
         // Sync view to get current mute state
         self.sync()?;
 
+        if let Ok(room_id_u64) = room_id.parse::<u64>() {
+            if let Some(room) = self.view.get_room(room_id_u64) {
+                if room.is_closed {
+                    return Err(V2Error::InvalidState(
+                        format!("room {} is concluded — cannot send messages", room_id),
+                    ));
+                }
+            }
+        }
+
         // Filter out muted participants before writing the event
         let filtered = if let Ok(room_id_u64) = room_id.parse::<u64>() {
             if let Some(room) = self.view.get_room(room_id_u64) {
@@ -726,22 +780,36 @@ impl V2Client {
 
     // ========== QUERY METHODS ==========
 
-    /// Get all current presences (latest presence per AI) from ViewEngine cache (O(k) instead of O(n))
-    /// Returns Vec of (ai_id, status, current_task)
-    /// Filters to only include AIs with recent event log activity (last 10 minutes)
+    /// Get all online presences — OS mutex detection, no polling, no TTL.
+    /// Scans registered outbox AIs so newly-restarted AIs appear even before
+    /// they write a V2 event.
     pub fn get_presences(&mut self) -> V2Result<Vec<(String, String, String)>> {
         self.sync()?;
 
-        // 3 minutes in microseconds - if no tool activity for 3 min, AI is "offline"
-        // (API connections timeout at 3 min, so this matches that boundary)
-        const ONLINE_THRESHOLD_MICROS: u64 = 3 * 60 * 1_000_000;
-
-        // Use ViewEngine cache for O(k) access
-        let cached = self.view.get_online_presences(ONLINE_THRESHOLD_MICROS);
-
-        Ok(cached.into_iter()
+        let all = self.view.get_all_presences();
+        let mut result: Vec<(String, String, String)> = all.values()
+            .filter(|p| is_ai_online(&p.ai_id))
             .map(|p| (p.ai_id.clone(), p.status.clone(), p.current_task.clone()))
-            .collect())
+            .collect();
+
+        let outbox_dir = self.base_dir.join("shared").join("outbox");
+        if let Ok(entries) = std::fs::read_dir(&outbox_dir) {
+            for entry in entries.flatten() {
+                if entry.path().extension().map_or(false, |e| e == "outbox") {
+                    if let Some(stem) = entry.path().file_stem() {
+                        let ai_id = stem.to_string_lossy().trim().to_string();
+                        if !ai_id.is_empty()
+                            && !result.iter().any(|(id, _, _)| id == &ai_id)
+                            && is_ai_online(&ai_id)
+                        {
+                            result.push((ai_id, "active".to_string(), String::new()));
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(result)
     }
 
     /// Get all dialogues (active and ended) from ViewEngine cache (O(k) instead of O(n))

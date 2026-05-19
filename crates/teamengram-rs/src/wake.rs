@@ -4,13 +4,13 @@
 //! Each platform uses its optimal primitive:
 //!
 //! - Windows: Named Events (CreateEventW / WaitForSingleObject)
-//! - Linux: eventfd (lightweight kernel event notification)
-//! - macOS: kqueue (BSD event queue)
+//! - Linux/macOS: POSIX named semaphores
 //!
 //! Latency: ~500ns-1us wake time, zero CPU usage while waiting.
 //!
-//! CROSS-PROCESS FIX (v18): Windows now uses shared file for metadata
-//! since AtomicU8 is process-local and does not cross process boundaries.
+//! Cross-process wake is a pure signal. Waiters query the event log/view after
+//! waking to learn what changed; the in-process reason field is only reliable
+//! when the same process both signals and waits.
 
 use std::time::Duration;
 
@@ -275,198 +275,188 @@ pub mod windows {
 }
 
 // ============================================================================
-// LINUX IMPLEMENTATION - eventfd
+// UNIX IMPLEMENTATION - POSIX named semaphores
 // ============================================================================
 
-#[cfg(target_os = "linux")]
-pub mod linux {
+#[cfg(not(target_os = "windows"))]
+pub mod unix {
     use super::*;
-    use std::sync::atomic::{AtomicU8, Ordering};
+    use std::ffi::CString;
+    use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
-    // eventfd flags
-    const EFD_SEMAPHORE: i32 = 1;
+    static ANON_COUNTER: AtomicU64 = AtomicU64::new(1);
 
-    #[link(name = "c")]
-    extern "C" {
-        fn eventfd(initval: u32, flags: i32) -> i32;
-        fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
-        fn write(fd: i32, buf: *const u8, count: usize) -> isize;
-        fn close(fd: i32) -> i32;
-        fn poll(fds: *mut PollFd, nfds: u64, timeout: i32) -> i32;
-    }
-
-    #[repr(C)]
-    struct PollFd {
-        fd: i32,
-        events: i16,
-        revents: i16,
-    }
-
-    const POLLIN: i16 = 0x0001;
-
-    /// Linux eventfd implementation
-    pub struct LinuxWakeEvent {
-        fd: i32,
+    /// Unix wake event using POSIX named semaphores.
+    ///
+    /// The previous Linux/macOS implementations used process-local primitives
+    /// for `open(ai_id)`, so a daemon could "signal" an AI without touching the
+    /// semaphore the standby process was waiting on. This type makes the AI ID
+    /// part of the OS object name so separate processes use the same wake event.
+    pub struct UnixWakeEvent {
+        sem: *mut libc::sem_t,
+        name: CString,
+        unlink_on_drop: bool,
         reason: AtomicU8,
     }
 
-    unsafe impl Send for LinuxWakeEvent {}
-    unsafe impl Sync for LinuxWakeEvent {}
+    unsafe impl Send for UnixWakeEvent {}
+    unsafe impl Sync for UnixWakeEvent {}
 
-    impl LinuxWakeEvent {
-        /// Create a new eventfd-based wake event
+    impl UnixWakeEvent {
+        /// Create a unique same-process/cross-thread wake event for tests.
         pub fn new() -> std::io::Result<Self> {
-            let fd = unsafe { eventfd(0, EFD_SEMAPHORE) };
-            if fd < 0 {
+            let n = ANON_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let name = CString::new(format!("/teamengram_wake_anon_{}_{}", std::process::id(), n))
+                .expect("generated semaphore name contains no null bytes");
+            Self::open_named(name, true)
+        }
+
+        /// Create or open the stable wake event for an AI.
+        pub fn open(ai_id: &str) -> std::io::Result<Self> {
+            if ai_id.trim().is_empty() || ai_id == "unknown" {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "AI wake event requires a concrete AI ID",
+                ));
+            }
+            Self::open_named(Self::named_ai_sem(ai_id)?, false)
+        }
+
+        fn open_named(name: CString, unlink_on_drop: bool) -> std::io::Result<Self> {
+            if unlink_on_drop {
+                unsafe {
+                    libc::sem_unlink(name.as_ptr());
+                }
+            }
+
+            let sem = unsafe {
+                libc::sem_open(name.as_ptr(), libc::O_CREAT, 0o600, 0u32)
+            };
+            if sem == libc::SEM_FAILED {
                 return Err(std::io::Error::last_os_error());
             }
 
             Ok(Self {
-                fd,
+                sem,
+                name,
+                unlink_on_drop,
                 reason: AtomicU8::new(0),
             })
         }
 
-        /// Open named wake event (uses file in /dev/shm for cross-process)
-        pub fn open(ai_id: &str) -> std::io::Result<Self> {
-            // For cross-process on Linux, we would use a file in /dev/shm
-            // or a named semaphore. For now, use simple eventfd.
-            // TODO: Implement proper cross-process with shm
-            Self::new()
+        fn named_ai_sem(ai_id: &str) -> std::io::Result<CString> {
+            let mut hash: u64 = 0xcbf29ce484222325u64;
+            let mut clean = String::new();
+            for byte in ai_id.bytes() {
+                hash ^= byte as u64;
+                hash = hash.wrapping_mul(0x00000100000001b3u64);
+
+                let ch = byte as char;
+                if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                    if clean.len() < 48 {
+                        clean.push(ch);
+                    }
+                } else if clean.len() < 48 {
+                    clean.push('_');
+                }
+            }
+            if clean.is_empty() {
+                clean.push_str("invalid");
+            }
+
+            CString::new(format!("/teamengram_wake_{}_{}", clean, hash))
+                .map_err(|_| std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "AI ID contains a null byte",
+                ))
+        }
+
+        fn absolute_timeout(timeout: Duration) -> libc::timespec {
+            let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
+            unsafe { libc::clock_gettime(libc::CLOCK_REALTIME, &mut ts) };
+            ts.tv_sec += timeout.as_secs() as libc::time_t;
+            ts.tv_nsec += timeout.subsec_nanos() as libc::c_long;
+            while ts.tv_nsec >= 1_000_000_000 {
+                ts.tv_sec += 1;
+                ts.tv_nsec -= 1_000_000_000;
+            }
+            ts
         }
     }
 
-    impl Drop for LinuxWakeEvent {
+    impl Drop for UnixWakeEvent {
         fn drop(&mut self) {
             unsafe {
-                close(self.fd);
-            }
-        }
-    }
-
-    impl WakeEvent for LinuxWakeEvent {
-        fn wait(&self) -> WakeResult {
-            let mut buf = [0u8; 8];
-            unsafe {
-                read(self.fd, buf.as_mut_ptr(), 8);
-            }
-            let reason = WakeReason::from(self.reason.swap(0, Ordering::AcqRel));
-            WakeResult::new(reason, None, None)
-        }
-
-        fn wait_timeout(&self, timeout: Duration) -> Option<WakeResult> {
-            let ms = timeout.as_millis() as i32;
-            let mut pfd = PollFd {
-                fd: self.fd,
-                events: POLLIN,
-                revents: 0,
-            };
-
-            let result = unsafe { poll(&mut pfd, 1, ms) };
-
-            if result > 0 && (pfd.revents & POLLIN) != 0 {
-                let mut buf = [0u8; 8];
-                unsafe {
-                    read(self.fd, buf.as_mut_ptr(), 8);
+                libc::sem_close(self.sem);
+                if self.unlink_on_drop {
+                    libc::sem_unlink(self.name.as_ptr());
                 }
-                let reason = WakeReason::from(self.reason.swap(0, Ordering::AcqRel));
-                Some(WakeResult::new(reason, None, None))
-            } else {
-                None
             }
         }
-
-        fn signal(&self, reason: WakeReason, _from_ai: &str, _content: &str) {
-            self.reason.store(reason as u8, Ordering::Release);
-            let val: u64 = 1;
-            unsafe {
-                write(self.fd, &val as *const u64 as *const u8, 8);
-            }
-        }
-
-        fn try_recv(&self) -> Option<WakeResult> {
-            self.wait_timeout(Duration::from_millis(0))
-        }
     }
 
-    pub type PlatformWakeEvent = LinuxWakeEvent;
-}
-
-// ============================================================================
-// MACOS IMPLEMENTATION - kqueue
-// ============================================================================
-
-#[cfg(target_os = "macos")]
-pub mod macos {
-    use super::*;
-    use std::sync::atomic::{AtomicU8, Ordering};
-    use std::sync::{Condvar, Mutex};
-
-    // For macOS, we use a condvar-based approach since kqueue requires
-    // file descriptors. For pure signaling, condvar is simpler and efficient.
-    // TODO: Could use dispatch_semaphore for even lower latency.
-
-    /// macOS wake event using condition variable
-    pub struct MacOsWakeEvent {
-        mutex: Mutex<bool>,
-        condvar: Condvar,
-        reason: AtomicU8,
-    }
-
-    impl MacOsWakeEvent {
-        pub fn new() -> std::io::Result<Self> {
-            Ok(Self {
-                mutex: Mutex::new(false),
-                condvar: Condvar::new(),
-                reason: AtomicU8::new(0),
-            })
-        }
-
-        pub fn open(_ai_id: &str) -> std::io::Result<Self> {
-            // For cross-process, would need dispatch_semaphore or mach ports
-            // TODO: Implement proper cross-process
-            Self::new()
-        }
-    }
-
-    impl WakeEvent for MacOsWakeEvent {
+    impl WakeEvent for UnixWakeEvent {
         fn wait(&self) -> WakeResult {
-            let mut signaled = self.mutex.lock().unwrap();
-            while !*signaled {
-                signaled = self.condvar.wait(signaled).unwrap();
+            loop {
+                let result = unsafe { libc::sem_wait(self.sem) };
+                if result == 0 {
+                    let reason = WakeReason::from(self.reason.swap(0, Ordering::AcqRel));
+                    return WakeResult::new(reason, None, None);
+                }
+
+                let err = std::io::Error::last_os_error();
+                if err.raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                panic!("wake wait failed for {:?}: {}", self.name, err);
             }
-            *signaled = false;
-            let reason = WakeReason::from(self.reason.swap(0, Ordering::AcqRel));
-            WakeResult::new(reason, None, None)
         }
 
         fn wait_timeout(&self, timeout: Duration) -> Option<WakeResult> {
-            let mut signaled = self.mutex.lock().unwrap();
-            let result = self.condvar.wait_timeout(signaled, timeout).unwrap();
-            signaled = result.0;
+            let ts = Self::absolute_timeout(timeout);
+            loop {
+                let result = unsafe { libc::sem_timedwait(self.sem, &ts) };
+                if result == 0 {
+                    let reason = WakeReason::from(self.reason.swap(0, Ordering::AcqRel));
+                    return Some(WakeResult::new(reason, None, None));
+                }
 
-            if *signaled {
-                *signaled = false;
-                let reason = WakeReason::from(self.reason.swap(0, Ordering::AcqRel));
-                Some(WakeResult::new(reason, None, None))
-            } else {
-                None
+                let err = std::io::Error::last_os_error();
+                match err.raw_os_error() {
+                    Some(libc::ETIMEDOUT) => return None,
+                    Some(libc::EINTR) => continue,
+                    _ => panic!("wake timed wait failed for {:?}: {}", self.name, err),
+                }
             }
         }
 
         fn signal(&self, reason: WakeReason, _from_ai: &str, _content: &str) {
             self.reason.store(reason as u8, Ordering::Release);
-            let mut signaled = self.mutex.lock().unwrap();
-            *signaled = true;
-            self.condvar.notify_one();
+            let result = unsafe { libc::sem_post(self.sem) };
+            if result != 0 {
+                panic!("wake signal failed for {:?}: {}", self.name, std::io::Error::last_os_error());
+            }
         }
 
         fn try_recv(&self) -> Option<WakeResult> {
-            self.wait_timeout(Duration::from_millis(0))
+            loop {
+                let result = unsafe { libc::sem_trywait(self.sem) };
+                if result == 0 {
+                    let reason = WakeReason::from(self.reason.swap(0, Ordering::AcqRel));
+                    return Some(WakeResult::new(reason, None, None));
+                }
+
+                let err = std::io::Error::last_os_error();
+                match err.raw_os_error() {
+                    Some(libc::EAGAIN) => return None,
+                    Some(libc::EINTR) => continue,
+                    _ => panic!("wake try_recv failed for {:?}: {}", self.name, err),
+                }
+            }
         }
     }
 
-    pub type PlatformWakeEvent = MacOsWakeEvent;
+    pub type PlatformWakeEvent = UnixWakeEvent;
 }
 
 // ============================================================================
@@ -476,11 +466,8 @@ pub mod macos {
 #[cfg(target_os = "windows")]
 pub use windows::PlatformWakeEvent;
 
-#[cfg(target_os = "linux")]
-pub use linux::PlatformWakeEvent;
-
-#[cfg(target_os = "macos")]
-pub use macos::PlatformWakeEvent;
+#[cfg(not(target_os = "windows"))]
+pub use unix::PlatformWakeEvent;
 
 // ============================================================================
 // CROSS-PROCESS WAKE COORDINATOR

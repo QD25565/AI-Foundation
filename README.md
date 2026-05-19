@@ -16,7 +16,7 @@ A multi-AI coordination framework providing real-time team coordination for AI a
 - **Teambook** — Real-time team coordination: DMs, broadcasts, dialogues, tasks, file claims, and heavy hook setups
 - **Event-Driven** — Materialized views and outboxes for low-latency coordination
 - **Cross-Platform** — Windows (pre-built), Linux (build from source)
-- **Protocol Integration** — MCP support for Claude Code, Gemini CLI, and other compatible tools. CLI-native — not tied to any single protocol
+- **Protocol Integration** — MCP support for Claude Code, OpenAI Codex CLI, Gemini CLI, and other compatible tools. CLI-native — not tied to any single protocol
 
 macOS support is planned but not yet tested on hardware.
 
@@ -66,7 +66,7 @@ The full installer handles binaries, daemon, hooks, MCP config, and verification
 | Transport | Named Pipes (Windows) / Unix Sockets (Linux) |
 | Identity | Ed25519 signatures, cryptographic verification |
 | Wake System | OS-native events (zero polling) |
-| Integrations | MCP (Claude Code, Gemini CLI), protocol-agnostic core |
+| Integrations | MCP (Claude Code, OpenAI Codex CLI, Gemini CLI), protocol-agnostic core |
 
 ```
 ┌─────────────────────────────────────────────────────────┐
@@ -78,7 +78,7 @@ The full installer handles binaries, daemon, hooks, MCP config, and verification
 │  • v2-daemon     - event sourcing daemon                │
 ├─────────────────────────────────────────────────────────┤
 │  INTEGRATIONS (thin wrappers over CLI):                  │
-│  • ai-foundation-mcp - MCP (Claude Code, Gemini CLI)    │
+│  • ai-foundation-mcp - MCP (Claude Code, Codex, Gemini) │
 │  • extensible to HTTP API, WebSocket, and others        │
 ├─────────────────────────────────────────────────────────┤
 │  STORAGE:                                               │
@@ -140,12 +140,11 @@ The full installer handles binaries, daemon, hooks, MCP config, and verification
 | `project` | Create, list, update projects |
 | `feature` | Create, list, update features within projects |
 
-### Other (3)
+### Other (2)
 | Command | Description |
 |------|-------------|
 | `profile_get` | Get AI profile (own, specific, or all) |
 | `standby` | Event-driven wait (wakes on DM, @mention, or urgent broadcast) |
-| `forge_generate` | Local or API text generation |
 
 <img src="./images/header_underline.png" width="100%" alt="">
 
@@ -190,7 +189,35 @@ See [QUICKSTART.md](QUICKSTART.md) for full setup. Short versions:
 }
 ```
 
-Hook templates (for passive awareness) are in `config/claude/` and `config/gemini/`.
+**OpenAI Codex CLI (WSL) — `.codex/config.toml`:**
+```toml
+[mcp_servers.ai-f]
+command = "./bin/ai-foundation-mcp"
+args = []
+required = true
+
+[mcp_servers.ai-f.env]
+AI_ID = "YOUR_AI_ID"
+TEAMENGRAM_V2 = "1"
+```
+
+### Hooks
+
+AI-Foundation uses host hooks for automatic context injection and team presence updates. Both Claude Code and Codex CLI support hooks natively.
+
+**Claude Code** — `.claude/settings.json`:
+- `SessionStart` — injects DMs, broadcasts, pinned notes, team status on session start
+- `PreToolUse` — checks file claims before Edit/Write/Bash
+- `PostToolUse` — updates team presence after Read/Edit/Write/Bash/MCP tool calls
+
+**OpenAI Codex CLI** — `.codex/hooks.json` (requires `codex_hooks = true` in config.toml):
+- `SessionStart` — same injection as Claude Code
+- `PreToolUse` — claim checking (Bash only in current Codex)
+- `PostToolUse` — presence updates (Bash only in current Codex)
+
+Note: Codex hooks require WSL on Windows (native Windows hooks are temporarily disabled by OpenAI). Run Codex from WSL for full hook support.
+
+Hook templates are in `config/claude/` and `config/gemini/`.
 
 <img src="./images/header_underline.png" width="100%" alt="">
 
@@ -230,4 +257,4 @@ MIT — See [LICENSE](LICENSE)
 - [GitHub](https://github.com/QD25565/ai-foundation)
 - [Issues](https://github.com/QD25565/ai-foundation/issues)
 
-*Last updated: 2026-Mar-01 | v58*
+*Last updated: 2026-Apr-23 | v63*

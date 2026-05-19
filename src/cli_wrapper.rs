@@ -12,6 +12,81 @@
 use std::path::PathBuf;
 use std::process::Stdio;
 use tokio::process::Command;
+use tokio::sync::OnceCell;
+
+/// Process-lifetime cache for the resolved AI ID.
+///
+/// Resolution is expensive on the cold path (one subprocess call to `teambook whoami`),
+/// but it only runs once per MCP server process — every tool call after the first
+/// reads the cached value.
+static AI_ID_CACHE: OnceCell<Result<String, String>> = OnceCell::const_new();
+
+/// Resolve the AI ID for CLI subprocess calls.
+///
+/// Resolution order:
+/// 1. `AI_ID` environment variable
+/// 2. `AGENT_ID` environment variable
+/// 3. `teambook whoami` — reads the identity from teambook's own store
+///    (works regardless of how the MCP server was launched: native Windows,
+///    WSL-to-Windows, Linux, etc., as long as teambook is set up).
+/// 4. Hard error. Running subprocess tools as `unknown` corrupts authorship and
+///    hides launch/configuration defects.
+///
+/// Cached for the lifetime of the MCP server process. First tool call triggers
+/// the subprocess fallback (if env is missing); subsequent calls are free.
+async fn resolve_ai_id() -> Result<String, String> {
+    AI_ID_CACHE
+        .get_or_init(|| async {
+            if let Ok(id) = std::env::var("AI_ID") {
+                let id = id.trim().to_string();
+                if !id.is_empty() && id != "unknown" {
+                    return Ok(id);
+                }
+            }
+            if let Ok(id) = std::env::var("AGENT_ID") {
+                let id = id.trim().to_string();
+                if !id.is_empty() && id != "unknown" {
+                    return Ok(id);
+                }
+            }
+            if let Some(id) = whoami_from_teambook().await {
+                return Ok(id);
+            }
+            Err("AI identity unavailable: AI_ID/AGENT_ID are unset or invalid, and `teambook whoami` did not return a concrete AI id; refusing to run CLI tools as `unknown`".to_string())
+        })
+        .await
+        .clone()
+}
+
+/// Call `teambook whoami` and parse the `AI:<id>` line from its identity banner.
+///
+/// Used only as an identity discovery path when the environment is missing.
+/// If this also fails, callers fail loudly instead of inventing `unknown`.
+async fn whoami_from_teambook() -> Option<String> {
+    let bin_dir = get_bin_dir();
+    let exe_path = bin_dir.join(exe_name("teambook"));
+    let output = Command::new(&exe_path)
+        .arg("whoami")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        if let Some(id) = line.trim().strip_prefix("AI:") {
+            let id = id.trim();
+            if !id.is_empty() && id != "unknown" {
+                return Some(id.to_string());
+            }
+        }
+    }
+    None
+}
 
 /// Get the bin directory path
 /// Priority: BIN_PATH env var > working directory ./bin > home/.ai-foundation/bin
@@ -60,17 +135,6 @@ pub async fn teambook(args: &[&str]) -> String {
     run_cli(&exe_name("teambook"), args).await
 }
 
-/// Run a teambook CLI command with V1 backend (for project/feature operations)
-///
-/// V2 event sourcing doesn't have project/feature support yet,
-/// so we force V1 mode for these operations.
-pub async fn teambook_v1(args: &[&str]) -> String {
-    // Prepend --v2 false to force V1 mode
-    let mut v1_args = vec!["--v2", "false"];
-    v1_args.extend(args.iter().copied());
-    run_cli(&exe_name("teambook"), &v1_args).await
-}
-
 /// Run a notebook CLI command and return output
 ///
 /// # Arguments
@@ -88,15 +152,28 @@ pub async fn profile(args: &[&str]) -> String {
     run_cli(&exe_name("profile-cli"), args).await
 }
 
-/// Run a forge CLI command and return output
-/// Uses forge-local (with llama.cpp) if available, falls back to forge (API-only)
-pub async fn forge(args: &[&str]) -> String {
+/// Register presence via the V1 daemon RPC path (creates OS mutex).
+///
+/// V2 outbox writes (TEAMENGRAM_V2=1) update presence events but don't create
+/// the OS-level named mutex that is_ai_online() checks. The V1 daemon path
+/// does: the daemon acquires a PresenceMutex for each AI that connects and
+/// holds it for its lifetime. This one-time call at MCP server startup ensures
+/// the daemon knows we're alive.
+///
+/// Deliberately does NOT set TEAMENGRAM_V2 on the subprocess — we need the V1
+/// code path, not the V2 outbox writer.
+pub async fn register_presence_v1(ai_id: &str) {
     let bin_dir = get_bin_dir();
-    let local_path = bin_dir.join(exe_name("forge-local"));
-    if local_path.exists() {
-        return run_cli(&exe_name("forge-local"), args).await;
-    }
-    run_cli(&exe_name("forge"), args).await
+    let exe_path = bin_dir.join(exe_name("teambook"));
+    let _ = Command::new(&exe_path)
+        .args(["update-presence", "active", "MCP server online", "--v2", "false"])
+        .env("AI_ID", ai_id)
+        .current_dir(std::env::temp_dir())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await;
 }
 
 /// Run a CLI command and return its output
@@ -112,10 +189,10 @@ async fn run_cli(exe: &str, args: &[&str]) -> String {
     let bin_dir = get_bin_dir();
     let exe_path = bin_dir.join(exe);
 
-    // Get AI_ID for the CLI
-    let ai_id = std::env::var("AI_ID")
-        .or_else(|_| std::env::var("AGENT_ID"))
-        .unwrap_or_else(|_| "unknown".to_string());
+    let ai_id = match resolve_ai_id().await {
+        Ok(id) => id,
+        Err(e) => return format!("Error: {}", e),
+    };
 
     // V2 event sourcing is the default - it gives us event-driven wake
     // V2 is now the default - gives us event-driven wake
@@ -247,68 +324,4 @@ pub async fn teambook_as(args: &[&str], caller_id: &str) -> String {
 /// Run a notebook CLI command as a specific user
 pub async fn notebook_as(args: &[&str], caller_id: &str) -> String {
     run_cli_as(&exe_name("notebook-cli"), args, caller_id).await
-}
-
-// ============== Federation-Aware Send (for MCP tools) ==============
-//
-// Calls the local HTTP server's /api/federation/send endpoint to get
-// automatic cross-Teambook routing. Falls back gracefully if the HTTP
-// server isn't running.
-
-/// Send a DM through the federation gateway (HTTP API).
-///
-/// Resolves whether the target AI is local or remote and routes accordingly.
-/// Returns empty string if the HTTP API is unavailable (caller should fall back to CLI).
-pub async fn federation_send_dm(from_ai: &str, to_ai: &str, content: &str) -> String {
-    let port = std::env::var("AI_FOUNDATION_HTTP_PORT")
-        .ok()
-        .and_then(|p| p.parse::<u16>().ok())
-        .unwrap_or(8080);
-
-    let url = format!("http://127.0.0.1:{}/api/federation/send", port);
-    let body = serde_json::json!({
-        "from_ai": from_ai,
-        "to_ai": to_ai,
-        "content": content,
-        "msg_type": "dm",
-    });
-
-    let result = Command::new("curl")
-        .args([
-            "-s",
-            "-f",
-            "-X",
-            "POST",
-            "-H",
-            "Content-Type: application/json",
-            "-d",
-            &body.to_string(),
-            "--connect-timeout",
-            "2",
-            "--max-time",
-            "10",
-            &url,
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await;
-
-    match result {
-        Ok(output) if output.status.success() => {
-            let resp = String::from_utf8_lossy(&output.stdout);
-            // Extract the "data" field from the JSON response
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&resp) {
-                if let Some(data) = json.get("data").and_then(|d| d.as_str()) {
-                    return data.to_string();
-                }
-            }
-            resp.trim().to_string()
-        }
-        _ => {
-            // HTTP API not available — return empty to signal fallback
-            String::new()
-        }
-    }
 }

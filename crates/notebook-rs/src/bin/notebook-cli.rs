@@ -867,11 +867,22 @@ fn main() -> Result<()> {
         std::fs::create_dir_all(parent)?;
     }
 
-    let mut db = Engram::open(&db_path)?;
+    // Bind AI_ID into the process env BEFORE opening. Engram's cipher is keyed on the
+    // env var at open-time (storage.rs open_existing), so an ad-hoc CLI invocation that
+    // inherited no AI_ID (e.g. from a fresh shell) would otherwise open under "default"
+    // and fail to decrypt rows written under the real identity. get_ai_id() resolves from
+    // {cwd}/.claude/settings.json first, then env — covers both hook and ad-hoc cases.
     let ai_id = get_ai_id();
+    std::env::set_var("AI_ID", &ai_id);
+
+    let mut db = Engram::open(&db_path)?;
 
     match cli.command {
         Commands::Remember { content, tags, pin, image, capture, screenshot, snap } => {
+            if content.trim().is_empty() {
+                eprintln!("error: content is empty — refusing to store a blank note");
+                std::process::exit(1);
+            }
             // Consolidate capture aliases
             let capture_window = capture.or(screenshot).or(snap);
             let mut tags_vec = parse_tags(tags);
